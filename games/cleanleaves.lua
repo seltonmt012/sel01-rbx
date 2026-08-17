@@ -103,7 +103,8 @@ local CONFIG = {
     lobbyClassSpin     = false,     -- 40 diamonds, 40% chance of nothing
     lobbyClassReserve  = 150,       -- keep this much for upgrades before spinning
     lobbyStart         = true,      -- walk onto a pad and confirm a run
-    lobbyDifficulty    = "Easy",
+    lobbyDifficulty    = "Easy",    -- Easy 90m/1x … Impossible 20m/2.5x gems
+    lobbyMap           = "House",   -- House | Mansion (Grocery is COMING SOON)
 
     autoVent      = false,   -- unlock vents (1 cash each), not needed to farm
     autoUpgrade   = false,   -- tool upgrades: useless while we batch-collect
@@ -1170,12 +1171,60 @@ local function setDifficulty(target)
     local ng = newGameGui()
     if not ng then return false end
     local picker = ng.Main.DifficultySection.DifficultyPicker
+    -- The picker wraps, so walking right always reaches every entry. Four
+    -- difficulties plus slack; it stops as soon as the label matches.
     for _ = 1, 8 do
         local shown = tostring(picker.Difficulty.Text):upper()
         if shown == tostring(target):upper() then return true end
         if not press(picker.Right) then return false end
         task.wait(0.25)
     end
+    LOBBY.note = "difficulty " .. tostring(target) .. " not reachable"
+    return false
+end
+
+-- The map cards live in Gui.NewGame.MapPanel.Maps as one ImageButton per map
+-- (House, Mansion, Grocery), each with a Lock and a Dim overlay for the ones
+-- that are not available. CardTemplate is the hidden blueprint and must be
+-- skipped or the picker "selects" a card that is not a map.
+local function mapCards()
+    local ng = newGameGui()
+    local panel = ng and ng:FindFirstChild("MapPanel")
+    local list = panel and panel:FindFirstChild("Maps")
+    if not list then return {} end
+    local out = {}
+    for _, card in ipairs(list:GetChildren()) do
+        if card:IsA("ImageButton") and card.Name ~= "CardTemplate" then
+            local lock = card:FindFirstChild("Lock")
+            local dim  = card:FindFirstChild("Dim")
+            local name = card:FindFirstChild("MapName")
+            out[#out + 1] = {
+                card    = card,
+                key     = card.Name,
+                label   = name and name.Text or card.Name,
+                locked  = (lock and lock.Visible) or (dim and dim.Visible) or false,
+                best    = card:FindFirstChild("BestTime") and card.BestTime.Text or "",
+            }
+        end
+    end
+    return out
+end
+
+local function selectMap(target)
+    if not target or target == "" then return true end
+    local want = tostring(target):lower()
+    for _, m in ipairs(mapCards()) do
+        if m.key:lower() == want or m.label:lower():find(want, 1, true) then
+            if m.locked then
+                LOBBY.note = "map " .. m.label .. " is locked"
+                return false
+            end
+            press(m.card)
+            task.wait(0.35)
+            return true
+        end
+    end
+    LOBBY.note = "map " .. tostring(target) .. " not in the list"
     return false
 end
 
@@ -1259,6 +1308,9 @@ local function startRun()
         return false
     end
 
+    -- Map first: switching it resets the difficulty label on some cards, so
+    -- picking the map afterwards would undo the difficulty that was just set.
+    pcall(function() selectMap(CONFIG.lobbyMap) end)
     pcall(function() setDifficulty(CONFIG.lobbyDifficulty) end)
     task.wait(0.3)
     press(ng.Main.Footer.Confirm)
@@ -1763,6 +1815,8 @@ lobbyCard:Toggle("Spin for a class", CONFIG.lobbyClassSpin, function(v) CONFIG.l
     "40 diamonds and Starter (no bonus) is 40% of the wheel", UI.theme.bad)
 lobbyCard:Toggle("Start a run", CONFIG.lobbyStart, function(v) CONFIG.lobbyStart = v end,
     "stand on a team pad and confirm", UI.theme.good)
+lobbyCard:Dropdown("Map", { "House", "Mansion" }, CONFIG.lobbyMap,
+    function(v) CONFIG.lobbyMap = v end)
 lobbyCard:Dropdown("Difficulty", { "Easy", "Medium", "Hard", "Impossible" }, CONFIG.lobbyDifficulty,
     function(v) CONFIG.lobbyDifficulty = v end)
 lobbyCard:Button("Start now", function() task.spawn(startRun) end, UI.theme.good)
@@ -1855,6 +1909,7 @@ _G.__LEAVES_DBG = {
     finishRun = finishRun, everyZoneDone = everyZoneDone, skipCutscene = skipCutscene,
     IN_RUN = IN_RUN, LOBBY = LOBBY, myData = myData, lobbyTick = lobbyTick,
     startRun = startRun, setDifficulty = setDifficulty, press = press,
+    selectMap = selectMap, mapCards = mapCards,
     buyLobbyUpgrades = buyLobbyUpgrades, claimDaily = claimDaily,
     claimGroup = claimGroup, spinClass = spinClass, upgradeCost = upgradeCost,
     nextBagPrice = nextBagPrice, zoneRows = zoneRows, fieldLeaves = fieldLeaves,
