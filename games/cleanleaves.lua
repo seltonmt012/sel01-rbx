@@ -1630,8 +1630,19 @@ local function finishRun()
     end
 
     if not (vent and vent:IsA("BasePart")) then
-        note("run done but no exit trigger found on this map")
-        finishRetry = os.clock() + 30
+        -- Not a failure. Maps whose MapConfig says `finalZone = ALL` end
+        -- themselves the moment the last zone completes: on the Mansion the
+        -- server moved the character to the taxi area with WalkSpeed 0 and ran
+        -- the ending with **zero** outgoing calls, booking MapClears.Mansion = 1
+        -- and a 718.4s record without anyone pressing a thing. So say so once
+        -- and stop poking at it.
+        local cfg = MapCfg
+        if cfg and cfg.finalZone == "ALL" then
+            note("map clear - this one ends on its own")
+        else
+            note("run done but no exit trigger found on this map")
+        end
+        finishRetry = os.clock() + 60
         return
     end
     -- Short, because the approach side flips on every attempt: a long gate meant
