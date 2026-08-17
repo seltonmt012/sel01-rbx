@@ -1608,8 +1608,29 @@ local function finishRun()
     local map = Workspace:FindFirstChild("Map")
     local vent = (map and map:FindFirstChild("PlayerFalling"))
         or Workspace:FindFirstChild("VentPassage")
+
+    -- Not every map ends the same way. The House has PlayerFalling in a vent;
+    -- the Mansion has neither that nor VentPassage nor a BasementVent, and its
+    -- MapConfig says `finalZone = ALL`. So when the known names are missing,
+    -- look for the shape instead: an invisible, non-collidable part with a
+    -- TouchInterest that is not a leaf. On a cleared map there is very little
+    -- else that matches, and it is checked only once the run is finishable.
     if not (vent and vent:IsA("BasePart")) then
-        note("run done but neither PlayerFalling nor VentPassage is there")
+        local best
+        for _, v in ipairs(Workspace:GetDescendants()) do
+            if v:IsA("BasePart") and v.Transparency > 0.8 and not v.CanCollide
+                and v:FindFirstChildOfClass("TouchTransmitter")
+                and not v.Name:lower():find("leaf")
+                and not (v.Parent and v.Parent.Name:lower():find("leave")) then
+                best = v
+                break
+            end
+        end
+        vent = best
+    end
+
+    if not (vent and vent:IsA("BasePart")) then
+        note("run done but no exit trigger found on this map")
         finishRetry = os.clock() + 30
         return
     end
