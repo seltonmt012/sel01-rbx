@@ -1471,14 +1471,20 @@ end)
 -- while the clock kept ticking). The exit is Workspace.VentPassage, an
 -- invisible non-collidable Part with a TouchInterest sitting in the basement
 -- vent; entering it plays the end cutscene and the server books the clear.
+-- `Completed` is the flag to read, NOT GoalCollected >= GoalTotal. Every zone
+-- runs `WavesTotal` waves (2 on The House) and the goal pair counts the CURRENT
+-- wave only, so it resets to 0/total when the next one spawns -- watched live,
+-- the map total fell 11747 -> 11039 while no zone lost its completion. Reading
+-- the goals would fire the finisher as soon as every zone happened to be full on
+-- wave 1, long before the run can actually be ended.
 local function everyZoneDone()
-    local zones = zoneList()
     local counted = 0
-    for _, z in ipairs(zones) do
-        local total = tonumber(z.model and z.model:GetAttribute("GoalTotal")) or 0
+    for _, z in ipairs(zoneList()) do
+        local m = z.model
+        local total = tonumber(m and m:GetAttribute("GoalTotal")) or 0
         if total > 0 then
             counted += 1
-            if not zoneDone(z.name) then return false end
+            if m:GetAttribute("Completed") ~= true then return false end
         end
     end
     return counted > 0
