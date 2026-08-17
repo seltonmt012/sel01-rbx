@@ -1146,40 +1146,67 @@ local function startRun()
     local teams = Workspace:FindFirstChild("Teams")
     if not teams then return false end
 
-    -- You have to STAND INSIDE the square, and keep standing there. A CFrame
-    -- write alone does nothing, and neither does firing the four TouchInterests
-    -- on its walls -- the client watches the pad area every frame (that is what
-    -- ReplicatedStorage.PadBounds is for). Pinning the character on Heartbeat
-    -- for a few seconds is what actually opens GAME SETTINGS, and the panel
-    -- then confirms itself.
+    -- You have to WALK IN. A Square is not a floor pad at all: it is four
+    -- 14-stud Wall parts carrying TouchInterests, with no slab between them, so
+    -- there is nothing to stand on that fires anything. Landing in the middle by
+    -- CFrame touches no wall, and GAME SETTINGS then never opens -- which looked
+    -- exactly like "the script walks into the start area and nothing happens".
+    -- Crossing a wall is the trigger, so the character is placed outside and
+    -- glided through it.
     local pad = teams:FindFirstChild("Square1") or teams:GetChildren()[1]
     if not pad then return false end
 
-    -- the floor slab, not the pivot: the pivot of a walled model sits mid-air
-    local floor
+    local okBox, cf, size = pcall(function() return pad:GetBoundingBox() end)
+    if not okBox or not cf then return false end
+    local centre = cf.Position
+
+    -- Stand at head height inside the walls, not at the model's centre: the box
+    -- is 14 studs tall and its middle is mid-air.
+    local floorY = math.huge
+    local walls = {}
     for _, p in ipairs(pad:GetDescendants()) do
-        if p:IsA("BasePart") and p.Size.X > 8 and p.Size.Z > 8 and p.Size.Y < 2 then
-            floor = p
+        if p:IsA("BasePart") then
+            floorY = math.min(floorY, p.Position.Y - p.Size.Y / 2)
+            if p:FindFirstChildOfClass("TouchTransmitter") then walls[#walls + 1] = p end
         end
     end
-    local target
-    if floor then
-        target = floor.Position + Vector3.new(0, 4, 0)
-    else
-        local ok, p = pcall(function() return pad:GetPivot().Position end)
-        if not ok then return false end
-        target = p + Vector3.new(0, 4, 0)
+    if floorY == math.huge then floorY = centre.Y end
+    local target = Vector3.new(centre.X, floorY + 4, centre.Z)
+    local outside = target + Vector3.new(size.X / 2 + 8, 0, 0)
+
+    -- Cross the wall plane in steps rather than in one jump, so the Touched
+    -- actually fires; a single CFrame write from outside to inside skips over it.
+    warp(outside)
+    task.wait(0.25)
+    local hp = hrp()
+    for step = 1, 12 do
+        if not alive() then return false end
+        hp = hrp()
+        if not hp then return false end
+        hp.CFrame = CFrame.new(outside:Lerp(target, step / 12))
+        RunService.Heartbeat:Wait()
     end
 
-    warp(target)
+    -- Belt and braces: the walls are the things holding the TouchInterest, so
+    -- fire them too now that the character is genuinely inside them.
+    if firetouchinterest then
+        local cur = hrp()
+        if cur then
+            for _, w in ipairs(walls) do
+                pcall(firetouchinterest, cur, w, 0)
+                pcall(firetouchinterest, cur, w, 1)
+            end
+        end
+    end
+
     local hold = RunService.Heartbeat:Connect(function()
-        local hp = hrp()
-        if hp then hp.CFrame = CFrame.new(target) end
+        local cur = hrp()
+        if cur then cur.CFrame = CFrame.new(target) end
     end)
 
     local ng
     local t0 = os.clock()
-    while os.clock() - t0 < 6 do
+    while os.clock() - t0 < 8 do
         ng = newGameGui()
         if ng and ng.Visible then break end
         task.wait(0.2)
