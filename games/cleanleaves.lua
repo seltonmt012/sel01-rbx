@@ -93,6 +93,7 @@ local CONFIG = {
     -- Verified 2026-08-17: MapClears.House went nil -> 1, DifficultyCleared -> 1,
     -- MapRecords.House = 661.6s. Without this the run farms forever for nothing.
     autoFinish    = true,
+    autoSkip      = true,    -- press SKIP on the opening and ending cutscenes
 
     -- lobby side
     lobbyUpgrades      = true,      -- spend diamonds on the permanent upgrades
@@ -1463,6 +1464,36 @@ task.spawn(function()
 end)
 
 ----------------------------------------------------------------------------
+-- cutscenes
+----------------------------------------------------------------------------
+-- Every run opens with a cutscene and ends with one, and both carry a SKIP
+-- button. Pressing it is worth real time over a session that plays run after
+-- run. `Gui.SkipCutscene` is an ImageButton with one Activated connection, so
+-- firing that connection is the game's own handler rather than an invented call.
+--
+-- Its label is named `Price`, which is why the text is checked and not just the
+-- name: right now it reads "SKIP" and the skip is free, but the moment a number
+-- or an R$ shows up there this leaves it alone. No Robux, ever.
+local function skipCutscene()
+    if not CONFIG.autoSkip then return end
+    local gui = plr:FindFirstChild("PlayerGui")
+    local g = gui and gui:FindFirstChild("Gui")
+    local b = g and g:FindFirstChild("SkipCutscene")
+    if not (b and b.Visible and b.Active) then return end
+
+    local price = b:FindFirstChild("Price")
+    local text = (price and price.Text) or ""
+    if text:match("%d") or text:find("R%$") then
+        note("skip button shows a price (" .. text .. ") - left alone")
+        return
+    end
+
+    local ok, cons = pcall(function() return getconnections(b.Activated) end)
+    if not ok or not cons then return end
+    for _, c in ipairs(cons) do pcall(function() c:Fire() end) end
+end
+
+----------------------------------------------------------------------------
 -- finishing the run
 ----------------------------------------------------------------------------
 -- The part that was missing for the whole build. An empty map is not a cleared
@@ -1504,7 +1535,9 @@ local function finishRun()
         finishRetry = os.clock() + 30
         return
     end
-    finishRetry = os.clock() + 25
+    -- Short, because the approach side flips on every attempt: a long gate meant
+    -- a wrong first guess cost half a minute of standing around.
+    finishRetry = os.clock() + 6
 
     -- Anything still in the bag is paid on deposit and thrown away by the run
     -- ending, so sell before leaving rather than after.
@@ -1513,51 +1546,56 @@ local function finishRun()
     STATE.phase = "finish"
     note("every zone cleared - entering the vent")
 
-    -- This one has to be WALKED, and that is not a preference, it is the only
-    -- thing that works. Measured: warping through the part fired 18 Touched
-    -- events client side and the run did not end; the same crossing spread over
-    -- 4 seconds did not either; firing firetouchinterest on it did not; and
-    -- BasementVentClick:FireServer() from right next to the vent did not. Then
-    -- the spy was armed for a manual walk-through and it recorded **zero**
-    -- outgoing calls - so there is no remote to reproduce at all. The server
-    -- runs its own Touched on this part and simply does not believe a character
-    -- that arrived by CFrame. Humanoid:MoveTo is real movement, so it does.
+    -- The character has to MOVE through this part under physics. Everything
+    -- cheaper was measured and failed: warping through it fired 18 Touched
+    -- events client side and the run did not end, the same crossing stretched
+    -- over 4 seconds did not either, `firetouchinterest` on it did not, and
+    -- `BasementVentClick:FireServer()` from right beside it did not. The spy was
+    -- then armed for a manual walk-through and recorded **zero** outgoing calls,
+    -- so there is no remote to reproduce at all -- the server runs its own
+    -- Touched here and does not believe a character that arrived by CFrame.
+    --
+    -- Humanoid:MoveTo is no good either: the game pins WalkSpeed at 0 once the
+    -- map is clear, so the order is issued and the character does not move a
+    -- stud. Writing AssemblyLinearVelocity every frame sidesteps the Humanoid
+    -- while still being real replicated physics, and that is what works.
     local look = vent.CFrame.LookVector
-    local reach = vent.Size.Z / 2 + 6
-    local a = vent.Position + look * reach
-    local b = vent.Position - look * reach
+    local a = vent.Position + look * 8
+    local b = vent.Position - look * 8
     -- Which side is the walkable one is not knowable from the geometry, so the
     -- approach flips on every retry.
     if finishFlip then a, b = b, a end
     finishFlip = not finishFlip
 
-    local hum = char() and char():FindFirstChildOfClass("Humanoid")
-    if not hum then return end
-
-    -- Land on the approach side first and let the server catch up before a step
-    -- is taken; a walk that starts while the server still has us elsewhere is
-    -- the same rejected teleport in slow motion.
-    warp(a)
-    task.wait(CONFIG.settle)
-
     local hp = hrp()
-    if hp then hp.Anchored = false end
-    hum:MoveTo(b)
-    local arrived = false
-    local conn = hum.MoveToFinished:Connect(function(ok) arrived = ok end)
-    local t0 = os.clock()
-    while os.clock() - t0 < 8 do
-        if not alive() then break end
-        if arrived then break end
-        -- The vent drops you into the ending sequence, so falling out of the
-        -- floor is success here, not a bug.
+    if not hp then return end
+    hp.Anchored = false
+    warp(a)
+    -- Only a short settle: the push itself is continuous movement, which is what
+    -- the server wants to see, so there is nothing to wait for beyond the warp
+    -- landing. A full CONFIG.settle here just made the finish look stuck.
+    task.wait(0.35)
+
+    local dir = (b - a).Unit
+    local push = RunService.Heartbeat:Connect(function()
         local cur = hrp()
-        if cur and cur.Position.Y < vent.Position.Y - 25 then break end
-        hum:MoveTo(b)
-        task.wait(0.35)
+        if cur then
+            cur.AssemblyLinearVelocity =
+                Vector3.new(dir.X * 26, cur.AssemblyLinearVelocity.Y, dir.Z * 26)
+        end
+    end)
+
+    -- The vent drops you into the ending sequence, so falling out of the floor
+    -- is the success signal, not a bug.
+    local t0 = os.clock()
+    while os.clock() - t0 < 4 do
+        if not alive() then break end
+        local cur = hrp()
+        if not cur then break end
+        if cur.Position.Y < vent.Position.Y - 25 then break end
+        task.wait(0.1)
     end
-    conn:Disconnect()
-    task.wait(2.0)
+    push:Disconnect()
 end
 
 ----------------------------------------------------------------------------
@@ -1677,7 +1715,9 @@ spendCard:Toggle("Buy tool upgrades", CONFIG.autoUpgrade, function(v) CONFIG.aut
 spendCard:Toggle("Do the objectives", CONFIG.autoObjective, function(v) CONFIG.autoObjective = v end,
     "journal, hand upgrade, garage - the garage gates Rooftop", UI.theme.good)
 spendCard:Toggle("Finish the run", CONFIG.autoFinish, function(v) CONFIG.autoFinish = v end,
-    "all zones clear -> walk into the vent, that is what books the clear", UI.theme.good)
+    "all zones clear -> push through the vent, that is what books the clear", UI.theme.good)
+spendCard:Toggle("Skip cutscenes", CONFIG.autoSkip, function(v) CONFIG.autoSkip = v end,
+    "presses SKIP, and never when that button shows a price", UI.theme.good)
 spendCard:Button("Sell now", function() task.spawn(deposit) end)
 spendCard:Button("Finish now", function() task.spawn(finishRun) end, UI.theme.good)
 spendCard:Toggle("Anti-AFK", CONFIG.antiAfk, function(v) CONFIG.antiAfk = v end)
@@ -1783,7 +1823,7 @@ _G.__LEAVES_DBG = {
     buyBag = buyBag, buyRake = buyRake, buyVents = buyVents,
     buyUpgrades = buyUpgrades, cheapestUpgrade = cheapestUpgrade,
     objectives = objectives, questRows = questRows, questVal = questVal,
-    finishRun = finishRun, everyZoneDone = everyZoneDone,
+    finishRun = finishRun, everyZoneDone = everyZoneDone, skipCutscene = skipCutscene,
     IN_RUN = IN_RUN, LOBBY = LOBBY, myData = myData, lobbyTick = lobbyTick,
     startRun = startRun, setDifficulty = setDifficulty, press = press,
     buyLobbyUpgrades = buyLobbyUpgrades, claimDaily = claimDaily,
@@ -1794,6 +1834,16 @@ _G.__LEAVES_DBG = {
     cellState = cellState, markDead = markDead,
     saveAuto = saveAuto, loadAuto = loadAuto,
 }
+
+-- The skip button shows up in the lobby, during the opening cutscene and again
+-- at the end, so this watches on both sides rather than living in a loop that is
+-- gated on IN_RUN. It is cheap: two FindFirstChild calls and an early out.
+task.spawn(function()
+    while alive() do
+        if CONFIG.auto then pcall(skipCutscene) end
+        task.wait(0.4)
+    end
+end)
 
 -- AUTO is polled rather than only written from its toggle: it is also flipped
 -- from the bridge and from the lobby side, and every one of those has to survive
