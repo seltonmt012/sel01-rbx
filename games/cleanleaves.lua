@@ -1485,6 +1485,7 @@ local function everyZoneDone()
 end
 
 local finishRetry = 0
+local finishFlip = false
 
 local function finishRun()
     if not CONFIG.autoFinish or not IN_RUN then return end
@@ -1506,26 +1507,51 @@ local function finishRun()
     STATE.phase = "finish"
     note("every zone cleared - entering the vent")
 
-    local aim = vent.Position
-    warp(aim)
-    -- The part is CanCollide false, so the Touched event needs the root to
-    -- actually sit inside it for a moment; the same hold that every other
-    -- position-gated action in this game needs.
-    local hold = RunService.Heartbeat:Connect(function()
-        local hp = hrp()
-        if hp then hp.CFrame = CFrame.new(aim) end
-    end)
-    task.wait(1.0)
-    if firetouchinterest then
-        local hp = hrp()
-        if hp then
-            pcall(firetouchinterest, hp, vent, 0)
-            task.wait(0.2)
-            pcall(firetouchinterest, hp, vent, 1)
-        end
+    -- This one has to be WALKED, and that is not a preference, it is the only
+    -- thing that works. Measured: warping through the part fired 18 Touched
+    -- events client side and the run did not end; the same crossing spread over
+    -- 4 seconds did not either; firing firetouchinterest on it did not; and
+    -- BasementVentClick:FireServer() from right next to the vent did not. Then
+    -- the spy was armed for a manual walk-through and it recorded **zero**
+    -- outgoing calls - so there is no remote to reproduce at all. The server
+    -- runs its own Touched on this part and simply does not believe a character
+    -- that arrived by CFrame. Humanoid:MoveTo is real movement, so it does.
+    local look = vent.CFrame.LookVector
+    local reach = vent.Size.Z / 2 + 6
+    local a = vent.Position + look * reach
+    local b = vent.Position - look * reach
+    -- Which side is the walkable one is not knowable from the geometry, so the
+    -- approach flips on every retry.
+    if finishFlip then a, b = b, a end
+    finishFlip = not finishFlip
+
+    local hum = char() and char():FindFirstChildOfClass("Humanoid")
+    if not hum then return end
+
+    -- Land on the approach side first and let the server catch up before a step
+    -- is taken; a walk that starts while the server still has us elsewhere is
+    -- the same rejected teleport in slow motion.
+    warp(a)
+    task.wait(CONFIG.settle)
+
+    local hp = hrp()
+    if hp then hp.Anchored = false end
+    hum:MoveTo(b)
+    local arrived = false
+    local conn = hum.MoveToFinished:Connect(function(ok) arrived = ok end)
+    local t0 = os.clock()
+    while os.clock() - t0 < 8 do
+        if not alive() then break end
+        if arrived then break end
+        -- The vent drops you into the ending sequence, so falling out of the
+        -- floor is success here, not a bug.
+        local cur = hrp()
+        if cur and cur.Position.Y < vent.Position.Y - 25 then break end
+        hum:MoveTo(b)
+        task.wait(0.35)
     end
+    conn:Disconnect()
     task.wait(2.0)
-    hold:Disconnect()
 end
 
 ----------------------------------------------------------------------------
