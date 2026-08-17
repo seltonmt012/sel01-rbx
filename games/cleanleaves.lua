@@ -87,6 +87,12 @@ local CONFIG = {
     autoDeposit   = true,    -- empty the bag when it is full
     autoBag       = true,    -- buy bag capacity, the only spend that pays off
     autoObjective = true,    -- tick off the journal objectives (Quest1..17)
+    -- Clearing every zone does NOT end the run - the zones just respawn in new
+    -- waves and the timer keeps going. What ends it is walking into
+    -- Workspace.VentPassage, and only then does the server book the clear.
+    -- Verified 2026-08-17: MapClears.House went nil -> 1, DifficultyCleared -> 1,
+    -- MapRecords.House = 661.6s. Without this the run farms forever for nothing.
+    autoFinish    = true,
 
     -- lobby side
     lobbyUpgrades      = true,      -- spend diamonds on the permanent upgrades
@@ -1396,11 +1402,78 @@ task.spawn(function()
 end)
 
 ----------------------------------------------------------------------------
+-- finishing the run
+----------------------------------------------------------------------------
+-- The part that was missing for the whole build. An empty map is not a cleared
+-- map: every zone respawns in waves and the run timer runs on (measured, the
+-- map went to 13079/13079 and the script sat in "waiting for the next wave"
+-- while the clock kept ticking). The exit is Workspace.VentPassage, an
+-- invisible non-collidable Part with a TouchInterest sitting in the basement
+-- vent; entering it plays the end cutscene and the server books the clear.
+local function everyZoneDone()
+    local zones = zoneList()
+    local counted = 0
+    for _, z in ipairs(zones) do
+        local total = tonumber(z.model and z.model:GetAttribute("GoalTotal")) or 0
+        if total > 0 then
+            counted += 1
+            if not zoneDone(z.name) then return false end
+        end
+    end
+    return counted > 0
+end
+
+local finishRetry = 0
+
+local function finishRun()
+    if not CONFIG.autoFinish or not IN_RUN then return end
+    if os.clock() < finishRetry then return end
+    if not everyZoneDone() then return end
+
+    local vent = Workspace:FindFirstChild("VentPassage")
+    if not (vent and vent:IsA("BasePart")) then
+        note("run done but no VentPassage to walk into")
+        finishRetry = os.clock() + 30
+        return
+    end
+    finishRetry = os.clock() + 25
+
+    -- Anything still in the bag is paid on deposit and thrown away by the run
+    -- ending, so sell before leaving rather than after.
+    if leavesV() > 0 then pcall(deposit) end
+
+    STATE.phase = "finish"
+    note("every zone cleared - entering the vent")
+
+    local aim = vent.Position
+    warp(aim)
+    -- The part is CanCollide false, so the Touched event needs the root to
+    -- actually sit inside it for a moment; the same hold that every other
+    -- position-gated action in this game needs.
+    local hold = RunService.Heartbeat:Connect(function()
+        local hp = hrp()
+        if hp then hp.CFrame = CFrame.new(aim) end
+    end)
+    task.wait(1.0)
+    if firetouchinterest then
+        local hp = hrp()
+        if hp then
+            pcall(firetouchinterest, hp, vent, 0)
+            task.wait(0.2)
+            pcall(firetouchinterest, hp, vent, 1)
+        end
+    end
+    task.wait(2.0)
+    hold:Disconnect()
+end
+
+----------------------------------------------------------------------------
 -- spend loop
 ----------------------------------------------------------------------------
 task.spawn(function()
     while alive() and IN_RUN do
         if CONFIG.auto then
+            pcall(finishRun)
             pcall(objectives)
             pcall(buyBag)
             pcall(buyRake)
@@ -1509,7 +1582,10 @@ spendCard:Toggle("Buy tool upgrades", CONFIG.autoUpgrade, function(v) CONFIG.aut
     "measured useless for this script - batch collect ignores Grasp", UI.theme.bad)
 spendCard:Toggle("Do the objectives", CONFIG.autoObjective, function(v) CONFIG.autoObjective = v end,
     "journal, hand upgrade, garage - the garage gates Rooftop", UI.theme.good)
+spendCard:Toggle("Finish the run", CONFIG.autoFinish, function(v) CONFIG.autoFinish = v end,
+    "all zones clear -> walk into the vent, that is what books the clear", UI.theme.good)
 spendCard:Button("Sell now", function() task.spawn(deposit) end)
+spendCard:Button("Finish now", function() task.spawn(finishRun) end, UI.theme.good)
 spendCard:Toggle("Anti-AFK", CONFIG.antiAfk, function(v) CONFIG.antiAfk = v end)
 
 local lobbyPage = win:Page("LOBBY", UI.icon.coin)
@@ -1613,6 +1689,7 @@ _G.__LEAVES_DBG = {
     buyBag = buyBag, buyRake = buyRake, buyVents = buyVents,
     buyUpgrades = buyUpgrades, cheapestUpgrade = cheapestUpgrade,
     objectives = objectives, questRows = questRows, questVal = questVal,
+    finishRun = finishRun, everyZoneDone = everyZoneDone,
     IN_RUN = IN_RUN, LOBBY = LOBBY, myData = myData, lobbyTick = lobbyTick,
     startRun = startRun, setDifficulty = setDifficulty, press = press,
     buyLobbyUpgrades = buyLobbyUpgrades, claimDaily = claimDaily,
