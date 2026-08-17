@@ -151,6 +151,39 @@ local STATE = {
 }
 
 ----------------------------------------------------------------------------
+-- carrying AUTO across the teleport
+----------------------------------------------------------------------------
+-- A run is a different place, so the teleport starts a fresh Lua VM and _G is
+-- gone with it. The loader re-arms itself and the script comes back up, but with
+-- CONFIG.auto back at its default of false -- so the bot landed in the run and
+-- sat there idle until someone pressed AUTO. That breaks the whole point of the
+-- lobby -> run -> finish -> lobby loop.
+--
+-- The switch is therefore parked in a file. Only a recent write counts as a
+-- teleport continuation: an old file must never silently start farming days
+-- later just because the script got loaded.
+local AUTO_FILE, AUTO_WINDOW = "leaves-auto.txt", 600
+
+local function saveAuto()
+    if not writefile then return end
+    pcall(writefile, AUTO_FILE, (CONFIG.auto and "1" or "0") .. ";" .. tostring(os.time()))
+end
+
+local function loadAuto()
+    if not (isfile and readfile) then return end
+    local ok, raw = pcall(function()
+        return isfile(AUTO_FILE) and readfile(AUTO_FILE) or nil
+    end)
+    if not ok or type(raw) ~= "string" then return end
+    local on, stamp = raw:match("^(%d);(%d+)$")
+    if on == "1" and tonumber(stamp) and os.time() - tonumber(stamp) <= AUTO_WINDOW then
+        CONFIG.auto = true
+    end
+end
+
+loadAuto()
+
+----------------------------------------------------------------------------
 -- game handles
 ----------------------------------------------------------------------------
 local function tryRequire(inst)
@@ -183,9 +216,10 @@ local BuyVent       = Remotes:FindFirstChild("BuyVent")
 local JournalOpened = Remotes:FindFirstChild("JournalOpened")
 local GaragePressed = Remotes:FindFirstChild("GaragePressed")
 
--- The lobby and the run are the SAME PlaceId, reached by a teleport, so this
--- script has to recognise which side it landed on and it has to survive the
--- teleport -- which is why it is mirrored into autoexec.
+-- The lobby and the run are two DIFFERENT places joined by a teleport, so this
+-- script has to recognise which side it landed on. Surviving the teleport is the
+-- loader's job (it re-arms itself with queue_on_teleport); carrying the AUTO
+-- switch across is this file's, see loadAuto/saveAuto above.
 local IN_RUN = LeafSim ~= nil
                  and typeof(LeafSim.collectMany) == "function"
                  and typeof(LeafSim.folder) == "Instance"
@@ -1582,6 +1616,7 @@ local farming = win:Page("FARMING", UI.icon.bag)
 local mainCard = farming:Card("FARM", 1)
 mainCard:Toggle("AUTO", CONFIG.auto, function(v)
     CONFIG.auto = v
+    saveAuto()
     if v then
         STATE.cashStart = cashV()
         STATE.startClock = os.clock()
@@ -1725,6 +1760,22 @@ _G.__LEAVES_DBG = {
     workableLeaves = workableLeaves, zoneList = zoneList, zoneOpen = zoneOpen,
     zoneDone = zoneDone, zoneAt = zoneAt, leafAllowed = leafAllowed, MapCfg = MapCfg,
     cellState = cellState, markDead = markDead,
+    saveAuto = saveAuto, loadAuto = loadAuto,
 }
+
+-- AUTO is polled rather than only written from its toggle: it is also flipped
+-- from the bridge and from the lobby side, and every one of those has to survive
+-- the teleport. Re-saving while it is on keeps the timestamp inside the window,
+-- so a run that has been going for an hour still counts as a continuation.
+task.spawn(function()
+    local last
+    while alive() do
+        if CONFIG.auto ~= last or CONFIG.auto then
+            last = CONFIG.auto
+            saveAuto()
+        end
+        task.wait(20)
+    end
+end)
 
 print("[leaves] loaded, gen " .. GEN .. " - RightShift for the panel")
