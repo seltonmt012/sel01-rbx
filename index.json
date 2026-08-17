@@ -1,0 +1,65 @@
+{
+  "hub": "sel01",
+  "version": 1,
+  "ui": "lib/ui-template.lua",
+  "games": [
+    {
+      "alias": "lootevo",
+      "name": "[+1] Loot Evo",
+      "file": "games/lootevo.lua",
+      "places": [96033388567901],
+      "status": "ok",
+      "detect": "local rs = game:GetService('ReplicatedStorage') return rs:FindFirstChild('ClickRequest', true) ~= nil and rs:FindFirstChild('RebirthRequest', true) ~= nil"
+    },
+    {
+      "alias": "sellores",
+      "name": "Sell Ores",
+      "file": "games/sellores.lua",
+      "places": [122572082932179],
+      "status": "ok",
+      "detect": "local rs = game:GetService('ReplicatedStorage') return rs:FindFirstChild('BaseBuildPurchaseTunnel', true) ~= nil"
+    },
+    {
+      "alias": "drillblocks",
+      "name": "Drill Blocks for Brainrots",
+      "file": "games/drillblocks.lua",
+      "places": [78177131121429],
+      "status": "ok",
+      "detect": "local rs = game:GetService('ReplicatedStorage') return rs:FindFirstChild('IncrementStrength', true) ~= nil and rs:FindFirstChild('ItemsConfigurations', true) ~= nil"
+    },
+    {
+      "alias": "drillfarm",
+      "name": "Make a Drill Farm",
+      "file": "games/drillfarm.lua",
+      "places": [79315121100812],
+      "status": "ok",
+      "detect": "local rs = game:GetService('ReplicatedStorage') return rs:FindFirstChild('SpinDrillService', true) ~= nil"
+    },
+    {
+      "alias": "cleanleaves",
+      "name": "Clean all the leaves!",
+      "file": "games/cleanleaves.lua",
+      "places": [92637789841354, 100068273119174],
+      "status": "ok",
+      "note": "lobby and map are separate places; every map place is caught by detect",
+      "detect": "local plr = game:GetService('Players').LocalPlayer local ps = plr and plr:FindFirstChild('PlayerScripts') if ps and ps:FindFirstChild('LeafSim') then return true end local rem = game:GetService('ReplicatedStorage'):FindFirstChild('Remotes') if rem and rem:FindFirstChild('EmptyBackpack') then return true end return rem ~= nil and rem:FindFirstChild('UpgradeBuy') ~= nil and game.Workspace:FindFirstChild('Teams') ~= nil"
+    },
+    {
+      "alias": "skillpoints",
+      "name": "+1 Skill Point Legends",
+      "file": "games/skillpoints.lua",
+      "places": [135668295983945],
+      "status": "ok",
+      "detect": "local src = game:GetService('ReplicatedStorage'):FindFirstChild('Source') return src ~= nil and src:FindFirstChild('Packets') ~= nil and src:FindFirstChild('Utils') ~= nil"
+    },
+    {
+      "alias": "eggfarm",
+      "name": "Grow a Chicken Fighter",
+      "file": "games/eggfarm.lua",
+      "places": [],
+      "status": "wip",
+      "note": "collector + hatcher only, no shared panel yet",
+      "detect": "return game.Workspace:FindFirstChild('NestEggs') ~= nil and game:GetService('ReplicatedStorage'):FindFirstChild('HatchEgg', true) ~= nil"
+    }
+  ]
+}
