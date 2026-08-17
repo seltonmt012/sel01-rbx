@@ -149,6 +149,9 @@ local STATE = {
     banked = 0, cashStart = nil, startClock = os.clock(),
     rate = 0, deposits = 0, hops = 0, hitRate = 1, radius = 26, lost = 0, taken = 0,
     uiOwner = nil,
+    -- set while the finisher owns the character, so the collector keeps its
+    -- hands off; `finishAt` is the watchdog that clears it if the finisher dies
+    finishing = false, finishAt = 0,
 }
 
 ----------------------------------------------------------------------------
@@ -1310,6 +1313,22 @@ task.spawn(function()
                 return
             end
 
+            -- Hands off while the finisher is pushing the character into the
+            -- fall pad. Without this the collector kept warping it back to the
+            -- next spot mid-push and the run never ended -- the finisher looked
+            -- like it ran (it set its note every time) while the character was
+            -- 60 studs away. It only ever worked by hand because AUTO happened
+            -- to be off during the test.
+            if STATE.finishing then
+                -- watchdog: an error inside the finisher must not park the farm
+                if os.clock() - STATE.finishAt > 15 then
+                    STATE.finishing = false
+                else
+                    lastProgress = os.clock()
+                    return
+                end
+            end
+
             local hp = hrp()
             if not hp then
                 STATE.phase = "no character"
@@ -1551,7 +1570,9 @@ local function finishRun()
     if leavesV() > 0 then pcall(deposit) end
 
     STATE.phase = "finish"
-    note("every zone cleared - entering the vent")
+    STATE.finishing = true
+    STATE.finishAt = os.clock()
+    note("every zone cleared - dropping into the vent")
 
     -- The character has to MOVE through this part under physics. Everything
     -- cheaper was measured and failed: warping through it fired 18 Touched
@@ -1566,38 +1587,26 @@ local function finishRun()
     -- map is clear, so the order is issued and the character does not move a
     -- stud. Writing AssemblyLinearVelocity every frame sidesteps the Humanoid
     -- while still being real replicated physics, and that is what works.
-    -- PlayerFalling is a floor pad (thin in Y), the vent is a doorway (thin in
-    -- its own Z). Crossing a floor pad along its thin axis would mean dropping
-    -- straight down through it, so a pad is crossed horizontally and a doorway
-    -- along its normal.
-    local dirAxis
-    if vent.Size.Y < vent.Size.X and vent.Size.Y < vent.Size.Z then
-        dirAxis = vent.CFrame.RightVector          -- floor pad: walk across it
-    else
-        dirAxis = vent.CFrame.LookVector           -- doorway: go through it
-    end
-    local a = vent.Position + dirAxis * 8 + Vector3.new(0, 3, 0)
-    local b = vent.Position - dirAxis * 8 + Vector3.new(0, 3, 0)
-    -- Which side is the walkable one is not knowable from the geometry, so the
-    -- approach flips on every retry.
-    if finishFlip then a, b = b, a end
-    finishFlip = not finishFlip
+    -- Drop straight in. A horizontal shove across the pad was tried first and it
+    -- overshot: at 26 studs/s the character sailed past the tube and fell into
+    -- the void beside it, coming back at y -240 / -178 / -65 over and over. The
+    -- pad is 7x1x7 and the tube under it is the whole target, so the only aim
+    -- that cannot miss is its centre from directly above, with gravity doing the
+    -- moving. That is still real physics, which is what the server wants to see.
+    local above = vent.Position + Vector3.new(0, 14, 0)
 
     local hp = hrp()
     if not hp then return end
     hp.Anchored = false
-    warp(a)
-    -- Only a short settle: the push itself is continuous movement, which is what
-    -- the server wants to see, so there is nothing to wait for beyond the warp
-    -- landing. A full CONFIG.settle here just made the finish look stuck.
+    warp(above)
     task.wait(0.35)
 
-    local dir = (b - a).Unit
+    -- Kill the sideways drift every frame or the leftover velocity from the last
+    -- hop carries the fall off centre; vertical is left to gravity.
     local push = RunService.Heartbeat:Connect(function()
         local cur = hrp()
         if cur then
-            cur.AssemblyLinearVelocity =
-                Vector3.new(dir.X * 26, cur.AssemblyLinearVelocity.Y, dir.Z * 26)
+            cur.AssemblyLinearVelocity = Vector3.new(0, cur.AssemblyLinearVelocity.Y, 0)
         end
     end)
 
@@ -1612,6 +1621,10 @@ local function finishRun()
         task.wait(0.1)
     end
     push:Disconnect()
+    -- Give the fall sequence a moment before the collector is allowed to move
+    -- the character again, or it warps straight back out of it.
+    task.wait(2.5)
+    STATE.finishing = false
 end
 
 ----------------------------------------------------------------------------
