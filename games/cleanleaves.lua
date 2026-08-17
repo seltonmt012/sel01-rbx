@@ -1529,9 +1529,16 @@ local function finishRun()
     if os.clock() < finishRetry then return end
     if not everyZoneDone() then return end
 
-    local vent = Workspace:FindFirstChild("VentPassage")
+    -- Aim at the hole, not at the door. `VentPassage` is only the entrance; the
+    -- part that actually ends the run is `Map.PlayerFalling`, an invisible
+    -- 7x1x7 pad about 35 studs further into the tunnel at ~(23.8, 46.5, -65.0).
+    -- Targeting the vent's centre meant the character shuffled back and forth in
+    -- the doorway forever, which is exactly what it looked like.
+    local map = Workspace:FindFirstChild("Map")
+    local vent = (map and map:FindFirstChild("PlayerFalling"))
+        or Workspace:FindFirstChild("VentPassage")
     if not (vent and vent:IsA("BasePart")) then
-        note("run done but no VentPassage to walk into")
+        note("run done but neither PlayerFalling nor VentPassage is there")
         finishRetry = os.clock() + 30
         return
     end
@@ -1559,9 +1566,18 @@ local function finishRun()
     -- map is clear, so the order is issued and the character does not move a
     -- stud. Writing AssemblyLinearVelocity every frame sidesteps the Humanoid
     -- while still being real replicated physics, and that is what works.
-    local look = vent.CFrame.LookVector
-    local a = vent.Position + look * 8
-    local b = vent.Position - look * 8
+    -- PlayerFalling is a floor pad (thin in Y), the vent is a doorway (thin in
+    -- its own Z). Crossing a floor pad along its thin axis would mean dropping
+    -- straight down through it, so a pad is crossed horizontally and a doorway
+    -- along its normal.
+    local dirAxis
+    if vent.Size.Y < vent.Size.X and vent.Size.Y < vent.Size.Z then
+        dirAxis = vent.CFrame.RightVector          -- floor pad: walk across it
+    else
+        dirAxis = vent.CFrame.LookVector           -- doorway: go through it
+    end
+    local a = vent.Position + dirAxis * 8 + Vector3.new(0, 3, 0)
+    local b = vent.Position - dirAxis * 8 + Vector3.new(0, 3, 0)
     -- Which side is the walkable one is not knowable from the geometry, so the
     -- approach flips on every retry.
     if finishFlip then a, b = b, a end
