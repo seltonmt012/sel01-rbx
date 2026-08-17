@@ -92,6 +92,13 @@ local function run(source, chunkName)
     return chunk
 end
 
+-- Armed before anything else can fail. A lobby with no connection still
+-- teleports into the map, and the map is where the run happens - dropping the
+-- re-arm because index.json was unreachable would lose the whole session.
+if queueTp then
+    pcall(queueTp, 'loadstring(game:HttpGet("' .. BASE .. 'loader.lua"))()')
+end
+
 --------------------------------------------------------------------------------
 -- registry
 --------------------------------------------------------------------------------
@@ -224,19 +231,24 @@ end
 
 -- Only built when nothing matched. It is the same panel every game script uses,
 -- so there is exactly one look in the whole hub.
-local function picker()
-    local U = ui()
-    if not U then
-        notify("no script for place " .. game.PlaceId .. " (and no UI to pick one)", 8)
-        return
+local function textPicker()
+    notify("no script for place " .. game.PlaceId .. " - pick one manually", 10)
+    print("[sel01] _G.__SEL.load(\"alias\"):")
+    for _, entry in ipairs(INDEX.games) do
+        print(string.format("  %-14s %s", entry.alias or "?", entry.name or ""))
     end
+end
+
+local function buildPicker()
+    local U = ui()
+    if not U or type(U.Window) ~= "function" then return false end
     if _G.__SEL.pickerWindow then pcall(function() _G.__SEL.pickerWindow:Destroy() end) end
 
     local win = U.Window({
         title = "SEL", accentTitle = "01", subtitle = "seltonmt",
         badge = "☰", width = 760, height = 520,
     })
-    local page = win:Page("HUB", U.icon and U.icon.pickaxe or nil)
+    local page = win:Page("HUB", U.icon and U.icon.list or nil)
     local info = page:Card("PLACE", 1)
     info:Label("place " .. tostring(game.PlaceId))
     info:Label("no script registered for this game")
@@ -257,6 +269,16 @@ local function picker()
     win:SetStatus("place " .. tostring(game.PlaceId) .. "   " .. #INDEX.games .. " scripts")
     win:Refresh()
     _G.__SEL.pickerWindow = win
+    return true
+end
+
+-- The panel is a convenience, not a dependency: if the template cannot be
+-- fetched or built, the list still has to reach the console, otherwise an
+-- unknown place looks exactly like a loader that silently did nothing.
+local function picker()
+    local ok, built = pcall(buildPicker)
+    if not ok or not built then textPicker() end
+    if not ok then warn("[sel01] picker: " .. tostring(built)) end
 end
 
 --------------------------------------------------------------------------------
@@ -291,12 +313,6 @@ setmetatable(_G.__SEL, { __index = function(t, k)
     if k == "ui" then return ui() end
     return nil
 end })
-
--- Re-arm across a teleport. Clean all the leaves teleports lobby -> map place,
--- and without this the run starts with no automation in it.
-if queueTp then
-    pcall(queueTp, 'loadstring(game:HttpGet("' .. BASE .. 'loader.lua"))()')
-end
 
 --------------------------------------------------------------------------------
 
