@@ -1734,10 +1734,13 @@ local function finishRun()
     end
     push:Disconnect()
 
-    -- Once it is through, stop. The ending plays out over a while before the
-    -- teleport back to the lobby, and the 6s retry kept shoving the character
-    -- into the hole again the whole time -- long after the clear was booked.
-    if fell then finishRetry = os.clock() + 120 end
+    -- Once it is through, back off -- but not for long. The ending plays out
+    -- before the teleport and a 6s retry kept shoving the character back into
+    -- the hole the whole time; 120s was the other extreme, because a drop that
+    -- does NOT end the run leaves the bot standing on the upper floor at y 67
+    -- with every condition met and nothing happening. 25s covers the ending and
+    -- still recovers on its own.
+    if fell then finishRetry = os.clock() + 25 end
     -- Give the fall sequence a moment before the collector is allowed to move
     -- the character again, or it warps straight back out of it.
     task.wait(2.5)
