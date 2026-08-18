@@ -442,13 +442,20 @@ end
 -- Every active code needs group membership: all six answered "not_in_group".
 -- Kept as a button rather than a loop so the refusal is visible once.
 local function redeemCodes()
-	local results = {}
+	-- Counted rather than concatenated: six "CODE already_redeemed" pairs make one
+	-- line far longer than the read-out can show, and the interesting part (did any
+	-- of them pay out) then falls off the right edge.
+	local tally, first = {}, nil
 	for _, code in ipairs(CfgCodes.Active) do
 		local ok, res = pcall(function() return Remotes.RedeemCode:InvokeServer(code) end)
-		results[#results + 1] = code .. " " .. tostring(ok and res or "error")
+		local answer = tostring(ok and res or "error")
+		tally[answer] = (tally[answer] or 0) + 1
+		if answer ~= "already_redeemed" and not first then first = code .. " " .. answer end
 		task.wait(0.5)
 	end
-	STATE.note = "codes: " .. table.concat(results, ", ")
+	local parts = {}
+	for answer, count in pairs(tally) do parts[#parts + 1] = count .. "x " .. answer end
+	STATE.note = "codes: " .. table.concat(parts, ", ") .. (first and ("  (" .. first .. ")") or "")
 end
 
 local function unstuck()

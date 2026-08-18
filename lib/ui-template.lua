@@ -255,65 +255,58 @@ function UI.Window(options)
 		chipCount = 0,
 	}
 
-	-- Icon rail ----------------------------------------------------------------
-	local rail = Instance.new("Frame")
-	rail.Size = UDim2.new(0, 78, 1, 0)
-	rail.BackgroundColor3 = UI.theme.rail
-	rail.BorderSizePixel = 0
-	rail.Parent = root
-	corner(rail, 18)
-
-	local railFill = Instance.new("Frame")   -- squares off the right-hand corners
-	railFill.Size = UDim2.new(0, 18, 1, 0)
-	railFill.Position = UDim2.new(1, -18, 0, 0)
-	railFill.BackgroundColor3 = UI.theme.rail
-	railFill.BorderSizePixel = 0
-	railFill.Parent = rail
-
-	local railList = Instance.new("UIListLayout")
-	railList.Padding = UDim.new(0, 4)
-	railList.HorizontalAlignment = Enum.HorizontalAlignment.Center
-	railList.SortOrder = Enum.SortOrder.LayoutOrder
-	railList.Parent = rail
-
-	local railPad = Instance.new("UIPadding")
-	railPad.PaddingTop = UDim.new(0, 18)
-	railPad.Parent = rail
-
-	local badge = Instance.new("Frame")
-	badge.Size = UDim2.fromOffset(36, 36)
-	badge.BackgroundColor3 = UI.theme.accent
-	badge.BorderSizePixel = 0
-	badge.LayoutOrder = 0
-	badge.Parent = rail
-	corner(badge, 12)
-	accentGradient(badge, 20)
-	local badgeText = label(badge, options.badge or "◈", 17, UI.font.heading, UI.theme.void)
-	badgeText.Size = UDim2.fromScale(1, 1)
-	badgeText.TextXAlignment = Enum.TextXAlignment.Center
-
 	-- Sidebar ------------------------------------------------------------------
+	--
+	-- v2.1 dropped the 78px icon rail. It duplicated the nav list one column to
+	-- the left, it was dead space for any script with a single page, and its
+	-- `railFill` corner patch was a sibling inside the rail's own UIListLayout -
+	-- so the layout treated a full-height frame as the first list item and pushed
+	-- the badge and every rail entry off the bottom. The rail rendered as an empty
+	-- strip. Removing it also hands 78px back to the card grid, which is what was
+	-- truncating the hint lines.
+	local SIDEBAR = 240
+
 	local sidebar = Instance.new("Frame")
-	sidebar.Size = UDim2.new(0, 224, 1, 0)
-	sidebar.Position = UDim2.new(0, 78, 0, 0)
+	sidebar.Size = UDim2.new(0, SIDEBAR, 1, 0)
 	sidebar.BackgroundColor3 = UI.theme.sidebar
 	sidebar.BorderSizePixel = 0
 	sidebar.Parent = root
+	corner(sidebar, 18)
 
-	local brand = label(sidebar, options.title or "PANEL", 21, UI.font.heading)
-	brand.Size = UDim2.new(1, -36, 0, 26)
-	brand.Position = UDim2.new(0, 18, 0, 22)
+	local sidebarFill = Instance.new("Frame")   -- squares off the right-hand corners
+	sidebarFill.Size = UDim2.new(0, 18, 1, 0)
+	sidebarFill.Position = UDim2.new(1, -18, 0, 0)
+	sidebarFill.BackgroundColor3 = UI.theme.sidebar
+	sidebarFill.BorderSizePixel = 0
+	sidebarFill.Parent = sidebar
+
+	-- The badge the scripts pass moves here now that the rail is gone.
+	local badge = Instance.new("Frame")
+	badge.Size = UDim2.fromOffset(30, 30)
+	badge.Position = UDim2.new(0, 18, 0, 20)
+	badge.BackgroundColor3 = UI.theme.accent
+	badge.BorderSizePixel = 0
+	badge.Parent = sidebar
+	corner(badge, 10)
+	accentGradient(badge, 20)
+	local badgeText = label(badge, options.badge or "◈", 15, UI.font.heading, UI.theme.void)
+	badgeText.Size = UDim2.fromScale(1, 1)
+	badgeText.TextXAlignment = Enum.TextXAlignment.Center
+
+	local brand = label(sidebar, options.title or "PANEL", 19, UI.font.heading)
+	brand.Size = UDim2.new(1, -66, 0, 26)
+	brand.Position = UDim2.new(0, 58, 0, 22)
 
 	-- The accented half of the title is a real gradient rather than a RichText
 	-- colour, so it drifts with the rest of the accent surfaces.
-	local brandAccent = label(sidebar, options.accentTitle or "", 21, UI.font.heading)
-	brandAccent.Size = UDim2.new(1, -36, 0, 26)
+	local brandAccent = label(sidebar, options.accentTitle or "", 19, UI.font.heading)
+	brandAccent.Size = UDim2.new(1, -66, 0, 26)
 	-- Measured with TextService, not by reading TextBounds off a hidden label:
 	-- TextBounds on an instance that has never been rendered can come back as
 	-- zero on the first frame and the two halves of the title then overlap.
 	local titleWidth = game:GetService("TextService"):GetTextSize(
-		options.title or "PANEL", 21, UI.font.heading, Vector2.new(1000, 100)).X
-	brandAccent.Position = UDim2.new(0, 18 + titleWidth, 0, 22)
+		options.title or "PANEL", 19, UI.font.heading, Vector2.new(1000, 100)).X
+	brandAccent.Position = UDim2.new(0, 58 + titleWidth, 0, 22)
 	accentGradient(brandAccent, 18)
 
 	local searchWrap = Instance.new("Frame")
@@ -415,8 +408,8 @@ function UI.Window(options)
 
 	-- Content ------------------------------------------------------------------
 	local content = Instance.new("Frame")
-	content.Size = UDim2.new(1, -302, 1, 0)
-	content.Position = UDim2.new(0, 302, 0, 0)
+	content.Size = UDim2.new(1, -SIDEBAR, 1, 0)
+	content.Position = UDim2.new(0, SIDEBAR, 0, 0)
 	content.BackgroundTransparency = 1
 	content.Parent = root
 
@@ -484,15 +477,40 @@ function UI.Window(options)
 	window.chipCaption = chipCaption
 
 	local chipHolder = Instance.new("ScrollingFrame")
-	chipHolder.Size = UDim2.new(1, -120, 1, -6)
+	chipHolder.Size = UDim2.new(1, -134, 1, -6)
 	chipHolder.Position = UDim2.new(0, 96, 0, 3)
 	chipHolder.BackgroundTransparency = 1
 	chipHolder.BorderSizePixel = 0
+	chipHolder.ClipsDescendants = true
 	chipHolder.ScrollBarThickness = 0
 	chipHolder.ScrollingDirection = Enum.ScrollingDirection.X
 	chipHolder.AutomaticCanvasSize = Enum.AutomaticSize.X
 	chipHolder.CanvasSize = UDim2.new()
 	chipHolder.Parent = chipBar
+
+	-- With nine toggles on the chip bar the row runs past the window edge and the
+	-- last chip reads as a rendering fault rather than as "there is more". A fade
+	-- on the right edge plus a count says both, and the strip still scrolls.
+	local chipFade = Instance.new("Frame")
+	chipFade.Size = UDim2.fromOffset(46, 36)
+	chipFade.Position = UDim2.new(1, -46, 0, 0)
+	chipFade.BackgroundColor3 = UI.theme.subBar
+	chipFade.BorderSizePixel = 0
+	chipFade.ZIndex = 3
+	chipFade.Parent = chipBar
+	local fadeGradient = Instance.new("UIGradient")
+	fadeGradient.Transparency = NumberSequence.new({
+		NumberSequenceKeypoint.new(0, 1),
+		NumberSequenceKeypoint.new(1, 0),
+	})
+	fadeGradient.Parent = chipFade
+
+	local chipMore = label(chipBar, "", 10, UI.font.heading, UI.theme.accent, 0.2)
+	chipMore.Size = UDim2.fromOffset(34, 14)
+	chipMore.Position = UDim2.new(1, -36, 0, 11)
+	chipMore.TextXAlignment = Enum.TextXAlignment.Right
+	chipMore.ZIndex = 4
+	window.chipMore = chipMore
 	local chipLayout = Instance.new("UIListLayout")
 	chipLayout.FillDirection = Enum.FillDirection.Horizontal
 	chipLayout.Padding = UDim.new(0, 7)
@@ -545,11 +563,10 @@ function UI.Window(options)
 		collapsed = not collapsed
 		collapseButton.Text = collapsed and "+" or "–"
 		sidebar.Visible = not collapsed
-		rail.Visible = not collapsed
 		chipBar.Visible = not collapsed
 		pageHolder.Visible = not collapsed
-		content.Position = collapsed and UDim2.new() or UDim2.new(0, 302, 0, 0)
-		content.Size = collapsed and UDim2.new(1, 0, 1, 0) or UDim2.new(1, -302, 1, 0)
+		content.Position = collapsed and UDim2.new() or UDim2.new(0, SIDEBAR, 0, 0)
+		content.Size = collapsed and UDim2.new(1, 0, 1, 0) or UDim2.new(1, -SIDEBAR, 1, 0)
 		tween(root, EASE.soft, {
 			Size = collapsed and UDim2.fromOffset(WIDTH, 66) or UDim2.fromOffset(WIDTH, HEIGHT),
 		})
@@ -600,6 +617,21 @@ function UI.Window(options)
 			if on then active += 1 end
 		end
 		self.chipCaption.Text = "AKTIV " .. active
+
+		-- Counted a frame later on purpose: the chips were only just made visible,
+		-- so their AbsolutePosition is still last frame's until the layout runs.
+		task.defer(function()
+			if not self.chipMore.Parent then return end
+			local right = chipHolder.AbsolutePosition.X + chipHolder.AbsoluteSize.X
+			local hidden = 0
+			for _, chip in ipairs(self.chips) do
+				if chip.frame.Visible and
+					chip.frame.AbsolutePosition.X + chip.frame.AbsoluteSize.X > right then
+					hidden += 1
+				end
+			end
+			self.chipMore.Text = hidden > 0 and ("+" .. hidden) or ""
+		end)
 	end
 
 	function window:SetStatus(text) self.headSub.Text = text end
@@ -713,27 +745,9 @@ function UI.Window(options)
 		navText.Size = UDim2.new(1, -44, 1, 0)
 		navText.Position = UDim2.new(0, 38, 0, 0)
 
-		local railEntry = Instance.new("TextButton")
-		railEntry.Size = UDim2.fromOffset(58, 46)
-		railEntry.BackgroundTransparency = 1
-		railEntry.Text = ""
-		railEntry.AutoButtonColor = false
-		railEntry.LayoutOrder = #self.pages + 1
-		railEntry.Parent = rail
-		local railGlyph = label(railEntry, iconGlyph or UI.icon.sliders, 17,
-			UI.font.body, UI.theme.text, UI.theme.dimAlpha)
-		railGlyph.Size = UDim2.new(1, 0, 0, 22)
-		railGlyph.Position = UDim2.new(0, 0, 0, 3)
-		railGlyph.TextXAlignment = Enum.TextXAlignment.Center
-		local railText = label(railEntry, string.sub(name, 1, 8), 9,
-			UI.font.heading, UI.theme.text, UI.theme.fainterAlpha)
-		railText.Size = UDim2.new(1, 0, 0, 12)
-		railText.Position = UDim2.new(0, 0, 0, 27)
-		railText.TextXAlignment = Enum.TextXAlignment.Center
-
 		local pageObject = {
 			frame = page, name = name, cards = {}, window = self,
-			navEntry = navEntry, navText = navText, railGlyph = railGlyph,
+			navEntry = navEntry, navText = navText,
 			columns = columns, nextColumn = 1,
 		}
 
@@ -745,7 +759,6 @@ function UI.Window(options)
 					tween(other.navMark, EASE.quick, { Size = UDim2.fromOffset(3, 0) })
 					tween(other.navText, EASE.quick, { TextTransparency = UI.theme.dimAlpha })
 					tween(other.glyph, EASE.quick, { TextTransparency = 0.3 })
-					tween(other.railGlyph, EASE.quick, { TextTransparency = UI.theme.dimAlpha })
 				end
 			end
 			page.Visible = true
@@ -753,7 +766,6 @@ function UI.Window(options)
 			tween(navMark, EASE.snap, { Size = UDim2.fromOffset(3, 20) })
 			tween(navText, EASE.quick, { TextTransparency = 0 })
 			tween(glyph, EASE.quick, { TextTransparency = 0 })
-			tween(railGlyph, EASE.quick, { TextTransparency = 0 })
 			self.activePage = pageObject
 			self.headTitle.Text = name
 
@@ -767,7 +779,6 @@ function UI.Window(options)
 		pageObject.glyph = glyph
 
 		navEntry.MouseButton1Click:Connect(select)
-		railEntry.MouseButton1Click:Connect(select)
 		navEntry.MouseEnter:Connect(function()
 			if self.activePage ~= pageObject then
 				tween(navEntry, EASE.quick, { BackgroundTransparency = 0.94 })
@@ -780,17 +791,6 @@ function UI.Window(options)
 				tween(navText, EASE.quick, { TextTransparency = UI.theme.dimAlpha })
 			end
 		end)
-		railEntry.MouseEnter:Connect(function()
-			if self.activePage ~= pageObject then
-				tween(railGlyph, EASE.quick, { TextTransparency = 0.2 })
-			end
-		end)
-		railEntry.MouseLeave:Connect(function()
-			if self.activePage ~= pageObject then
-				tween(railGlyph, EASE.quick, { TextTransparency = UI.theme.dimAlpha })
-			end
-		end)
-
 		-- Card -----------------------------------------------------------------
 		-- column: 1 = left, 2 = right, 0 = a full-width card below the grid.
 		-- Omitted, cards alternate left/right.
@@ -886,33 +886,53 @@ function UI.Window(options)
 				table.insert(cardObject.entries, entry)
 			end
 
-			-- a row is caption (+ optional hint) on the left, control on the right
+			-- A row is caption (+ optional hint) on the left, control on the right.
+			--
+			-- The hint used to get `1, -120` like the caption, which on a card in
+			-- the two-column grid left it about 125px - every hint longer than four
+			-- words was truncated to "Red x1.5 @1K … Void…". The control only sits
+			-- next to the CAPTION line, so the hint runs the full width underneath
+			-- it and wraps to two lines instead. The caption keeps the -120.
+			local HINT_LINES = 2
 			local function row(text, hint, tone)
 				cardObject.rows += 1
+				local hintHeight = hint and (14 * HINT_LINES) or 0
 				local holder = Instance.new("Frame")
-				holder.Size = UDim2.new(1, 0, 0, hint and 42 or 32)
+				holder.Size = UDim2.new(1, 0, 0, hint and (22 + hintHeight + 6) or 32)
 				holder.BackgroundTransparency = 1
 				holder.LayoutOrder = cardObject.rows
 				holder.Parent = body
 
 				local name = label(holder, text, 13, UI.font.body, tone or UI.theme.text)
-				name.Size = UDim2.new(1, -120, 0, hint and 18 or 32)
-				name.Position = UDim2.new(0, 0, 0, hint and 3 or 0)
+				name.Size = UDim2.new(1, -120, 0, hint and 20 or 32)
+				name.Position = UDim2.new(0, 0, 0, hint and 2 or 0)
 				name.TextTruncate = Enum.TextTruncate.AtEnd
 				if hint then
 					local sub = label(holder, hint, 11, UI.font.body,
 						UI.theme.text, UI.theme.fainterAlpha)
-					sub.Size = UDim2.new(1, -120, 0, 14)
+					sub.Size = UDim2.new(1, -4, 0, hintHeight)
 					sub.Position = UDim2.new(0, 0, 0, 22)
+					sub.TextWrapped = true
+					sub.TextYAlignment = Enum.TextYAlignment.Top
 					sub.TextTruncate = Enum.TextTruncate.AtEnd
 				end
 
 				register(holder, text)
-				return holder
+				-- Controls anchor to the caption line, not to the middle of the row:
+				-- with a two-line hint below, a vertically centred toggle drifts down
+				-- into the hint text and stops lining up with what it belongs to.
+				return holder, hint and 11 or nil
+			end
+
+			-- x is the offset from the row's right edge, anchor is what row()
+			-- returned, h the control's height.
+			local function place(x, anchor, h)
+				if anchor then return UDim2.new(1, x, 0, anchor - h / 2) end
+				return UDim2.new(1, x, 0.5, -h / 2)
 			end
 
 			function cardObject:Toggle(text, initial, callback, hint, tone)
-				local holder = row(text, hint, tone)
+				local holder, anchor = row(text, hint, tone)
 				local state = initial and true or false
 				local shade = tone or UI.theme.accent
 
@@ -920,7 +940,8 @@ function UI.Window(options)
 				-- setting reads at a glance without looking at the pill.
 				local mark = Instance.new("Frame")
 				mark.Size = UDim2.fromOffset(2, state and 16 or 6)
-				mark.Position = UDim2.new(0, -9, 0.5, 0)
+				mark.Position = anchor and UDim2.new(0, -9, 0, anchor)
+					or UDim2.new(0, -9, 0.5, 0)
 				mark.AnchorPoint = Vector2.new(0, 0.5)
 				mark.BackgroundColor3 = shade
 				mark.BackgroundTransparency = state and 0 or 0.8
@@ -930,7 +951,7 @@ function UI.Window(options)
 
 				local pill = Instance.new("TextButton")
 				pill.Size = UDim2.fromOffset(40, 21)
-				pill.Position = UDim2.new(1, -40, 0.5, -10)
+				pill.Position = place(-40, anchor, 21)
 				pill.BackgroundColor3 = state and shade or UI.theme.input
 				pill.BorderSizePixel = 0
 				pill.Text = ""
@@ -1026,11 +1047,11 @@ function UI.Window(options)
 			-- The stepper: a centred value chip between − and +. getText is a
 			-- function so the caller keeps ownership of the value.
 			function cardObject:Stepper(text, getText, onStep, hint)
-				local holder = row(text, hint)
+				local holder, anchor = row(text, hint)
 
 				local box = Instance.new("Frame")
 				box.Size = UDim2.fromOffset(60, 22)
-				box.Position = UDim2.new(1, -82, 0.5, -11)
+				box.Position = place(-82, anchor, 22)
 				box.BackgroundColor3 = UI.theme.input
 				box.BorderSizePixel = 0
 				box.Parent = holder
@@ -1055,7 +1076,7 @@ function UI.Window(options)
 				local function stepButton(glyphText, x, delta)
 					local b = Instance.new("TextButton")
 					b.Size = UDim2.fromOffset(22, 22)
-					b.Position = UDim2.new(1, x, 0.5, -11)
+					b.Position = place(x, anchor, 22)
 					b.BackgroundColor3 = UI.theme.input
 					b.BorderSizePixel = 0
 					b.Text = glyphText
@@ -1090,12 +1111,12 @@ function UI.Window(options)
 			end
 
 			function cardObject:Slider(text, min, max, initial, callback, hint)
-				local holder = row(text, hint)
+				local holder, anchor = row(text, hint)
 				local value = math.clamp(initial or min, min, max)
 
 				local readout = Instance.new("TextLabel")
 				readout.Size = UDim2.fromOffset(40, 22)
-				readout.Position = UDim2.new(1, -40, 0.5, -11)
+				readout.Position = place(-40, anchor, 22)
 				readout.BackgroundColor3 = UI.theme.input
 				readout.BorderSizePixel = 0
 				readout.Text = tostring(math.floor(value))
@@ -1108,7 +1129,7 @@ function UI.Window(options)
 
 				local track = Instance.new("TextButton")
 				track.Size = UDim2.fromOffset(68, 5)
-				track.Position = UDim2.new(1, -116, 0.5, -2)
+				track.Position = place(-116, anchor, 5)
 				track.BackgroundColor3 = UI.theme.input
 				track.BorderSizePixel = 0
 				track.Text = ""
@@ -1168,14 +1189,14 @@ function UI.Window(options)
 			end
 
 			function cardObject:Dropdown(text, choices, initial, callback, hint)
-				local holder = row(text, hint)
+				local holder, anchor = row(text, hint)
 				holder.ZIndex = 2
 				local current = initial or choices[1]
 				local open = false
 
 				local box = Instance.new("TextButton")
 				box.Size = UDim2.fromOffset(108, 24)
-				box.Position = UDim2.new(1, -108, 0.5, -12)
+				box.Position = place(-108, anchor, 24)
 				box.BackgroundColor3 = UI.theme.input
 				box.BorderSizePixel = 0
 				box.Text = ""
@@ -1198,7 +1219,8 @@ function UI.Window(options)
 				local list = Instance.new("Frame")
 				list.Size = UDim2.new(0, 108, 0, 0)
 				list.AutomaticSize = Enum.AutomaticSize.Y
-				list.Position = UDim2.new(1, -108, 0.5, 15)
+				list.Position = anchor and UDim2.new(1, -108, 0, anchor + 15)
+					or UDim2.new(1, -108, 0.5, 15)
 				list.BackgroundColor3 = UI.theme.input
 				list.BorderSizePixel = 0
 				list.Visible = false
