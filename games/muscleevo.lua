@@ -78,6 +78,8 @@ local CONFIG = {
 	stages = true,         -- walk the stage ladder for Wins
 	eggs = true,           -- open the richest egg the Wins balance covers
 	eggEvery = 20,         -- seconds between egg trips
+	equipBest = true,      -- press the Pets window's "Equip Best" button
+	equipEvery = 45,       -- seconds between those presses
 	stageTimeout = 20,     -- seconds to clear a stage before giving up on it
 	stageBackoff = 60,     -- seconds of training after a stage proved too strong
 	stageChain = 25,       -- stages to run back to back before checking anything else
@@ -610,6 +612,40 @@ local function runStage()
 	return false
 end
 
+-- The eggs carry AutoEquip, but that only fills a FREE slot - at 3/3 a better pet
+-- just lands in the bag and nothing changes. The Pets window has an "Equip Best"
+-- button that does the swap, so it gets pressed after every hatch and on a timer.
+-- Its neighbour in the same frame is "UnequipAll", hence the exact name match.
+--
+-- Defined ABOVE the egg opener on purpose: it is called from inside it, and a Lua
+-- local is invisible above its own definition.
+local function equipBestPets()
+	if not CONFIG.equipBest then return false end
+	local pets = plr.PlayerGui:FindFirstChild("Pets")
+	local holder = pets and pets:FindFirstChild("Buttons", true)
+	local button = holder and holder:FindFirstChild("EquipBest")
+	if not (button and button:IsA("TextButton")) then return false end
+
+	local before = {}
+	for slot, uid in pairs((data() or {}).EquippedPets or {}) do before[slot] = uid end
+	for _, event in ipairs({ "MouseButton1Down", "MouseButton1Up", "MouseButton1Click", "Activated" }) do
+		local ok, conns = pcall(function() return getconnections(button[event]) end)
+		if ok then
+			for _, conn in ipairs(conns) do pcall(function() conn:Fire() end) end
+		end
+		task.wait(0.12)
+	end
+	task.wait(0.8)
+
+	local changed = false
+	for slot, uid in pairs((data() or {}).EquippedPets or {}) do
+		if before[slot] ~= uid then changed = true break end
+	end
+	if changed then STATE.note = "equipped the best pets" end
+	STATE.nextEquipAt = os.clock() + math.max(CONFIG.equipEvery, 10)
+	return changed
+end
+
 --------------------------------------------------------------------------------
 -- eggs
 --------------------------------------------------------------------------------
@@ -700,6 +736,8 @@ local function openBestEgg()
 		STATE.eggs = (STATE.eggs or 0) + 1
 		STATE.note = "hatched " .. tostring(bestId) .. " for " .. short(bestPrice)
 		STATE.nextEggAt = os.clock() + math.max(CONFIG.eggEvery, 5)
+		-- straight away, while the new pet is still the reason to re-check
+		equipBestPets()
 		return true
 	end
 	STATE.nextEggAt = os.clock() + 60
@@ -879,6 +917,9 @@ loop(1, function()
 		if doRebirth() then return end
 		if buyBestBody() then return end
 		if openBestEgg() then return end
+		if os.clock() >= (STATE.nextEquipAt or 0) then
+			if equipBestPets() then return end
+		end
 		if os.clock() >= STATE.nextClaimAt then
 			STATE.nextClaimAt = os.clock() + math.max(CONFIG.claimEvery, 15)
 			if claimWins() then return end
@@ -1031,6 +1072,7 @@ _G.__MUSCLE_DBG = {
 	bestTrainZone = bestTrainZone, standInZone = standInZone,
 	claimWins = claimWins, buyBestBody = buyBestBody,
 	runStage = runStage, openBestEgg = openBestEgg, stageFolder = stageFolder,
+	equipBestPets = equipBestPets,
 	claimStageWins = claimStageWins,
 	doRebirth = doRebirth, rebirthReady = rebirthReady,
 	Click = ClickController,
