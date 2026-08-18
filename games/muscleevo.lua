@@ -500,28 +500,38 @@ local function runStage()
 		-- grow enormously with height (stage 11 pays 250,000, stage 26 pays 125
 		-- billion). Which means the only thing that produces wins is getting
 		-- STRONGER and pushing the wall further, not running the same lap faster.
-		local firstTime = id > (STATE.bestEver or 0)
+		-- A pad pays once, BUT a rebirth resets them all: after rebirth 5 the ladder
+		-- paid again from stage 1. And claiming teleports you back, which ends the
+		-- lap - so exactly one pad can be collected per climb. The plan that follows
+		-- from those two facts: each lap, go for the HIGHEST pad not yet collected
+		-- since the last rebirth, and work downwards. Stages 1-11 are worth about
+		-- 349,000 wins in total, which dwarfs anything held before a rebirth.
+		STATE.claimedPads = STATE.claimedPads or {}
 		local wall = STATE.wallAt
-		local topOfSafe = wall and (id + 1 >= wall)
-		-- Claim only when this is ground we have never stood on, and only at the top
-		-- of the lap: the claim teleports us back, so there is exactly one pad per
-		-- lap to be had, and it should be the highest new one. Lapping a ladder
-		-- whose pads are already spent is pure motion, which is what the farm was
-		-- doing while Wins sat unchanged at 2,025.
-		if topOfSafe and not firstTime and not CONFIG.claimStagePads then
-			STATE.note = "stage " .. id .. " cleared, pad already spent"
-			STATE.nextStageAt = os.clock() + CONFIG.stageBackoff
-			return false
+		-- The pad pays only on the run that FIRST clears its stage. Proof: after the
+		-- rebirth, stage 1 and stage 2 were claimed straight after clearing them and
+		-- paid +1 and +25; stage 9 was cleared on an exploration lap and claimed a
+		-- lap later, and paid exactly 0 - twice. So there is no clever ordering to
+		-- be had. One new pad per lap, from the bottom up, and the climb is only
+		-- worth continuing past a pad that is already banked.
+		local target = STATE.padTarget
+		if not target then
+			for candidate = 1, 60 do
+				if not STATE.claimedPads[candidate] then target = candidate break end
+			end
+			STATE.padTarget = target
 		end
-		if firstTime then STATE.bestEver = id end
-		if (firstTime and topOfSafe) or CONFIG.claimStagePads then
+
+		if target and id >= target then
 			local before = (data() or {}).Wins or 0
 			STATE.phase = "harvest " .. id
 			claimStageWins(stage)
 			task.wait(0.8)
 			local gained = ((data() or {}).Wins or 0) - before
 			STATE.harvested = (STATE.harvested or 0) + math.max(gained, 0)
-			STATE.note = "stage " .. id .. " harvested +" .. short(gained) .. " wins"
+			STATE.claimedPads[id] = true
+			STATE.padTarget = nil
+			STATE.note = "stage " .. id .. " pad +" .. short(gained) .. " wins"
 			-- Probe the wall again every few laps: evolutions and rebirths bought
 			-- with these wins are exactly what moves it, and a wall that is never
 			-- retested pins the farm to whatever it could do an hour ago.
@@ -793,7 +803,13 @@ local function doRebirth()
 	task.wait(2)
 	local after = (data() or {}).Rebirth or 0
 	if after > before then
-		STATE.note = "rebirth " .. after .. " done"
+		-- The rebirth resets the whole ladder including its pads, so everything the
+		-- harvester knows about what has already been collected is stale.
+		STATE.claimedPads = {}
+		STATE.padTarget = nil
+		STATE.wallAt = nil
+		STATE.bestEver = nil
+		STATE.note = "rebirth " .. after .. " done, ladder reset"
 		return true
 	end
 	STATE.note = "rebirth refused"
