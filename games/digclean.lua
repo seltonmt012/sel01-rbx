@@ -69,6 +69,8 @@ local CONFIG = {
 	clean = true,
 	sell = true,
 	display = true,       -- keep the best finds on museum pedestals
+	polish = true,        -- raise item condition in the polishers
+	plot = true,          -- unlock sections, polishers and upstairs pedestals
 	buyGear = true,
 	claimFree = true,     -- offline earnings, forever pack, codes
 	moveSpeed = 90,       -- studs/s for the tween hops; the game does not check it
@@ -143,6 +145,17 @@ end
 --------------------------------------------------------------------------------
 -- movement
 --------------------------------------------------------------------------------
+
+-- Defined up here, not down with the panel: a local is invisible above its own
+-- definition, and the plot routines below format prices with it.
+local function short(n)
+	if type(n) ~= "number" then return "?" end
+	local units = { "", "K", "M", "B", "T", "Qa", "Qi" }
+	local i = 1
+	while n >= 1000 and i < #units do n = n / 1000 i = i + 1 end
+	if i == 1 then return string.format("%d", n) end
+	return string.format("%.2f%s", n, units[i])
+end
 
 local function char()
 	local c = plr.Character
@@ -294,6 +307,28 @@ end
 -- actions
 --------------------------------------------------------------------------------
 
+-- Standing at the GearNPC opens its panel, and buying through the remote never
+-- closes it again - the shop then sits over the whole screen while the farm keeps
+-- running behind it. Fire the panel's own Close button rather than just hiding the
+-- frame, so the controller's state goes back with it.
+local function closeModals()
+	local main = plr.PlayerGui:FindFirstChild("Main")
+	if not main then return end
+	for _, frame in ipairs(main:GetChildren()) do
+		if frame:IsA("GuiObject") and frame.Visible then
+			local closed = false
+			local button = frame:FindFirstChild("Close", true)
+			if button and (button:IsA("ImageButton") or button:IsA("TextButton")) then
+				for _, conn in ipairs(getconnections(button.Activated)) do
+					pcall(function() conn:Fire() end)
+					closed = true
+				end
+			end
+			if not closed then frame.Visible = false end
+		end
+	end
+end
+
 local function backpackTools()
 	local out = {}
 	for _, t in ipairs(plr.Backpack:GetChildren()) do
@@ -438,27 +473,167 @@ local function doDisplay()
 	if #free == 0 then return false end
 	table.sort(free)
 
-	local best, bestValue
+	-- Every qualifying item, most valuable first, into every free pedestal in one
+	-- trip. Placing one per cycle meant a museum with seven empty slots earned
+	-- nothing for the seven cycles it took to notice them.
+	local candidates = {}
 	for _, entry in ipairs(inventoryList()) do
 		if not entry.dirty then
 			local rarity = RARITY[(CfgItems.Items[entry.id] or {}).rarity] or 1
 			if rarity >= CONFIG.minRarityKeep then
-				local v = valueOf(entry)
-				if not bestValue or v > bestValue then best, bestValue = entry, v end
+				entry.__value = valueOf(entry)
+				candidates[#candidates + 1] = entry
 			end
 		end
 	end
-	if not best then return false end
+	if #candidates == 0 then return false end
+	table.sort(candidates, function(a, b) return (a.__value or 0) > (b.__value or 0) end)
 
 	STATE.phase = "display"
 	local ok, pivot = pcall(function() return peds:GetPivot() end)
 	if ok then hop(pivot.Position + Vector3.new(0, 4, 6)) end
-	local okPlace, placed = invoke("PedestalNetwork", "PedestalFunctions", "placeItem", free[1], best.uid)
-	if okPlace and placed == true then
-		STATE.note = "displayed " .. tostring((CfgItems.Items[best.id] or {}).displayName or best.id)
+
+	local placedCount = 0
+	for index, slot in ipairs(free) do
+		local entry = candidates[index]
+		if not entry then break end
+		local okPlace, placed = invoke("PedestalNetwork", "PedestalFunctions", "placeItem", slot, entry.uid)
+		if okPlace and placed == true then
+			placedCount = placedCount + 1
+			task.wait(0.4)
+		end
+	end
+	if placedCount > 0 then
+		STATE.note = "displayed " .. placedCount .. " item" .. (placedCount == 1 and "" or "s")
 		return true
 	end
 	return false
+end
+
+--------------------------------------------------------------------------------
+-- the plot itself
+--------------------------------------------------------------------------------
+
+-- Everything below spends gold on the base. None of it could be executed yet -
+-- the cheapest step is the Polishing section at 1,500,000 and the balance during
+-- development never got near it - so the call shapes come from the config and the
+-- client components, and every one is wrapped so a wrong shape shows up in the
+-- status line instead of silently doing nothing.
+local CfgSections = require(Const.plot.PlotSections)
+local CfgPolishing = require(Const.plot.Polishing)
+local CfgUpstairs = require(Const.plot.UpstairsPedestals)
+
+local function doUnlockSection()
+	local d = data()
+	if not d then return false end
+	local unlocked = {}
+	for _, id in ipairs(d.UnlockedSections or {}) do unlocked[id] = true end
+	for _, id in ipairs(CfgSections.PLOT_SECTION_ORDER or {}) do
+		local entry = (CfgSections.PlotSections or {})[id]
+		local cost = entry and tonumber(entry.unlockCost)
+		if entry and not unlocked[id] and cost and (d.Gold or 0) >= cost then
+			STATE.phase = "unlock " .. id
+			local ok, res = invoke("PlotSectionNetwork", "PlotSectionFunctions", "unlockSection", id)
+			if ok and res == true then
+				STATE.note = "unlocked section " .. id .. " for " .. short(cost)
+				return true
+			end
+			STATE.note = "unlockSection(" .. id .. ") refused (" .. tostring(res) .. ")"
+		end
+	end
+	return false
+end
+
+-- Polishing raises an item's condition (poor -> ok -> good -> great -> perfect ->
+-- mint), and condition feeds itemValueFor, so a polished find is worth strictly
+-- more both on a pedestal and at the seller.
+local function doPolish()
+	local d = data()
+	if not d then return false end
+	local unlocked = {}
+	for _, id in ipairs(d.UnlockedSections or {}) do unlocked[id] = true end
+	if not unlocked.Polishing then return false end
+
+	local slots = CfgPolishing.POLISHER_SLOT_COUNT or 2
+	local owned = tonumber(d.OwnedPolishers) or 1
+	local acted = false
+
+	-- collect anything finished first, so the slot is free for the next item
+	for slot = 1, math.min(owned, slots) do
+		local ok, res = invoke("PolisherNetwork", "PolisherFunctions", "collectPolish", slot)
+		if ok and res then
+			STATE.note = "collected polish " .. slot
+			acted = true
+			task.wait(0.4)
+		end
+	end
+
+	-- then start the most valuable item that is not already at the top condition
+	local order = require(Const.items.Conditions).CONDITION_ORDER or {}
+	local topCondition = order[#order]
+	local best, bestValue
+	for _, entry in ipairs(inventoryList()) do
+		if not entry.dirty and entry.condition ~= topCondition then
+			local v = valueOf(entry)
+			if not bestValue or v > bestValue then best, bestValue = entry, v end
+		end
+	end
+	if best then
+		for slot = 1, math.min(owned, slots) do
+			local ok, res = invoke("PolisherNetwork", "PolisherFunctions", "startPolish", slot, best.uid)
+			if ok and res == true then
+				STATE.note = "polishing " .. tostring((CfgItems.Items[best.id] or {}).displayName or best.id)
+				return true
+			end
+		end
+	end
+	return acted
+end
+
+local function doPlotUpgrades()
+	local d = data()
+	if not d then return false end
+	local gold = d.Gold or 0
+	local acted = false
+
+	-- a second polisher, then levels on the ones already owned
+	local owned = tonumber(d.OwnedPolishers) or 1
+	local unlockCost = (CfgPolishing.POLISHER_UNLOCK_COSTS or {})[owned]
+	if unlockCost and gold >= unlockCost then
+		local ok, res = invoke("PolisherNetwork", "PolisherFunctions", "unlockPolisher", owned + 1)
+		if ok and res == true then
+			STATE.note = "unlocked polisher " .. (owned + 1)
+			acted = true
+		end
+	end
+
+	local levels = d.PolisherLevels or {}
+	for slot = 1, math.min(owned, CfgPolishing.POLISHER_SLOT_COUNT or 2) do
+		local level = tonumber(levels[slot]) or tonumber(levels[tostring(slot)]) or 1
+		local entry = (CfgPolishing.POLISHER_LEVELS or {})[level]
+		local cost = entry and tonumber(entry.upgradeCost)
+		if cost and cost > 0 and gold >= cost and level < (CfgPolishing.POLISHER_MAX_LEVEL or 8) then
+			local ok, res = invoke("PolisherNetwork", "PolisherFunctions", "upgradePolisher", slot)
+			if ok and res == true then
+				STATE.note = "polisher " .. slot .. " -> level " .. (level + 1)
+				acted = true
+			end
+		end
+	end
+
+	-- upstairs pedestals, once Floor2 is open
+	local count = tonumber(d.OwnedUpstairsPedestals) or 0
+	local pedCost = (CfgUpstairs.UPSTAIRS_PEDESTAL_COSTS or {})[count + 1]
+	if pedCost and gold >= pedCost then
+		local slot = (CfgUpstairs.FIRST_BUYABLE_UPSTAIRS_SLOT or 10) + count
+		local ok, res = invoke("PedestalNetwork", "PedestalFunctions", "buyPedestal", slot)
+		if ok and res == true then
+			STATE.note = "bought upstairs pedestal " .. slot
+			acted = true
+		end
+	end
+
+	return acted
 end
 
 local function backpackFullness()
@@ -603,11 +778,15 @@ loop(0.5, function()
 			task.wait(3)
 			return
 		end
+		closeModals()
 		if CONFIG.clean then doClean() end
+		if CONFIG.polish then doPolish() end
 		if CONFIG.display then doDisplay() end
 		if CONFIG.sell and backpackFullness() >= CONFIG.sellAt then
 			doSell()
+			if CONFIG.plot then doUnlockSection() doPlotUpgrades() end
 			if CONFIG.buyGear then doBuyGear() end
+			closeModals()
 		end
 		if CONFIG.dig then doDig() end
 	end)
@@ -677,6 +856,10 @@ extra:Stepper("Keep from rarity", function()
 end, function(dir)
 	CONFIG.minRarityKeep = math.clamp(CONFIG.minRarityKeep + dir, 1, 8)
 end, "anything below this is sold instead of displayed")
+extra:Toggle("Polish", CONFIG.polish, function(v) CONFIG.polish = v end,
+	"raises condition, which raises value both on a pedestal and at the seller")
+extra:Toggle("Expand plot", CONFIG.plot, function(v) CONFIG.plot = v end,
+	"Polishing 1.5M, polisher 2 at 20M, Floor2 750M, upstairs pedestals 2B+", UI.theme.warn)
 extra:Stepper("Sell at", function() return math.floor(CONFIG.sellAt * 100) .. "%" end,
 	function(dir) CONFIG.sellAt = math.clamp(CONFIG.sellAt + dir * 0.1, 0.1, 1) end,
 	"backpack fullness that triggers a trip to the seller")
@@ -694,15 +877,6 @@ local out = page:Card("STATUS", 0):Readout(11, function(text)
 	if text:find("^AUTO") then return UI.theme.good end
 	return nil
 end)
-
-local function short(n)
-	if type(n) ~= "number" then return "?" end
-	local units = { "", "K", "M", "B", "T", "Qa", "Qi" }
-	local i = 1
-	while n >= 1000 and i < #units do n = n / 1000 i = i + 1 end
-	if i == 1 then return string.format("%d", n) end
-	return string.format("%.2f%s", n, units[i])
-end
 
 task.spawn(function()
 	while GEN == _G.__DIGCLEAN do
@@ -739,6 +913,8 @@ _G.__DIGCLEAN_DBG = {
 	data = data, tutorialStep = tutorialStep,
 	doDig = doDig, doClean = doClean, doSell = doSell, doDisplay = doDisplay,
 	doBuyGear = doBuyGear, claimFree = claimFree, unstuck = unstuck,
+	doPolish = doPolish, doUnlockSection = doUnlockSection, doPlotUpgrades = doPlotUpgrades,
+	closeModals = closeModals, plotNumber = plotNumber,
 	pickNode = pickNode, nodeList = nodeList, digController = digController,
 	invoke = invoke, fire = fire, hop = hop, npcNamed = npcNamed,
 	inventoryList = inventoryList, backpackFullness = backpackFullness,
