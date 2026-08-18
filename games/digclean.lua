@@ -77,6 +77,11 @@ local CONFIG = {
 	claimFree = true,     -- offline earnings, forever pack, codes
 	moveSpeed = 90,       -- studs/s for the tween hops; the game does not check it
 	clicksPerSec = 11,    -- DIG_MAX_CLICKS_PER_SECOND is 50
+	scan = true,          -- sweep the area before choosing what to dig
+	scanPoints = 4,       -- hops per sweep
+	scanDwell = 0.45,     -- pause at each hop; the stream ticks every 0.4s
+	scanUntil = 4,        -- keep sweeping while fewer than this many nodes are known
+	scanRarity = 3,       -- ...or while the best known node is below this rarity
 	sellAt = 0.3,         -- sell once the backpack is this full
 	gearEvery = 30,       -- seconds between gear-shopping trips
 	swapExhibits = true,  -- replace the weakest exhibit when a better find turns up
@@ -239,15 +244,43 @@ end
 -- The connection lives in _G and is disconnected before reconnecting. A boolean
 -- "already hooked" guard breaks on re-execute: the old run's listener survives and
 -- keeps writing into the previous script's table while the new one sees nothing.
+-- The server only streams the nodes within detector range, so a character standing
+-- still sees one or two of the island's eleven. Replacing the list on every stream
+-- threw away everything the last position had revealed; this MERGES by id and
+-- keeps a timestamp instead, so a sweep across the area builds up a picture of the
+-- whole field and the rarest of it can be chosen rather than whatever is underfoot.
+-- BURIED_LIFETIME_MAX is 120, but that is the node's own life from ITS spawn, not
+-- from when we first saw it - and another player can dig it out from under us at
+-- any time. Remembering sightings for anything near 120s filled the map with
+-- ghosts, and because the picker prefers rare ones it locked onto a dead epic and
+-- burned a 20-second dig timeout on it over and over while nothing was dug at all.
+-- A short memory keeps the choice wide without keeping the corpses.
+local NODE_TTL = 25
 local function armNodeListener()
 	if _G.__DC_NODECONN then pcall(function() _G.__DC_NODECONN:Disconnect() end) end
-	_G.__DC_NODES = _G.__DC_NODES or {}
+	_G.__DC_SEEN = _G.__DC_SEEN or {}
 	local ok, conn = pcall(function()
 		return net("DetectorNetwork").DetectorEvents.BuriedNodes:connect(function(nodes)
-			if type(nodes) == "table" then _G.__DC_NODES = nodes end
+			if type(nodes) ~= "table" then return end
+			local now = os.clock()
+			for _, n in ipairs(nodes) do
+				if n.id and typeof(n.position) == "Vector3" then
+					local kept = _G.__DC_SEEN[n.id]
+					_G.__DC_SEEN[n.id] = {
+						id = n.id, position = n.position, rarity = n.rarity,
+						-- first sighting wins: the node dies 120s after IT spawned,
+						-- not 120s after we last happened to walk past it
+						seenAt = kept and kept.seenAt or now,
+					}
+				end
+			end
 		end)
 	end)
 	if ok then _G.__DC_NODECONN = conn end
+end
+
+local function forgetNode(id)
+	if id and _G.__DC_SEEN then _G.__DC_SEEN[id] = nil end
 end
 
 local RARITY = {}
@@ -259,8 +292,46 @@ do
 end
 
 local function nodeList()
-	local list = _G.__DC_NODES
-	return type(list) == "table" and list or {}
+	local seen = _G.__DC_SEEN
+	if type(seen) ~= "table" then return {} end
+	local now = os.clock()
+	local out = {}
+	for id, n in pairs(seen) do
+		if now - (n.seenAt or 0) > NODE_TTL then
+			seen[id] = nil
+		else
+			out[#out + 1] = n
+		end
+	end
+	return out
+end
+
+-- Walks a short pattern across the dig area so the detector streams the nodes it
+-- cannot see from one spot. The whole sweep is a handful of hops at move speed,
+-- which is cheap next to a 5-second dig - and it is what turns "one node visible"
+-- into a choice between several, which is the only way to steer towards rarer
+-- drops without buying luck.
+local function sweepArea(zone, points)
+	if not zone or not zone:IsA("BasePart") then return end
+	STATE.phase = "scan"
+	local halfX, halfZ = zone.Size.X / 2, zone.Size.Z / 2
+	local spots = {}
+	local n = points or 4
+	for i = 1, n do
+		-- a rotating lattice rather than a fixed grid, so repeated sweeps do not
+		-- keep re-walking the exact same four corners
+		local angle = (i / n) * math.pi * 2 + (STATE.sweepPhase or 0)
+		spots[#spots + 1] = (zone.CFrame * CFrame.new(
+			math.cos(angle) * halfX * 0.65, 0, math.sin(angle) * halfZ * 0.65)).Position
+			+ Vector3.new(0, 4, 0)
+	end
+	STATE.sweepPhase = ((STATE.sweepPhase or 0) + 0.7) % (math.pi * 2)
+	for _, p in ipairs(spots) do
+		if not CONFIG.auto or GEN ~= _G.__DIGCLEAN then return end
+		hop(p, 0.15)
+		task.wait(CONFIG.scanDwell)
+	end
+	STATE.nodes = #nodeList()
 end
 
 -- Rarest first, and among equals the nearest. Walking past a legendary to dig a
@@ -377,14 +448,22 @@ local function doDig()
 
 	fire("DetectorNetwork", "DetectorEvents", "SetDetectorHeld", true)
 
+	-- Sweep first, then choose. Digging whatever is underfoot means the rarity of
+	-- every find is pure luck; sweeping first turns it into a pick from the field.
 	local node = pickNode()
+	local known = #nodeList()
+	if CONFIG.scan and (known < CONFIG.scanUntil or not node
+		or (RARITY[node.rarity] or 1) < CONFIG.scanRarity) then
+		sweepArea(zone, CONFIG.scanPoints)
+		node = pickNode()
+	end
 	if not node then
-		-- A toggle forces a fresh scan; without it the list can stay empty after
+		-- A toggle forces a fresh stream; without it the list can stay empty after
 		-- the last node of a batch was dug.
 		fire("DetectorNetwork", "DetectorEvents", "SetDetectorHeld", false)
-		task.wait(0.4)
+		task.wait(0.3)
 		fire("DetectorNetwork", "DetectorEvents", "SetDetectorHeld", true)
-		task.wait(2.5)
+		task.wait(1.5)
 		node = pickNode()
 	end
 	if not node then STATE.note = "no buried nodes" return false end
@@ -394,26 +473,56 @@ local function doDig()
 	STATE.phase = "dig " .. tostring(node.rarity)
 	hop(node.position + Vector3.new(0, 3, 0), 0.8)
 
-	local finished
+	local finished, started
 	if _G.__DC_ENDCONN then pcall(function() _G.__DC_ENDCONN:Disconnect() end) end
+	if _G.__DC_STARTCONN then pcall(function() _G.__DC_STARTCONN:Disconnect() end) end
 	local okConn, conn = pcall(function()
 		return net("ShovelNetwork").ShovelEvents.DigSceneEnd:connect(function(userId, success)
 			if userId == plr.UserId then finished = success end
 		end)
 	end)
 	if okConn then _G.__DC_ENDCONN = conn end
+	local okStart, startConn = pcall(function()
+		return net("ShovelNetwork").ShovelEvents.DigSceneStart:connect(function(userId)
+			if userId == plr.UserId then started = true end
+		end)
+	end)
+	if okStart then _G.__DC_STARTCONN = startConn end
 
 	fire("ShovelNetwork", "ShovelEvents", "SetShovelEquipped", true)
 	pcall(function() ctrl:attemptDig() end)
 	task.wait(0.4)
 
+	-- The server answers a real dig with DigSceneStart almost immediately. If it
+	-- does not, the node is not there any more and clicking at it for the full
+	-- timeout is pure waste - that is what made three dead nodes in a row stall the
+	-- farm for twenty seconds each.
 	local interval = 1 / math.clamp(CONFIG.clicksPerSec, 1, 40)
+	local startDeadline = os.clock() + 1.6
+	while not started and finished == nil and os.clock() < startDeadline do
+		pcall(function() ctrl:onDigInput() end)
+		task.wait(interval)
+	end
+	if not started and finished == nil then
+		if okConn then pcall(function() conn:Disconnect() end) end
+		if okStart then pcall(function() startConn:Disconnect() end) end
+		forgetNode(node.id)
+		STATE.note = "stale node (" .. tostring(node.rarity) .. ")"
+		return false
+	end
+
 	local deadline = os.clock() + 20
 	while finished == nil and os.clock() < deadline and CONFIG.auto and GEN == _G.__DIGCLEAN do
 		pcall(function() ctrl:onDigInput() end)
 		task.wait(interval)
 	end
 	if okConn then pcall(function() conn:Disconnect() end) end
+	if okStart then pcall(function() startConn:Disconnect() end) end
+
+	-- Gone either way: a dug node is consumed, and a timed-out one is usually a
+	-- node that expired underneath us. Leaving it in the map makes the picker
+	-- return the same dead spot forever.
+	forgetNode(node.id)
 
 	if finished then
 		STATE.digs = STATE.digs + 1
@@ -769,7 +878,13 @@ end
 -- The reserve that stops the starvation pattern: once the next island is within
 -- reach of the current income, gear may only spend the surplus above its price.
 -- Without it a 45,000 shovel every few minutes means 1,100,000 is never reached.
-local RESERVE_WINDOW = 900
+-- An hour, not fifteen minutes. At a few hundred gold a second the next island is
+-- roughly an hour of farming away, so a short window never declared it "in reach"
+-- and gear kept eating the balance: a 190,000 shovel took the pile from 192,661
+-- straight back to 4,109 while the 1,100,000 island - which DOUBLES the rarity of
+-- every future roll - stayed out of view. The window has to be long enough that
+-- the target counts as reachable, or the reserve never engages at all.
+local RESERVE_WINDOW = 3600
 local function islandReserve()
 	local d = data()
 	if not d then return 0 end
@@ -1045,6 +1160,17 @@ main:Toggle("Sell", CONFIG.sell, function(v) CONFIG.sell = v end,
 main:Slider("Clicks/sec", 4, 30, CONFIG.clicksPerSec, function(v)
 	CONFIG.clicksPerSec = math.floor(v)
 end, "the game's own ceiling is 50 per second")
+main:Toggle("Scan the field", CONFIG.scan, function(v) CONFIG.scan = v end,
+	"sweeps the area first so there is a choice of nodes instead of one underfoot")
+main:Slider("Scan hops", 2, 10, CONFIG.scanPoints, function(v)
+	CONFIG.scanPoints = math.floor(v)
+end, "more hops reveal more of the field and cost about half a second each")
+main:Stepper("Hold out for", function()
+	local order = CfgItems.RARITY_ORDER
+	return (type(order) == "table" and order[CONFIG.scanRarity]) or tostring(CONFIG.scanRarity)
+end, function(dir)
+	CONFIG.scanRarity = math.clamp(CONFIG.scanRarity + dir, 1, 8)
+end, "keep sweeping while the best known node is below this")
 
 local extra = page:Card("MUSEUM & GEAR", 2)
 extra:Toggle("Display best finds", CONFIG.display, function(v) CONFIG.display = v end,
@@ -1124,6 +1250,7 @@ _G.__DIGCLEAN_DBG = {
 	doTravel = doTravel, bestIsland = bestIsland, islandReserve = islandReserve,
 	closeModals = closeModals, plotNumber = plotNumber,
 	pickNode = pickNode, nodeList = nodeList, digController = digController,
+	sweepArea = sweepArea, forgetNode = forgetNode, armNodeListener = armNodeListener,
 	invoke = invoke, fire = fire, hop = hop, npcNamed = npcNamed,
 	inventoryList = inventoryList, backpackFullness = backpackFullness,
 }
