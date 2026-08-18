@@ -56,7 +56,11 @@ local CfgStrengthLevels = require(Shared.Configs.StrengthLevels)
 local CONFIG = {
 	auto = false,
 	click = true,          -- FireAutoClick every Heartbeat
-	trainZone = true,      -- stand in the strongest bag the rebirth count allows
+	-- Off. The stages train too - their mobs feed the same Strength - so standing at
+	-- a bag between clears is time thrown away, and the walk back and forth was
+	-- most of what the farm appeared to be doing. It stays available as a fallback
+	-- for when the ladder is walled and there is nothing else to do.
+	trainZone = false,
 	rebirth = true,
 	-- Off by default and honestly so: a tour of twelve pads was walked and Wins
 	-- never moved off zero. The pads sit inside the stages (Worlds.World_1.Stages.
@@ -78,6 +82,7 @@ local CONFIG = {
 	-- stage 1. It is switched on automatically once the climb stalls, where the
 	-- teleport costs nothing because there is nowhere further to go.
 	claimStagePads = false,
+	wallRetryEvery = 5,    -- laps between probing whether the wall has moved
 	moveSpeed = 90,
 	claimEvery = 45,       -- seconds between win-pad tours
 	maxClaimTravel = 900,  -- studs; further pads are on another stage entirely
@@ -348,10 +353,20 @@ local function stageFolder(id)
 end
 
 local function claimStageWins(stage)
-	local folder = stage:FindFirstChild("Wins")
-	if not folder then return false end
 	local _, hrp = char()
 	if not hrp then return false end
+	-- The pad streams out with the rest of the stage, so walk there first when the
+	-- harvest target is a stage we already climbed past.
+	local folder = stage:FindFirstChild("Wins")
+	if not folder then
+		local ok, pivot = pcall(function() return stage:GetPivot() end)
+		if ok then
+			hop(pivot.Position + Vector3.new(0, 6, 0), 0.6)
+			task.wait(0.6)
+			folder = stage:FindFirstChild("Wins")
+		end
+	end
+	if not folder then return false end
 	for _, model in ipairs(folder:GetChildren()) do
 		if not isDoublePad(model) then
 			local pad = model:FindFirstChild(CfgWinButtons.ClaimPartName or "Claim Part")
@@ -395,6 +410,20 @@ local function runStage()
 	STATE.phase = "stage " .. id
 	STATE.stage = id
 	STATE.inStage = true
+
+	-- A run can wedge on GateBlocked with nothing alive left: the stage is neither
+	-- running nor finished and standing in it changes nothing. Stepping out to the
+	-- stage's ReturnPoint and walking back in is what makes the server hand out a
+	-- fresh set of mobs. Without this it sat on stage 1 forever with alive=0.
+	if plr:GetAttribute("StageProgressionState") == "GateBlocked"
+		and (tonumber(plr:GetAttribute("StageProgressionAliveMobs")) or 0) == 0 then
+		local ret = stage:FindFirstChild("ReturnPoint")
+		if ret and ret:IsA("BasePart") then
+			hop(ret.Position + Vector3.new(0, 4, 0), 0.4)
+			task.wait(0.5)
+		end
+	end
+
 	hop(zone.Position + Vector3.new(0, 4, 0), 0.35)
 
 	-- The clicking loop is already running on Heartbeat; here we only wait for the
@@ -403,9 +432,16 @@ local function runStage()
 	-- second because dying or being knocked back drops you outside it, and outside
 	-- the zone no mobs spawn at all.
 	local deadline = os.clock() + CONFIG.stageTimeout
+	local died = false
 	while os.clock() < deadline and CONFIG.auto and GEN == _G.__MUSCLE do
 		local state = plr:GetAttribute("StageProgressionState")
 		if state == "StageCompleted" then break end
+		-- Dying throws the whole run back to stage 1, and the cursor moving
+		-- backwards is the only reliable sign of it. Without this the attempt sat
+		-- out its full timeout on a stage it was no longer even in - twenty seconds
+		-- of standing at the wrong end of the map per death.
+		local cursor = tonumber(plr:GetAttribute("StageProgressionCurrentStage")) or id
+		if cursor < id then died = true break end
 		local _, hrp, hum = char()
 		if hrp and (hrp.Position - zone.Position).Magnitude > 20 then
 			hop(zone.Position + Vector3.new(0, 4, 0), 0.2)
@@ -423,21 +459,41 @@ local function runStage()
 
 	if plr:GetAttribute("StageProgressionState") == "StageCompleted" then
 		STATE.stageFails = 0
+		STATE.highestCleared = math.max(STATE.highestCleared or 0, id)
 		-- Do NOT touch the Wins pad here. Claiming it teleports the player back to
 		-- the start and resets the run, so the cursor never leaves stage 1: watched
 		-- live it cycled StageActivated -> RunReset -> StageActivated forever while
 		-- collecting the same single win over and over. Climbing is worth far more -
 		-- stage 1's pad pays 1, stage 8's pays 7,500 - so the pad is only collected
 		-- when the ladder has actually stalled.
-		if CONFIG.claimStagePads then
+		-- Cash in at the TOP of the safe range, before walking into the wall. A pad
+		-- only pays while its stage is completed in the CURRENT run, and dying at
+		-- the wall resets the run - so harvesting afterwards always came back with
+		-- zero. Claiming here takes the teleport on purpose: the run restarts, the
+		-- ladder is climbed again, and the same pad pays again next lap.
+		local wall = STATE.wallAt
+		local topOfSafe = wall and (id + 1 >= wall)
+		if topOfSafe or CONFIG.claimStagePads then
 			local before = (data() or {}).Wins or 0
+			STATE.phase = "harvest " .. id
 			claimStageWins(stage)
 			task.wait(0.8)
-			STATE.note = "stage " .. id .. " cleared, +" ..
-				short(((data() or {}).Wins or 0) - before) .. " wins"
-		else
-			STATE.note = "stage " .. id .. " cleared, moving up"
+			local gained = ((data() or {}).Wins or 0) - before
+			STATE.harvested = (STATE.harvested or 0) + math.max(gained, 0)
+			STATE.note = "stage " .. id .. " harvested +" .. short(gained) .. " wins"
+			-- Probe the wall again every few laps: evolutions and rebirths bought
+			-- with these wins are exactly what moves it, and a wall that is never
+			-- retested pins the farm to whatever it could do an hour ago.
+			STATE.laps = (STATE.laps or 0) + 1
+			if STATE.laps % CONFIG.wallRetryEvery == 0 then
+				STATE.wallAt = nil
+				STATE.note = STATE.note .. ", retrying the wall"
+			end
+			STATE.nextStageAt = 0
+			-- The claim teleported us back, so this lap is over.
+			return false
 		end
+		STATE.note = "stage " .. id .. " cleared, moving up"
 		return true
 	end
 
@@ -445,17 +501,38 @@ local function runStage()
 	-- the bag, cash in the pad of this stage - the climb has stalled here, so the
 	-- teleport it causes costs nothing, and the wins buy the evolution that breaks
 	-- the wall.
+	-- Walled. This is where the wins are actually made: the pad of the HIGHEST
+	-- stage already cleared, not of the one that just failed. The ladder pays
+	-- 1 / 25 / 100 / 250 / 1,500 / 7,500 / 15,000 / 75,000 / 250,000 as it goes up
+	-- and reaches the billions past stage 26, so one claim at the top of the climb
+	-- is worth thousands of claims at the bottom. The teleport it triggers is
+	-- exactly what is wanted here - the run resets and the climb starts again.
 	STATE.stageFails = (STATE.stageFails or 0) + 1
-	if STATE.stageFails >= 2 then
-		local before = (data() or {}).Wins or 0
-		claimStageWins(stage)
-		task.wait(0.8)
-		local gained = ((data() or {}).Wins or 0) - before
-		if gained > 0 then STATE.note = "stalled on " .. id .. ", banked " .. short(gained) .. " wins" end
+	if died then
+		STATE.deaths = (STATE.deaths or 0) + 1
+		-- A death is the ladder telling us where the wall is. Remember it and stop
+		-- throwing runs at that stage until something has actually got stronger.
+		STATE.wallAt = id
 	end
-	if not STATE.note or not STATE.note:find("banked") then
-		STATE.note = "stage " .. id .. " too strong, training instead"
+	local harvestId = STATE.highestCleared or (id - 1)
+	if harvestId >= 1 then
+		local top = stageFolder(harvestId)
+		if top then
+			STATE.phase = "harvest " .. harvestId
+			local before = (data() or {}).Wins or 0
+			claimStageWins(top)
+			task.wait(0.8)
+			local gained = ((data() or {}).Wins or 0) - before
+			if gained > 0 then
+				STATE.harvested = (STATE.harvested or 0) + gained
+				STATE.note = "walled at " .. id .. ", banked " .. short(gained) ..
+					" wins from stage " .. harvestId
+				STATE.nextStageAt = 0   -- straight back up the ladder
+				return false
+			end
+		end
 	end
+	STATE.note = "stage " .. id .. " too strong"
 	STATE.nextStageAt = os.clock() + CONFIG.stageBackoff
 	return false
 end
