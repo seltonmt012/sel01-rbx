@@ -201,34 +201,54 @@ end
 -- the world
 --------------------------------------------------------------------------------
 
-local function islandFolder()
-	local d = data()
-	local islands = Workspace:FindFirstChild("Islands")
-	if not islands then return nil end
-	-- The data's island id is not the folder name, so the current island is the
-	-- one whose dig area is nearest - which is also the one we want to work in.
-	local _, hrp = char()
-	if not hrp then return islands:GetChildren()[1] end
-	local best, bestDist
-	for _, isl in ipairs(islands:GetChildren()) do
-		local ok, pivot = pcall(function() return isl:GetPivot() end)
-		if ok then
-			local dist = (pivot.Position - hrp.Position).Magnitude
-			if not bestDist or dist < bestDist then best, bestDist = isl, dist end
+-- The workspace folder is named "Shipwreck Cove" while the data calls the island
+-- "island2", so the two have to be matched through getIslands, which carries both.
+local function islandNameFor(id)
+	if not _G.__DC_ISLE_NAMES then
+		local ok, list = invoke("TravelNetwork", "TravelFunctions", "getIslands")
+		local map = {}
+		if ok and type(list) == "table" then
+			for _, entry in ipairs(list) do
+				if entry.id and entry.name then map[entry.id] = entry.name end
+			end
 		end
+		_G.__DC_ISLE_NAMES = map
 	end
-	return best
+	return _G.__DC_ISLE_NAMES[id]
 end
 
-local function nearestTagged(tag)
+-- Resolved from Data.CurrentIsland, NOT from whichever island happens to be
+-- nearest. The museum plot sits on the starter island for everyone, so as soon as
+-- the farm walked over to display something it "was" on Home Beach again - and
+-- then bought gear from the Home Beach shop, where the whole island2 ladder does
+-- not exist. Gold piled to 1.1M with a titanium shovel, an onyx detector and a
+-- turquoise spray all affordable and none of them bought.
+local function islandFolder()
+	local islands = Workspace:FindFirstChild("Islands")
+	if not islands then return nil end
+	local d = data()
+	local name = d and islandNameFor(d.CurrentIsland)
+	local folder = name and islands:FindFirstChild(name)
+	if folder then return folder end
+	return islands:GetChildren()[1]
+end
+
+-- Nearest tagged instance, optionally restricted to a container. The restriction
+-- is the whole point: dig zones exist on every island, and taking the globally
+-- nearest one meant that standing at the museum - which is always on the starter
+-- island - sent the farm back to Home Beach to dig at luck x1 while a paid-for
+-- island2 sat unused at luck x2.
+local function nearestTagged(tag, container)
 	local _, hrp = char()
 	if not hrp then return nil end
 	local best, bestDist
 	for _, z in ipairs(CollectionService:GetTagged(tag)) do
-		local ok, pivot = pcall(function() return z:GetPivot() end)
-		if ok then
-			local dist = (pivot.Position - hrp.Position).Magnitude
-			if not bestDist or dist < bestDist then best, bestDist = z, dist end
+		if not container or z:IsDescendantOf(container) then
+			local ok, pivot = pcall(function() return z:GetPivot() end)
+			if ok then
+				local dist = (pivot.Position - hrp.Position).Magnitude
+				if not bestDist or dist < bestDist then best, bestDist = z, dist end
+			end
 		end
 	end
 	return best, bestDist
@@ -440,7 +460,7 @@ local function doDig()
 	-- away - just outside the area, right next to it - left the detector held and
 	-- the node list permanently empty, which reads as "the farm stopped finding
 	-- anything" while everything else looks healthy.
-	local zone, zoneDist = nearestTagged("DigZone")
+	local zone, zoneDist = nearestTagged("DigZone", islandFolder())
 	if zone then
 		local inside = false
 		if zone:IsA("BasePart") then
