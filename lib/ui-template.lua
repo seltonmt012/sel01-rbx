@@ -1,90 +1,159 @@
 --!nocheck
 -- ui-template.lua  --  the house UI for every script in this folder  --  seltonmt
 --
--- Ported from "UI Layout im Bloodline-Stil" (the Neverlose-style mock the user
--- supplied). Use this for EVERY panel from now on - do not invent a new look
--- per game.
---
 --   local UI = loadstring(readfile("ui-template.lua"))()
---   local win  = UI.Window({ title = "SELL", accentTitle = "ORES", subtitle = "seltonmt" })
---   local page = win:Page("FARMING", UI.icon.sliders)
---   local card = page:Card("ORE", 1)      -- 1 = left, 2 = right, 0 = full width
---   card:Toggle("Buy rolled ore", CONFIG.autoBuyOre, function(v) CONFIG.autoBuyOre = v end, "hint")
---   local refresh = card:Stepper("Max payback", getText, onStep)   -- returns a refresher
+--   local win  = UI.Window({ title = "SPEED", accentTitle = "MONKEY", subtitle = "seltonmt" })
+--   local page = win:Page("FARM", UI.icon.bolt)
+--   local card = page:Card("LOOP", 1)      -- 1 = left, 2 = right, 0 = full width
+--   card:Toggle("Auto", CONFIG.auto, function(v) CONFIG.auto = v end, "hint")
+--   local refresh = card:Stepper("Stage", getText, onStep)   -- returns a refresher
 --   card:Slider("Rate", 2, 40, 12, function(v) ... end)
 --   card:Dropdown("Mode", { "Fast", "Safe" }, "Fast", function(v) ... end)
 --   card:Button("Unstuck", function() ... end, UI.theme.bad)
 --   local out = card:Readout(12); out:set({ "STATUS", "  income 47.3K/s" })
---   win:SetStatus("213K wins   12B dmg   stage 7")       -- the live header line
+--   win:SetStatus("213K wins   lvl 241   world 2")     -- the live header line
 --
--- Layout, straight from the mock: a 78px icon rail, a 224px nav column holding
--- the search box and the grouped entries, then the content area with a header, a
--- chip bar listing every enabled toggle, and a two-column card grid.
+-- ==== v2 =====================================================================
+-- The first version was a port of a Neverlose-style mock: flat slate blue on
+-- near-black, no motion. This one keeps the layout that worked and every entry
+-- point above unchanged, and replaces the surface: its own palette, gradients
+-- instead of flat fills, and motion on everything the user can touch.
+--
+-- Palette is "neon dusk" - a violet-black base with a violet -> cyan accent ramp,
+-- mint for good, amber for warn, rose for bad. Nothing in here is borrowed from
+-- another menu; the colours are the panel's own identity.
+--
+-- Motion rules, so it stays quick rather than showy:
+--   * anything you click answers within 120-180ms; nothing blocks input
+--   * the toggle knob overshoots slightly (Back easing) because that reads as a
+--     switch rather than a fade
+--   * one shared Heartbeat rotates every accent gradient; adding a second driver
+--     per element is what makes a Roblox panel stutter
+--   * page changes fade and lift 10px, they do not slide sideways - sideways
+--     motion makes the two-column grid look like it is being rebuilt
+--
+-- Layout, unchanged from v1 because it was the part that worked: a 78px icon
+-- rail, a 224px nav column with the search box, then the content area with a
+-- header carrying the live line, an "AKTIV n" chip bar, and a two-column card
+-- grid with a full-width strip below it.
 --
 -- Implementation notes worth keeping:
 --   * The card grid is NOT a UIGridLayout. A grid forces every cell to one size,
 --     which fights AutomaticSize and clipped every card to a fixed height. Two
 --     plain columns, each with its own UIListLayout, let cards size themselves.
+--   * Do not nest AutomaticSize more than one level inside a UIListLayout. The
+--     grid holder is sized by hand from max(column1, column2).
 --   * Chips are keyed by an internal counter, not by their caption, so two
 --     toggles that happen to share a label do not overwrite each other.
---   * Search hides rows and then hides any card that has no visible row left,
---     and dims the nav entry of a page with no hits.
+--   * Search hides rows, then any card with no visible row left, then dims the
+--     nav entry of a page with no hit at all.
 
 local Players = game:GetService("Players")
 local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
 
 local plr = Players.LocalPlayer
 
 local UI = {}
 
--- Palette, taken from the mock's hex values ------------------------------------
+-- Palette ---------------------------------------------------------------------
+-- Every surface is one of five depths so the eye can tell nesting apart without
+-- borders doing all the work: void < rail < window < card < input.
 UI.theme = {
-	rail = Color3.fromHex("0b0e13"),
-	sidebar = Color3.fromHex("0f131a"),
-	window = Color3.fromHex("12161d"),
-	header = Color3.fromHex("10151c"),
-	subBar = Color3.fromHex("0f141b"),
-	card = Color3.fromHex("151a22"),
-	input = Color3.fromHex("12171f"),
-	backdrop = Color3.fromHex("0c0f14"),
+	void = Color3.fromHex("06050c"),
+	rail = Color3.fromHex("0a0814"),
+	sidebar = Color3.fromHex("0d0a19"),
+	window = Color3.fromHex("110d1e"),
+	header = Color3.fromHex("0f0b1b"),
+	subBar = Color3.fromHex("0c0917"),
+	card = Color3.fromHex("171227"),
+	cardHover = Color3.fromHex("1d1731"),
+	input = Color3.fromHex("140f24"),
+	backdrop = Color3.fromHex("06050c"),
 
-	accent = Color3.fromHex("2aa3f0"),
-	accentHover = Color3.fromHex("6cc2f7"),
-	accentSoft = Color3.fromHex("9ed6f9"),
+	-- the accent is a ramp, not a colour: violet into cyan
+	accent = Color3.fromHex("8b5cf6"),
+	accentAlt = Color3.fromHex("22d3ee"),
+	accentHover = Color3.fromHex("a78bfa"),
+	accentSoft = Color3.fromHex("d8caff"),
 
-	-- tones that carry meaning; the mock is monochrome but the panels are not
-	good = Color3.fromRGB(86, 208, 140),
-	warn = Color3.fromRGB(244, 176, 92),
-	bad = Color3.fromRGB(232, 104, 104),
+	-- tones that carry meaning
+	good = Color3.fromHex("5eead4"),
+	warn = Color3.fromHex("fbbf24"),
+	bad = Color3.fromHex("fb7185"),
 
-	text = Color3.fromRGB(255, 255, 255),
+	text = Color3.fromHex("ffffff"),
 
-	-- The mock leans on rgba() a lot; in Roblox that is a solid colour plus a
-	-- transparency, so the alphas live here rather than being guessed per call.
-	lineAlpha = 0.93,     -- rgba(255,255,255,0.07)
-	dimAlpha = 0.55,      -- rgba(255,255,255,0.45)
-	fainterAlpha = 0.72,  -- rgba(255,255,255,0.28)
+	-- rgba() from the mock is a solid colour plus a transparency in Roblox, so the
+	-- alphas live here rather than being guessed at every call site.
+	lineAlpha = 0.9,
+	dimAlpha = 0.5,
+	fainterAlpha = 0.7,
 }
 
 UI.font = {
-	heading = Enum.Font.GothamBold,   -- stands in for Oxanium
-	body = Enum.Font.Gotham,          -- stands in for Rajdhani
+	heading = Enum.Font.GothamBold,
+	body = Enum.Font.Gotham,
 	mono = Enum.Font.Code,
 }
 
 -- Icon glyphs for the 78px rail. Roblox has no inline SVG, so the mock's icons
--- become single characters.
+-- become single characters. Every key from v1 is still here; scripts index these
+-- by name and a missing one would silently draw nothing.
 UI.icon = {
 	sliders = "≡", eye = "◉", target = "◎", shield = "◇",
 	bolt = "⚡", gear = "⚙", list = "▤", chart = "▦",
 	sword = "†", coin = "◍", flask = "◊", map = "◈",
 	pickaxe = "⛏", bag = "▣", clock = "◷", flame = "✦",
+	star = "✧", wave = "≈", grid = "⊞", spark = "❉",
 }
+
+-- Motion ----------------------------------------------------------------------
+local EASE = {
+	quick = TweenInfo.new(0.12, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+	soft = TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+	snap = TweenInfo.new(0.22, Enum.EasingStyle.Back, Enum.EasingDirection.Out),
+	slow = TweenInfo.new(0.3, Enum.EasingStyle.Quint, Enum.EasingDirection.Out),
+}
+
+local function tween(instance, info, props)
+	local t = TweenService:Create(instance, info, props)
+	t:Play()
+	return t
+end
+
+-- One driver for every animated gradient in the panel. A per-element RunService
+-- connection is what turns a Roblox menu into a stutter, so they all register
+-- here and get stepped from a single Heartbeat.
+local spinners = {}
+local spinnerConn
+local function registerSpin(gradient, speed, sweep)
+	table.insert(spinners, { gradient = gradient, speed = speed or 24, sweep = sweep or 0 })
+	if spinnerConn then return end
+	local clock = 0
+	spinnerConn = RunService.Heartbeat:Connect(function(dt)
+		clock += dt
+		for index = #spinners, 1, -1 do
+			local entry = spinners[index]
+			if not entry.gradient.Parent then
+				table.remove(spinners, index)
+			else
+				entry.gradient.Rotation = (clock * entry.speed + entry.sweep) % 360
+			end
+		end
+		if #spinners == 0 then
+			spinnerConn:Disconnect()
+			spinnerConn = nil
+		end
+	end)
+end
+
+-- Building blocks -------------------------------------------------------------
 
 local function corner(instance, radius)
 	local c = Instance.new("UICorner")
-	c.CornerRadius = UDim.new(0, radius or 7)
+	c.CornerRadius = UDim.new(0, radius or 8)
 	c.Parent = instance
 	return c
 end
@@ -93,8 +162,34 @@ local function stroke(instance, alpha, color)
 	local s = Instance.new("UIStroke")
 	s.Color = color or UI.theme.text
 	s.Transparency = alpha or UI.theme.lineAlpha
+	s.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
 	s.Parent = instance
 	return s
+end
+
+-- The accent ramp as a gradient. `spin` makes it drift, which is what gives the
+-- window edge and the active controls their slow shimmer.
+local function accentGradient(instance, spin, a, b)
+	local g = Instance.new("UIGradient")
+	g.Color = ColorSequence.new(a or UI.theme.accent, b or UI.theme.accentAlt)
+	g.Rotation = 25
+	g.Parent = instance
+	if spin then registerSpin(g, spin) end
+	return g
+end
+
+-- A very slight top-to-bottom lift on a solid surface. Flat fills read as cheap
+-- at this size; a 6% ramp is enough to give the card an edge without banding.
+local function sheen(instance, strength)
+	local g = Instance.new("UIGradient")
+	g.Color = ColorSequence.new(Color3.new(1, 1, 1), Color3.fromRGB(210, 210, 220))
+	g.Transparency = NumberSequence.new({
+		NumberSequenceKeypoint.new(0, 1 - (strength or 0.06)),
+		NumberSequenceKeypoint.new(1, 1),
+	})
+	g.Rotation = 90
+	g.Parent = instance
+	return g
 end
 
 local function label(parent, text, size, font, color, alpha)
@@ -134,8 +229,25 @@ function UI.Window(options)
 	root.Draggable = true
 	root.ClipsDescendants = true
 	root.Parent = gui
-	corner(root, 14)
-	stroke(root)
+	corner(root, 18)
+
+	-- The window edge is the one place the accent ramp is always visible, so it
+	-- gets the slow drift. Two strokes: a dark one for contrast against a bright
+	-- game, the gradient one on top.
+	stroke(root, 0.55, UI.theme.void)
+	local edge = Instance.new("UIStroke")
+	edge.Thickness = 1
+	edge.Transparency = 0.35
+	edge.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+	edge.Parent = root
+	accentGradient(edge, 14)
+
+	-- Opening animation. UIScale rather than Size so the layout inside never has
+	-- to reflow mid-tween.
+	local scale = Instance.new("UIScale")
+	scale.Scale = 0.94
+	scale.Parent = root
+	tween(scale, EASE.slow, { Scale = 1 })
 
 	local window = {
 		gui = gui, root = root,
@@ -149,11 +261,11 @@ function UI.Window(options)
 	rail.BackgroundColor3 = UI.theme.rail
 	rail.BorderSizePixel = 0
 	rail.Parent = root
-	corner(rail, 14)
+	corner(rail, 18)
 
 	local railFill = Instance.new("Frame")   -- squares off the right-hand corners
-	railFill.Size = UDim2.new(0, 14, 1, 0)
-	railFill.Position = UDim2.new(1, -14, 0, 0)
+	railFill.Size = UDim2.new(0, 18, 1, 0)
+	railFill.Position = UDim2.new(1, -18, 0, 0)
 	railFill.BackgroundColor3 = UI.theme.rail
 	railFill.BorderSizePixel = 0
 	railFill.Parent = rail
@@ -165,19 +277,18 @@ function UI.Window(options)
 	railList.Parent = rail
 
 	local railPad = Instance.new("UIPadding")
-	railPad.PaddingTop = UDim.new(0, 16)
+	railPad.PaddingTop = UDim.new(0, 18)
 	railPad.Parent = rail
 
 	local badge = Instance.new("Frame")
-	badge.Size = UDim2.fromOffset(32, 32)
+	badge.Size = UDim2.fromOffset(36, 36)
 	badge.BackgroundColor3 = UI.theme.accent
-	badge.BackgroundTransparency = 0.84
 	badge.BorderSizePixel = 0
 	badge.LayoutOrder = 0
 	badge.Parent = rail
-	corner(badge, 9)
-	stroke(badge, 0.6, UI.theme.accent)
-	local badgeText = label(badge, options.badge or "◈", 15, UI.font.heading, UI.theme.accent)
+	corner(badge, 12)
+	accentGradient(badge, 20)
+	local badgeText = label(badge, options.badge or "◈", 17, UI.font.heading, UI.theme.void)
 	badgeText.Size = UDim2.fromScale(1, 1)
 	badgeText.TextXAlignment = Enum.TextXAlignment.Center
 
@@ -189,46 +300,62 @@ function UI.Window(options)
 	sidebar.BorderSizePixel = 0
 	sidebar.Parent = root
 
-	local brand = label(sidebar, "", 20, UI.font.heading)
-	brand.Size = UDim2.new(1, -36, 0, 24)
-	brand.Position = UDim2.new(0, 18, 0, 20)
-	brand.RichText = true
-	brand.Text = string.format('%s<font color="#2aa3f0">%s</font>',
-		options.title or "PANEL", options.accentTitle or "")
+	local brand = label(sidebar, options.title or "PANEL", 21, UI.font.heading)
+	brand.Size = UDim2.new(1, -36, 0, 26)
+	brand.Position = UDim2.new(0, 18, 0, 22)
+
+	-- The accented half of the title is a real gradient rather than a RichText
+	-- colour, so it drifts with the rest of the accent surfaces.
+	local brandAccent = label(sidebar, options.accentTitle or "", 21, UI.font.heading)
+	brandAccent.Size = UDim2.new(1, -36, 0, 26)
+	-- Measured with TextService, not by reading TextBounds off a hidden label:
+	-- TextBounds on an instance that has never been rendered can come back as
+	-- zero on the first frame and the two halves of the title then overlap.
+	local titleWidth = game:GetService("TextService"):GetTextSize(
+		options.title or "PANEL", 21, UI.font.heading, Vector2.new(1000, 100)).X
+	brandAccent.Position = UDim2.new(0, 18 + titleWidth, 0, 22)
+	accentGradient(brandAccent, 18)
 
 	local searchWrap = Instance.new("Frame")
-	searchWrap.Size = UDim2.new(1, -28, 0, 32)
-	searchWrap.Position = UDim2.new(0, 14, 0, 52)
+	searchWrap.Size = UDim2.new(1, -28, 0, 34)
+	searchWrap.Position = UDim2.new(0, 14, 0, 58)
 	searchWrap.BackgroundColor3 = UI.theme.input
 	searchWrap.BorderSizePixel = 0
 	searchWrap.Parent = sidebar
-	corner(searchWrap, 8)
-	stroke(searchWrap, 0.92)
+	corner(searchWrap, 10)
+	local searchEdge = stroke(searchWrap, 0.9)
 
 	local search = Instance.new("TextBox")
 	search.Size = UDim2.new(1, -34, 1, 0)
-	search.Position = UDim2.new(0, 10, 0, 0)
+	search.Position = UDim2.new(0, 12, 0, 0)
 	search.BackgroundTransparency = 1
 	search.PlaceholderText = "Einstellung suchen…"
 	search.Text = ""
 	search.TextXAlignment = Enum.TextXAlignment.Left
 	search.TextColor3 = UI.theme.text
-	search.PlaceholderColor3 = UI.theme.text
+	search.PlaceholderColor3 = UI.theme.accentSoft
 	search.Font = UI.font.body
 	search.TextSize = 13
 	search.ClearTextOnFocus = false
 	search.Parent = searchWrap
 	window.search = search
 
+	search.Focused:Connect(function()
+		tween(searchEdge, EASE.quick, { Transparency = 0.35, Color = UI.theme.accent })
+	end)
+	search.FocusLost:Connect(function()
+		tween(searchEdge, EASE.quick, { Transparency = 0.9, Color = UI.theme.text })
+	end)
+
 	local searchClear = Instance.new("TextButton")
 	searchClear.Size = UDim2.fromOffset(22, 22)
-	searchClear.Position = UDim2.new(1, -26, 0.5, -11)
+	searchClear.Position = UDim2.new(1, -28, 0.5, -11)
 	searchClear.BackgroundTransparency = 1
 	searchClear.Text = "×"
 	searchClear.TextColor3 = UI.theme.text
 	searchClear.TextTransparency = UI.theme.dimAlpha
 	searchClear.Font = UI.font.heading
-	searchClear.TextSize = 15
+	searchClear.TextSize = 16
 	searchClear.Parent = searchWrap
 	searchClear.MouseButton1Click:Connect(function()
 		search.Text = ""
@@ -236,25 +363,25 @@ function UI.Window(options)
 	end)
 
 	local navScroll = Instance.new("ScrollingFrame")
-	navScroll.Size = UDim2.new(1, -24, 1, -160)
-	navScroll.Position = UDim2.new(0, 12, 0, 94)
+	navScroll.Size = UDim2.new(1, -24, 1, -170)
+	navScroll.Position = UDim2.new(0, 12, 0, 102)
 	navScroll.BackgroundTransparency = 1
 	navScroll.BorderSizePixel = 0
-	navScroll.ScrollBarThickness = 3
+	navScroll.ScrollBarThickness = 2
 	navScroll.ScrollBarImageColor3 = UI.theme.accent
-	navScroll.ScrollBarImageTransparency = 0.65
+	navScroll.ScrollBarImageTransparency = 0.5
 	navScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
 	navScroll.CanvasSize = UDim2.new()
 	navScroll.Parent = sidebar
 
 	local navList = Instance.new("UIListLayout")
-	navList.Padding = UDim.new(0, 3)
+	navList.Padding = UDim.new(0, 4)
 	navList.SortOrder = Enum.SortOrder.LayoutOrder
 	navList.Parent = navScroll
 
 	local footer = Instance.new("Frame")
-	footer.Size = UDim2.new(1, 0, 0, 58)
-	footer.Position = UDim2.new(0, 0, 1, -58)
+	footer.Size = UDim2.new(1, 0, 0, 62)
+	footer.Position = UDim2.new(0, 0, 1, -62)
 	footer.BackgroundTransparency = 1
 	footer.Parent = sidebar
 	local footLine = Instance.new("Frame")
@@ -265,27 +392,26 @@ function UI.Window(options)
 	footLine.Parent = footer
 
 	local avatar = Instance.new("Frame")
-	avatar.Size = UDim2.fromOffset(34, 34)
-	avatar.Position = UDim2.new(0, 18, 0, 12)
-	avatar.BackgroundColor3 = UI.theme.text
-	avatar.BackgroundTransparency = 0.94
+	avatar.Size = UDim2.fromOffset(36, 36)
+	avatar.Position = UDim2.new(0, 18, 0, 13)
+	avatar.BackgroundColor3 = UI.theme.accent
 	avatar.BorderSizePixel = 0
 	avatar.Parent = footer
-	corner(avatar, 17)
-	stroke(avatar, 0.65, UI.theme.accent)
-	local avatarText = label(avatar, string.sub(plr.Name, 1, 1):upper(), 14,
-		UI.font.heading, UI.theme.accent)
+	corner(avatar, 18)
+	accentGradient(avatar, 12)
+	local avatarText = label(avatar, string.sub(plr.Name, 1, 1):upper(), 15,
+		UI.font.heading, UI.theme.void)
 	avatarText.Size = UDim2.fromScale(1, 1)
 	avatarText.TextXAlignment = Enum.TextXAlignment.Center
 
 	local userName = label(footer, plr.Name, 14, UI.font.body)
 	userName.Size = UDim2.new(1, -70, 0, 16)
-	userName.Position = UDim2.new(0, 62, 0, 13)
+	userName.Position = UDim2.new(0, 64, 0, 15)
 	userName.TextTruncate = Enum.TextTruncate.AtEnd
 	local userSub = label(footer, options.subtitle or "seltonmt", 12,
-		UI.font.body, UI.theme.text, UI.theme.dimAlpha)
+		UI.font.body, UI.theme.accentSoft, 0.35)
 	userSub.Size = UDim2.new(1, -70, 0, 14)
-	userSub.Position = UDim2.new(0, 62, 0, 30)
+	userSub.Position = UDim2.new(0, 64, 0, 32)
 
 	-- Content ------------------------------------------------------------------
 	local content = Instance.new("Frame")
@@ -295,52 +421,66 @@ function UI.Window(options)
 	content.Parent = root
 
 	local head = Instance.new("Frame")
-	head.Size = UDim2.new(1, 0, 0, 62)
+	head.Size = UDim2.new(1, 0, 0, 66)
 	head.BackgroundColor3 = UI.theme.header
 	head.BorderSizePixel = 0
 	head.Parent = content
 
-	local headTitle = label(head, options.title or "PANEL", 18, UI.font.heading)
-	headTitle.Size = UDim2.new(1, -80, 0, 21)
-	headTitle.Position = UDim2.new(0, 26, 0, 11)
+	-- A 2px accent ramp along the top edge. It is the only thing in the header
+	-- that moves, which keeps the live line readable while still looking alive.
+	local headBar = Instance.new("Frame")
+	headBar.Size = UDim2.new(1, 0, 0, 2)
+	headBar.BackgroundColor3 = UI.theme.accent
+	headBar.BorderSizePixel = 0
+	headBar.Parent = head
+	accentGradient(headBar, 30)
+
+	local headTitle = label(head, options.title or "PANEL", 19, UI.font.heading)
+	headTitle.Size = UDim2.new(1, -90, 0, 22)
+	headTitle.Position = UDim2.new(0, 26, 0, 12)
 	window.headTitle = headTitle
 
 	-- The live line. Kept in the header on purpose: it stays readable while the
 	-- window is collapsed, which is the whole point of collapsing it.
 	local headSub = label(head, options.subtitle or "", 12, UI.font.mono,
-		UI.theme.text, UI.theme.dimAlpha)
-	headSub.Size = UDim2.new(1, -80, 0, 15)
-	headSub.Position = UDim2.new(0, 26, 0, 33)
+		UI.theme.accentSoft, 0.25)
+	headSub.Size = UDim2.new(1, -90, 0, 15)
+	headSub.Position = UDim2.new(0, 26, 0, 36)
 	headSub.TextTruncate = Enum.TextTruncate.AtEnd
 	window.headSub = headSub
 
 	local collapseButton = Instance.new("TextButton")
-	collapseButton.Size = UDim2.fromOffset(26, 22)
-	collapseButton.Position = UDim2.new(1, -40, 0, 12)
+	collapseButton.Size = UDim2.fromOffset(28, 24)
+	collapseButton.Position = UDim2.new(1, -44, 0, 14)
 	collapseButton.BackgroundColor3 = UI.theme.input
 	collapseButton.BorderSizePixel = 0
 	collapseButton.Text = "–"
-	collapseButton.TextColor3 = UI.theme.text
-	collapseButton.TextTransparency = UI.theme.dimAlpha
+	collapseButton.TextColor3 = UI.theme.accentSoft
 	collapseButton.Font = UI.font.heading
-	collapseButton.TextSize = 14
+	collapseButton.TextSize = 15
 	collapseButton.AutoButtonColor = false
 	collapseButton.Parent = head
-	corner(collapseButton, 6)
-	stroke(collapseButton, 0.9)
+	corner(collapseButton, 8)
+	local collapseEdge = stroke(collapseButton, 0.85)
+	collapseButton.MouseEnter:Connect(function()
+		tween(collapseEdge, EASE.quick, { Transparency = 0.4, Color = UI.theme.accent })
+	end)
+	collapseButton.MouseLeave:Connect(function()
+		tween(collapseEdge, EASE.quick, { Transparency = 0.85, Color = UI.theme.text })
+	end)
 
 	-- Chip bar -----------------------------------------------------------------
 	local chipBar = Instance.new("Frame")
-	chipBar.Size = UDim2.new(1, 0, 0, 34)
-	chipBar.Position = UDim2.new(0, 0, 0, 62)
+	chipBar.Size = UDim2.new(1, 0, 0, 36)
+	chipBar.Position = UDim2.new(0, 0, 0, 66)
 	chipBar.BackgroundColor3 = UI.theme.subBar
 	chipBar.BorderSizePixel = 0
 	chipBar.Parent = content
 
 	local chipCaption = label(chipBar, "AKTIV 0", 10, UI.font.heading,
-		UI.theme.text, UI.theme.fainterAlpha)
+		UI.theme.accent, 0.15)
 	chipCaption.Size = UDim2.fromOffset(70, 14)
-	chipCaption.Position = UDim2.new(0, 26, 0, 10)
+	chipCaption.Position = UDim2.new(0, 26, 0, 11)
 	window.chipCaption = chipCaption
 
 	local chipHolder = Instance.new("ScrollingFrame")
@@ -362,8 +502,8 @@ function UI.Window(options)
 	window.chipHolder = chipHolder
 
 	local pageHolder = Instance.new("Frame")
-	pageHolder.Size = UDim2.new(1, 0, 1, -96)
-	pageHolder.Position = UDim2.new(0, 0, 0, 96)
+	pageHolder.Size = UDim2.new(1, 0, 1, -102)
+	pageHolder.Position = UDim2.new(0, 0, 0, 102)
 	pageHolder.BackgroundTransparency = 1
 	pageHolder.Parent = content
 	window.pageHolder = pageHolder
@@ -395,7 +535,7 @@ function UI.Window(options)
 				end
 			end
 			page.navText.TextTransparency = hit and
-				(window.activePage == page and 0 or UI.theme.dimAlpha) or 0.8
+				(window.activePage == page and 0 or UI.theme.dimAlpha) or 0.85
 		end
 	end
 	search:GetPropertyChangedSignal("Text"):Connect(applyFilter)
@@ -410,15 +550,33 @@ function UI.Window(options)
 		pageHolder.Visible = not collapsed
 		content.Position = collapsed and UDim2.new() or UDim2.new(0, 302, 0, 0)
 		content.Size = collapsed and UDim2.new(1, 0, 1, 0) or UDim2.new(1, -302, 1, 0)
-		TweenService:Create(root, TweenInfo.new(0.16, Enum.EasingStyle.Quad), {
-			Size = collapsed and UDim2.fromOffset(WIDTH, 62) or UDim2.fromOffset(WIDTH, HEIGHT),
-		}):Play()
+		tween(root, EASE.soft, {
+			Size = collapsed and UDim2.fromOffset(WIDTH, 66) or UDim2.fromOffset(WIDTH, HEIGHT),
+		})
 	end)
+
+	-- Hiding fades and shrinks rather than flicking Visible, so RightShift does
+	-- not look like the panel crashed.
+	local shown = true
+	local function setShown(value)
+		if shown == value then return end
+		shown = value
+		if shown then
+			root.Visible = true
+			scale.Scale = 0.94
+			tween(scale, EASE.slow, { Scale = 1 })
+		else
+			local t = tween(scale, EASE.soft, { Scale = 0.94 })
+			t.Completed:Connect(function()
+				if not shown then root.Visible = false end
+			end)
+		end
+	end
 
 	UserInputService.InputBegan:Connect(function(input, typing)
 		if typing then return end
 		if input.KeyCode == (options.hotkey or Enum.KeyCode.RightShift) then
-			root.Visible = not root.Visible
+			setShown(not shown)
 		end
 	end)
 
@@ -426,7 +584,19 @@ function UI.Window(options)
 		local active = 0
 		for _, chip in ipairs(self.chips) do
 			local on = chip.get()
-			chip.frame.Visible = on
+			if on ~= chip.shown then
+				chip.shown = on
+				if on then
+					chip.frame.Visible = true
+					chip.scale.Scale = 0.6
+					tween(chip.scale, EASE.snap, { Scale = 1 })
+				else
+					local t = tween(chip.scale, EASE.quick, { Scale = 0.6 })
+					t.Completed:Connect(function()
+						if not chip.shown then chip.frame.Visible = false end
+					end)
+				end
+			end
 			if on then active += 1 end
 		end
 		self.chipCaption.Text = "AKTIV " .. active
@@ -444,7 +614,7 @@ function UI.Window(options)
 		page.BorderSizePixel = 0
 		page.ScrollBarThickness = 3
 		page.ScrollBarImageColor3 = UI.theme.accent
-		page.ScrollBarImageTransparency = 0.65
+		page.ScrollBarImageTransparency = 0.55
 		page.AutomaticCanvasSize = Enum.AutomaticSize.Y
 		page.CanvasSize = UDim2.new()
 		page.Visible = false
@@ -509,43 +679,56 @@ function UI.Window(options)
 		columns[0] = fullHolder
 
 		local navEntry = Instance.new("TextButton")
-		navEntry.Size = UDim2.new(1, -4, 0, 30)
-		navEntry.BackgroundColor3 = UI.theme.text
+		navEntry.Size = UDim2.new(1, -4, 0, 34)
+		navEntry.BackgroundColor3 = UI.theme.accent
 		navEntry.BackgroundTransparency = 1
 		navEntry.BorderSizePixel = 0
 		navEntry.Text = ""
 		navEntry.AutoButtonColor = false
 		navEntry.LayoutOrder = #self.pages + 1
 		navEntry.Parent = navScroll
-		corner(navEntry, 8)
+		corner(navEntry, 10)
 
-		local glyph = label(navEntry, iconGlyph or UI.icon.sliders, 13,
-			UI.font.body, UI.theme.accent)
-		glyph.Size = UDim2.fromOffset(18, 30)
-		glyph.Position = UDim2.new(0, 10, 0, 0)
+		-- The active marker is a bar that grows out of the left edge rather than a
+		-- highlight that appears - growth reads as "this one", a fade reads as
+		-- "something changed somewhere".
+		local navMark = Instance.new("Frame")
+		navMark.Size = UDim2.fromOffset(3, 0)
+		navMark.Position = UDim2.new(0, 0, 0.5, 0)
+		navMark.AnchorPoint = Vector2.new(0, 0.5)
+		navMark.BackgroundColor3 = UI.theme.accent
+		navMark.BorderSizePixel = 0
+		navMark.Parent = navEntry
+		corner(navMark, 2)
+		accentGradient(navMark, 40)
+
+		local glyph = label(navEntry, iconGlyph or UI.icon.sliders, 14,
+			UI.font.body, UI.theme.accent, 0.3)
+		glyph.Size = UDim2.fromOffset(18, 34)
+		glyph.Position = UDim2.new(0, 12, 0, 0)
 		glyph.TextXAlignment = Enum.TextXAlignment.Center
 
 		local navText = label(navEntry, name, 14, UI.font.body,
 			UI.theme.text, UI.theme.dimAlpha)
-		navText.Size = UDim2.new(1, -40, 1, 0)
-		navText.Position = UDim2.new(0, 34, 0, 0)
+		navText.Size = UDim2.new(1, -44, 1, 0)
+		navText.Position = UDim2.new(0, 38, 0, 0)
 
 		local railEntry = Instance.new("TextButton")
-		railEntry.Size = UDim2.fromOffset(58, 42)
+		railEntry.Size = UDim2.fromOffset(58, 46)
 		railEntry.BackgroundTransparency = 1
 		railEntry.Text = ""
 		railEntry.AutoButtonColor = false
 		railEntry.LayoutOrder = #self.pages + 1
 		railEntry.Parent = rail
-		local railGlyph = label(railEntry, iconGlyph or UI.icon.sliders, 16,
+		local railGlyph = label(railEntry, iconGlyph or UI.icon.sliders, 17,
 			UI.font.body, UI.theme.text, UI.theme.dimAlpha)
-		railGlyph.Size = UDim2.new(1, 0, 0, 20)
-		railGlyph.Position = UDim2.new(0, 0, 0, 2)
+		railGlyph.Size = UDim2.new(1, 0, 0, 22)
+		railGlyph.Position = UDim2.new(0, 0, 0, 3)
 		railGlyph.TextXAlignment = Enum.TextXAlignment.Center
 		local railText = label(railEntry, string.sub(name, 1, 8), 9,
 			UI.font.heading, UI.theme.text, UI.theme.fainterAlpha)
 		railText.Size = UDim2.new(1, 0, 0, 12)
-		railText.Position = UDim2.new(0, 0, 0, 24)
+		railText.Position = UDim2.new(0, 0, 0, 27)
 		railText.TextXAlignment = Enum.TextXAlignment.Center
 
 		local pageObject = {
@@ -556,27 +739,56 @@ function UI.Window(options)
 
 		local function select()
 			for _, other in ipairs(self.pages) do
-				other.frame.Visible = false
-				other.navEntry.BackgroundTransparency = 1
-				other.navText.TextTransparency = UI.theme.dimAlpha
-				other.railGlyph.TextTransparency = UI.theme.dimAlpha
+				if other ~= pageObject then
+					other.frame.Visible = false
+					tween(other.navEntry, EASE.quick, { BackgroundTransparency = 1 })
+					tween(other.navMark, EASE.quick, { Size = UDim2.fromOffset(3, 0) })
+					tween(other.navText, EASE.quick, { TextTransparency = UI.theme.dimAlpha })
+					tween(other.glyph, EASE.quick, { TextTransparency = 0.3 })
+					tween(other.railGlyph, EASE.quick, { TextTransparency = UI.theme.dimAlpha })
+				end
 			end
 			page.Visible = true
-			navEntry.BackgroundTransparency = 0.95
-			navText.TextTransparency = 0
-			railGlyph.TextTransparency = 0
+			tween(navEntry, EASE.soft, { BackgroundTransparency = 0.9 })
+			tween(navMark, EASE.snap, { Size = UDim2.fromOffset(3, 20) })
+			tween(navText, EASE.quick, { TextTransparency = 0 })
+			tween(glyph, EASE.quick, { TextTransparency = 0 })
+			tween(railGlyph, EASE.quick, { TextTransparency = 0 })
 			self.activePage = pageObject
 			self.headTitle.Text = name
+
+			-- fade and lift, never slide sideways: sideways motion on a two-column
+			-- grid looks like the layout is being rebuilt
+			page.Position = UDim2.new(0, 24, 0, 18)
+			tween(page, EASE.slow, { Position = UDim2.new(0, 24, 0, 8) })
 		end
 		pageObject.select = select
+		pageObject.navMark = navMark
+		pageObject.glyph = glyph
 
 		navEntry.MouseButton1Click:Connect(select)
 		railEntry.MouseButton1Click:Connect(select)
 		navEntry.MouseEnter:Connect(function()
-			if self.activePage ~= pageObject then navEntry.BackgroundTransparency = 0.96 end
+			if self.activePage ~= pageObject then
+				tween(navEntry, EASE.quick, { BackgroundTransparency = 0.94 })
+				tween(navText, EASE.quick, { TextTransparency = 0.2 })
+			end
 		end)
 		navEntry.MouseLeave:Connect(function()
-			if self.activePage ~= pageObject then navEntry.BackgroundTransparency = 1 end
+			if self.activePage ~= pageObject then
+				tween(navEntry, EASE.quick, { BackgroundTransparency = 1 })
+				tween(navText, EASE.quick, { TextTransparency = UI.theme.dimAlpha })
+			end
+		end)
+		railEntry.MouseEnter:Connect(function()
+			if self.activePage ~= pageObject then
+				tween(railGlyph, EASE.quick, { TextTransparency = 0.2 })
+			end
+		end)
+		railEntry.MouseLeave:Connect(function()
+			if self.activePage ~= pageObject then
+				tween(railGlyph, EASE.quick, { TextTransparency = UI.theme.dimAlpha })
+			end
 		end)
 
 		-- Card -----------------------------------------------------------------
@@ -600,22 +812,45 @@ function UI.Window(options)
 			card.Size = UDim2.new(1, 0, 0, 0)
 			card.LayoutOrder = #host:GetChildren()
 			card.Parent = host
-			corner(card, 9)
-			stroke(card)
+			corner(card, 12)
+			sheen(card, 0.05)
+			local cardEdge = stroke(card, 0.88)
+
+			card.MouseEnter:Connect(function()
+				tween(card, EASE.quick, { BackgroundColor3 = UI.theme.cardHover })
+				tween(cardEdge, EASE.quick, { Transparency = 0.62, Color = UI.theme.accent })
+			end)
+			card.MouseLeave:Connect(function()
+				tween(card, EASE.soft, { BackgroundColor3 = UI.theme.card })
+				tween(cardEdge, EASE.soft, { Transparency = 0.88, Color = UI.theme.text })
+			end)
 
 			local cardList = Instance.new("UIListLayout")
 			cardList.SortOrder = Enum.SortOrder.LayoutOrder
 			cardList.Parent = card
 
 			local cardHead = Instance.new("Frame")
-			cardHead.Size = UDim2.new(1, 0, 0, 36)
+			cardHead.Size = UDim2.new(1, 0, 0, 38)
 			cardHead.BackgroundTransparency = 1
 			cardHead.LayoutOrder = 0
 			cardHead.Parent = card
+
+			-- a small accent tick before the caption, so a card reads as a titled
+			-- block instead of a floating rectangle
+			local tick = Instance.new("Frame")
+			tick.Size = UDim2.fromOffset(3, 11)
+			tick.Position = UDim2.new(0, 16, 0.5, -6)
+			tick.BackgroundColor3 = UI.theme.accent
+			tick.BorderSizePixel = 0
+			tick.Parent = cardHead
+			corner(tick, 2)
+			accentGradient(tick, 34)
+
 			local headLabel = label(cardHead, string.upper(cardTitle), 11, UI.font.heading,
-				UI.theme.text, UI.theme.fainterAlpha)
-			headLabel.Size = UDim2.new(1, -32, 1, 0)
-			headLabel.Position = UDim2.new(0, 16, 0, 0)
+				UI.theme.text, 0.42)
+			headLabel.Size = UDim2.new(1, -40, 1, 0)
+			headLabel.Position = UDim2.new(0, 26, 0, 0)
+
 			local divider = Instance.new("Frame")
 			divider.Size = UDim2.new(1, 0, 0, 1)
 			divider.Position = UDim2.new(0, 0, 1, -1)
@@ -635,10 +870,10 @@ function UI.Window(options)
 			bodyList.SortOrder = Enum.SortOrder.LayoutOrder
 			bodyList.Parent = body
 			local pad = Instance.new("UIPadding")
-			pad.PaddingTop = UDim.new(0, 8)
-			pad.PaddingBottom = UDim.new(0, 12)
-			pad.PaddingLeft = UDim.new(0, 14)
-			pad.PaddingRight = UDim.new(0, 14)
+			pad.PaddingTop = UDim.new(0, 9)
+			pad.PaddingBottom = UDim.new(0, 13)
+			pad.PaddingLeft = UDim.new(0, 16)
+			pad.PaddingRight = UDim.new(0, 16)
 			pad.Parent = body
 
 			local cardObject = { frame = card, body = body, rows = 0, entries = {} }
@@ -655,20 +890,20 @@ function UI.Window(options)
 			local function row(text, hint, tone)
 				cardObject.rows += 1
 				local holder = Instance.new("Frame")
-				holder.Size = UDim2.new(1, 0, 0, hint and 40 or 30)
+				holder.Size = UDim2.new(1, 0, 0, hint and 42 or 32)
 				holder.BackgroundTransparency = 1
 				holder.LayoutOrder = cardObject.rows
 				holder.Parent = body
 
 				local name = label(holder, text, 13, UI.font.body, tone or UI.theme.text)
-				name.Size = UDim2.new(1, -116, 0, hint and 18 or 30)
-				name.Position = UDim2.new(0, 0, 0, hint and 2 or 0)
+				name.Size = UDim2.new(1, -120, 0, hint and 18 or 32)
+				name.Position = UDim2.new(0, 0, 0, hint and 3 or 0)
 				name.TextTruncate = Enum.TextTruncate.AtEnd
 				if hint then
 					local sub = label(holder, hint, 11, UI.font.body,
 						UI.theme.text, UI.theme.fainterAlpha)
-					sub.Size = UDim2.new(1, -116, 0, 14)
-					sub.Position = UDim2.new(0, 0, 0, 21)
+					sub.Size = UDim2.new(1, -120, 0, 14)
+					sub.Position = UDim2.new(0, 0, 0, 22)
 					sub.TextTruncate = Enum.TextTruncate.AtEnd
 				end
 
@@ -679,70 +914,96 @@ function UI.Window(options)
 			function cardObject:Toggle(text, initial, callback, hint, tone)
 				local holder = row(text, hint, tone)
 				local state = initial and true or false
+				local shade = tone or UI.theme.accent
 
 				-- A thin bar on the left doubles as the state indicator, so the
 				-- setting reads at a glance without looking at the pill.
 				local mark = Instance.new("Frame")
-				mark.Size = UDim2.fromOffset(2, 14)
-				mark.Position = UDim2.new(0, -8, 0.5, -7)
-				mark.BackgroundColor3 = tone or UI.theme.accent
-				mark.BackgroundTransparency = state and 0 or 0.85
+				mark.Size = UDim2.fromOffset(2, state and 16 or 6)
+				mark.Position = UDim2.new(0, -9, 0.5, 0)
+				mark.AnchorPoint = Vector2.new(0, 0.5)
+				mark.BackgroundColor3 = shade
+				mark.BackgroundTransparency = state and 0 or 0.8
 				mark.BorderSizePixel = 0
 				mark.Parent = holder
 				corner(mark, 1)
 
 				local pill = Instance.new("TextButton")
-				pill.Size = UDim2.fromOffset(36, 19)
-				pill.Position = UDim2.new(1, -36, 0.5, -9)
-				pill.BackgroundColor3 = state and (tone or UI.theme.accent) or UI.theme.input
+				pill.Size = UDim2.fromOffset(40, 21)
+				pill.Position = UDim2.new(1, -40, 0.5, -10)
+				pill.BackgroundColor3 = state and shade or UI.theme.input
 				pill.BorderSizePixel = 0
 				pill.Text = ""
 				pill.AutoButtonColor = false
 				pill.Parent = holder
-				corner(pill, 10)
-				stroke(pill, 0.9)
+				corner(pill, 11)
+				local pillEdge = stroke(pill, state and 0.5 or 0.88, state and shade or UI.theme.text)
+
+				-- The glow only exists while the toggle is on. Building it up front
+				-- and hiding it keeps the tween from allocating on every click.
+				local glow = Instance.new("UIStroke")
+				glow.Thickness = 3
+				glow.Color = shade
+				glow.Transparency = state and 0.82 or 1
+				glow.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+				glow.Parent = pill
 
 				local knob = Instance.new("Frame")
-				knob.Size = UDim2.fromOffset(13, 13)
-				knob.Position = state and UDim2.new(1, -16, 0, 3) or UDim2.new(0, 3, 0, 3)
-				knob.BackgroundColor3 = UI.theme.text
+				knob.Size = UDim2.fromOffset(15, 15)
+				knob.Position = state and UDim2.new(1, -18, 0, 3) or UDim2.new(0, 3, 0, 3)
+				knob.BackgroundColor3 = state and UI.theme.void or UI.theme.text
+				knob.BackgroundTransparency = state and 0 or 0.3
 				knob.BorderSizePixel = 0
 				knob.Parent = pill
-				corner(knob, 7)
+				corner(knob, 8)
 
 				-- the chip that appears in the AKTIV bar while this is on
 				window.chipCount += 1
 				local chip = Instance.new("Frame")
-				chip.Size = UDim2.fromOffset(0, 22)
+				chip.Size = UDim2.fromOffset(0, 24)
 				chip.AutomaticSize = Enum.AutomaticSize.X
-				chip.BackgroundColor3 = tone or UI.theme.accent
-				chip.BackgroundTransparency = 0.88
+				chip.BackgroundColor3 = shade
+				chip.BackgroundTransparency = 0.86
 				chip.BorderSizePixel = 0
 				chip.Visible = state
 				chip.LayoutOrder = window.chipCount
 				chip.Parent = window.chipHolder
-				corner(chip, 11)
-				stroke(chip, 0.7, tone or UI.theme.accent)
-				local chipText = label(chip, text, 11, UI.font.body,
-					tone or UI.theme.accentSoft)
+				corner(chip, 12)
+				stroke(chip, 0.62, shade)
+				local chipScale = Instance.new("UIScale")
+				chipScale.Scale = state and 1 or 0.6
+				chipScale.Parent = chip
+				local chipText = label(chip, text, 11, UI.font.body, shade)
 				chipText.Size = UDim2.new(0, 0, 1, 0)
 				chipText.AutomaticSize = Enum.AutomaticSize.X
-				chipText.Position = UDim2.new(0, 10, 0, 0)
+				chipText.Position = UDim2.new(0, 11, 0, 0)
 				local chipPad = Instance.new("UIPadding")
-				chipPad.PaddingRight = UDim.new(0, 20)
+				chipPad.PaddingRight = UDim.new(0, 22)
 				chipPad.Parent = chip
 
-				table.insert(window.chips, { frame = chip, get = function() return state end })
+				table.insert(window.chips, {
+					frame = chip, scale = chipScale, shown = state,
+					get = function() return state end,
+				})
 
 				local function apply()
-					local info = TweenInfo.new(0.15, Enum.EasingStyle.Quad)
-					TweenService:Create(pill, info, {
-						BackgroundColor3 = state and (tone or UI.theme.accent) or UI.theme.input,
-					}):Play()
-					TweenService:Create(knob, info, {
-						Position = state and UDim2.new(1, -16, 0, 3) or UDim2.new(0, 3, 0, 3),
-					}):Play()
-					mark.BackgroundTransparency = state and 0 or 0.85
+					tween(pill, EASE.soft, {
+						BackgroundColor3 = state and shade or UI.theme.input,
+					})
+					tween(knob, EASE.snap, {
+						Position = state and UDim2.new(1, -18, 0, 3) or UDim2.new(0, 3, 0, 3),
+						BackgroundColor3 = state and UI.theme.void or UI.theme.text,
+						BackgroundTransparency = state and 0 or 0.3,
+					})
+					tween(pillEdge, EASE.soft, {
+						Transparency = state and 0.5 or 0.88,
+						Color = state and shade or UI.theme.text,
+					})
+					tween(glow, EASE.soft, { Transparency = state and 0.82 or 1 })
+					tween(mark, EASE.snap, {
+						Size = UDim2.fromOffset(2, state and 16 or 6),
+						BackgroundTransparency = state and 0 or 0.8,
+					})
 					window:Refresh()
 				end
 
@@ -762,51 +1023,68 @@ function UI.Window(options)
 				return handle
 			end
 
-			-- The stepper from the old panels: a centred value chip between − and
-			-- +. getText is a function so the caller keeps ownership of the value.
+			-- The stepper: a centred value chip between − and +. getText is a
+			-- function so the caller keeps ownership of the value.
 			function cardObject:Stepper(text, getText, onStep, hint)
 				local holder = row(text, hint)
 
 				local box = Instance.new("Frame")
-				box.Size = UDim2.fromOffset(58, 20)
-				box.Position = UDim2.new(1, -80, 0.5, -10)
+				box.Size = UDim2.fromOffset(60, 22)
+				box.Position = UDim2.new(1, -82, 0.5, -11)
 				box.BackgroundColor3 = UI.theme.input
 				box.BorderSizePixel = 0
 				box.Parent = holder
-				corner(box, 5)
-				stroke(box, 0.92)
+				corner(box, 7)
+				stroke(box, 0.88)
 
-				local value = label(box, tostring(getText()), 11, UI.font.body)
+				local value = label(box, tostring(getText()), 11, UI.font.mono,
+					UI.theme.accentSoft)
 				value.Size = UDim2.new(1, -6, 1, 0)
 				value.Position = UDim2.new(0, 3, 0, 0)
 				value.TextXAlignment = Enum.TextXAlignment.Center
 				value.TextTruncate = Enum.TextTruncate.AtEnd
 
-				local function refresh() value.Text = tostring(getText()) end
+				-- The value flashes to full accent on change. Without it a stepper
+				-- that lands on a similar-looking number reads as "did not react".
+				local function refresh()
+					value.Text = tostring(getText())
+					value.TextColor3 = UI.theme.accent
+					tween(value, EASE.slow, { TextColor3 = UI.theme.accentSoft })
+				end
 
 				local function stepButton(glyphText, x, delta)
 					local b = Instance.new("TextButton")
-					b.Size = UDim2.fromOffset(20, 20)
-					b.Position = UDim2.new(1, x, 0.5, -10)
+					b.Size = UDim2.fromOffset(22, 22)
+					b.Position = UDim2.new(1, x, 0.5, -11)
 					b.BackgroundColor3 = UI.theme.input
 					b.BorderSizePixel = 0
 					b.Text = glyphText
 					b.TextColor3 = UI.theme.accent
 					b.Font = UI.font.heading
-					b.TextSize = 14
+					b.TextSize = 15
 					b.AutoButtonColor = false
 					b.Parent = holder
-					corner(b, 5)
-					stroke(b, 0.92)
-					b.MouseEnter:Connect(function() b.TextColor3 = UI.theme.accentHover end)
-					b.MouseLeave:Connect(function() b.TextColor3 = UI.theme.accent end)
+					corner(b, 7)
+					local edge = stroke(b, 0.88)
+					local bScale = Instance.new("UIScale")
+					bScale.Parent = b
+					b.MouseEnter:Connect(function()
+						tween(b, EASE.quick, { TextColor3 = UI.theme.accentHover })
+						tween(edge, EASE.quick, { Transparency = 0.45, Color = UI.theme.accent })
+					end)
+					b.MouseLeave:Connect(function()
+						tween(b, EASE.quick, { TextColor3 = UI.theme.accent })
+						tween(edge, EASE.quick, { Transparency = 0.88, Color = UI.theme.text })
+					end)
 					b.MouseButton1Click:Connect(function()
+						bScale.Scale = 0.82
+						tween(bScale, EASE.snap, { Scale = 1 })
 						onStep(delta)
 						refresh()
 					end)
 				end
-				stepButton("−", -100, -1)
-				stepButton("+", -20, 1)
+				stepButton("−", -106, -1)
+				stepButton("+", -22, 1)
 
 				return refresh
 			end
@@ -816,27 +1094,27 @@ function UI.Window(options)
 				local value = math.clamp(initial or min, min, max)
 
 				local readout = Instance.new("TextLabel")
-				readout.Size = UDim2.fromOffset(38, 20)
-				readout.Position = UDim2.new(1, -38, 0.5, -10)
+				readout.Size = UDim2.fromOffset(40, 22)
+				readout.Position = UDim2.new(1, -40, 0.5, -11)
 				readout.BackgroundColor3 = UI.theme.input
 				readout.BorderSizePixel = 0
 				readout.Text = tostring(math.floor(value))
-				readout.TextColor3 = UI.theme.text
-				readout.Font = UI.font.body
+				readout.TextColor3 = UI.theme.accentSoft
+				readout.Font = UI.font.mono
 				readout.TextSize = 11
 				readout.Parent = holder
-				corner(readout, 5)
-				stroke(readout, 0.92)
+				corner(readout, 7)
+				stroke(readout, 0.88)
 
 				local track = Instance.new("TextButton")
-				track.Size = UDim2.fromOffset(64, 4)
-				track.Position = UDim2.new(1, -108, 0.5, -2)
+				track.Size = UDim2.fromOffset(68, 5)
+				track.Position = UDim2.new(1, -116, 0.5, -2)
 				track.BackgroundColor3 = UI.theme.input
 				track.BorderSizePixel = 0
 				track.Text = ""
 				track.AutoButtonColor = false
 				track.Parent = holder
-				corner(track, 2)
+				corner(track, 3)
 
 				local alpha0 = (value - min) / math.max(max - min, 1)
 				local fill = Instance.new("Frame")
@@ -844,15 +1122,19 @@ function UI.Window(options)
 				fill.BackgroundColor3 = UI.theme.accent
 				fill.BorderSizePixel = 0
 				fill.Parent = track
-				corner(fill, 2)
+				corner(fill, 3)
+				accentGradient(fill)
 
 				local knob = Instance.new("Frame")
-				knob.Size = UDim2.fromOffset(11, 11)
-				knob.Position = UDim2.new(alpha0, -5, 0.5, -5)
+				knob.Size = UDim2.fromOffset(12, 12)
+				knob.Position = UDim2.new(alpha0, 0, 0.5, 0)
+				knob.AnchorPoint = Vector2.new(0.5, 0.5)
 				knob.BackgroundColor3 = UI.theme.accentHover
 				knob.BorderSizePixel = 0
 				knob.Parent = track
 				corner(knob, 6)
+				local knobScale = Instance.new("UIScale")
+				knobScale.Parent = knob
 
 				local dragging = false
 				local function setFromX(x)
@@ -860,17 +1142,21 @@ function UI.Window(options)
 						(x - track.AbsolutePosition.X) / math.max(track.AbsoluteSize.X, 1), 0, 1)
 					value = min + alpha * (max - min)
 					fill.Size = UDim2.fromScale(alpha, 1)
-					knob.Position = UDim2.new(alpha, -5, 0.5, -5)
+					knob.Position = UDim2.new(alpha, 0, 0.5, 0)
 					readout.Text = tostring(math.floor(value))
 					if callback then callback(value) end
 				end
 
 				track.MouseButton1Down:Connect(function(x)
 					dragging = true
+					tween(knobScale, EASE.snap, { Scale = 1.35 })
 					setFromX(x)
 				end)
 				UserInputService.InputEnded:Connect(function(input)
-					if input.UserInputType == Enum.UserInputType.MouseButton1 then dragging = false end
+					if input.UserInputType == Enum.UserInputType.MouseButton1 and dragging then
+						dragging = false
+						tween(knobScale, EASE.snap, { Scale = 1 })
+					end
 				end)
 				UserInputService.InputChanged:Connect(function(input)
 					if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
@@ -888,36 +1174,52 @@ function UI.Window(options)
 				local open = false
 
 				local box = Instance.new("TextButton")
-				box.Size = UDim2.fromOffset(104, 22)
-				box.Position = UDim2.new(1, -104, 0.5, -11)
+				box.Size = UDim2.fromOffset(108, 24)
+				box.Position = UDim2.new(1, -108, 0.5, -12)
 				box.BackgroundColor3 = UI.theme.input
 				box.BorderSizePixel = 0
-				box.Text = tostring(current) .. "  ▾"
-				box.TextColor3 = UI.theme.text
-				box.Font = UI.font.body
-				box.TextSize = 11
+				box.Text = ""
 				box.AutoButtonColor = false
 				box.Parent = holder
-				corner(box, 6)
-				stroke(box, 0.9)
+				corner(box, 8)
+				local boxEdge = stroke(box, 0.88)
+
+				local boxText = label(box, tostring(current), 11, UI.font.body,
+					UI.theme.accentSoft)
+				boxText.Size = UDim2.new(1, -26, 1, 0)
+				boxText.Position = UDim2.new(0, 10, 0, 0)
+				boxText.TextTruncate = Enum.TextTruncate.AtEnd
+
+				local arrow = label(box, "▾", 11, UI.font.body, UI.theme.accent)
+				arrow.Size = UDim2.fromOffset(16, 24)
+				arrow.Position = UDim2.new(1, -20, 0, 0)
+				arrow.TextXAlignment = Enum.TextXAlignment.Center
 
 				local list = Instance.new("Frame")
-				list.Size = UDim2.new(0, 104, 0, 0)
+				list.Size = UDim2.new(0, 108, 0, 0)
 				list.AutomaticSize = Enum.AutomaticSize.Y
-				list.Position = UDim2.new(1, -104, 0.5, 13)
+				list.Position = UDim2.new(1, -108, 0.5, 15)
 				list.BackgroundColor3 = UI.theme.input
 				list.BorderSizePixel = 0
 				list.Visible = false
 				list.ZIndex = 20
 				list.Parent = holder
-				corner(list, 6)
-				stroke(list, 0.85)
+				corner(list, 8)
+				stroke(list, 0.72, UI.theme.accent)
+				local listScale = Instance.new("UIScale")
+				listScale.Scale = 0.9
+				listScale.Parent = list
+				local listPad = Instance.new("UIPadding")
+				listPad.PaddingTop = UDim.new(0, 4)
+				listPad.PaddingBottom = UDim.new(0, 4)
+				listPad.Parent = list
 				local listLayout = Instance.new("UIListLayout")
 				listLayout.Parent = list
 
 				for _, choice in ipairs(choices) do
 					local option = Instance.new("TextButton")
-					option.Size = UDim2.new(1, 0, 0, 22)
+					option.Size = UDim2.new(1, 0, 0, 24)
+					option.BackgroundColor3 = UI.theme.accent
 					option.BackgroundTransparency = 1
 					option.Text = tostring(choice)
 					option.TextColor3 = UI.theme.text
@@ -925,13 +1227,21 @@ function UI.Window(options)
 					option.Font = UI.font.body
 					option.TextSize = 11
 					option.ZIndex = 21
+					option.AutoButtonColor = false
 					option.Parent = list
-					option.MouseEnter:Connect(function() option.TextTransparency = 0 end)
-					option.MouseLeave:Connect(function() option.TextTransparency = UI.theme.dimAlpha end)
+					option.MouseEnter:Connect(function()
+						tween(option, EASE.quick,
+							{ TextTransparency = 0, BackgroundTransparency = 0.9 })
+					end)
+					option.MouseLeave:Connect(function()
+						tween(option, EASE.quick,
+							{ TextTransparency = UI.theme.dimAlpha, BackgroundTransparency = 1 })
+					end)
 					option.MouseButton1Click:Connect(function()
 						current = choice
-						box.Text = tostring(choice) .. "  ▾"
+						boxText.Text = tostring(choice)
 						open = false
+						arrow.Rotation = 0
 						list.Visible = false
 						if callback then callback(choice) end
 					end)
@@ -939,12 +1249,26 @@ function UI.Window(options)
 
 				box.MouseButton1Click:Connect(function()
 					open = not open
-					list.Visible = open
+					tween(arrow, EASE.soft, { Rotation = open and 180 or 0 })
+					tween(boxEdge, EASE.quick, {
+						Transparency = open and 0.45 or 0.88,
+						Color = open and UI.theme.accent or UI.theme.text,
+					})
+					if open then
+						list.Visible = true
+						listScale.Scale = 0.9
+						tween(listScale, EASE.snap, { Scale = 1 })
+					else
+						local t = tween(listScale, EASE.quick, { Scale = 0.9 })
+						t.Completed:Connect(function()
+							if not open then list.Visible = false end
+						end)
+					end
 				end)
 
 				return {
 					get = function() return current end,
-					set = function(_, v) current = v box.Text = tostring(v) .. "  ▾" end,
+					set = function(_, v) current = v boxText.Text = tostring(v) end,
 				}
 			end
 
@@ -952,9 +1276,9 @@ function UI.Window(options)
 				cardObject.rows += 1
 				local shade = tone or UI.theme.accent
 				local button = Instance.new("TextButton")
-				button.Size = UDim2.new(1, 0, 0, 28)
+				button.Size = UDim2.new(1, 0, 0, 30)
 				button.BackgroundColor3 = shade
-				button.BackgroundTransparency = 0.88
+				button.BackgroundTransparency = 0.87
 				button.BorderSizePixel = 0
 				button.Text = string.upper(text)
 				button.TextColor3 = shade
@@ -963,12 +1287,36 @@ function UI.Window(options)
 				button.AutoButtonColor = false
 				button.LayoutOrder = cardObject.rows
 				button.Parent = body
-				corner(button, 7)
-				stroke(button, 0.72, shade)
+				corner(button, 9)
+				local edge = stroke(button, 0.68, shade)
+				local bScale = Instance.new("UIScale")
+				bScale.Parent = button
 
-				button.MouseEnter:Connect(function() button.BackgroundTransparency = 0.76 end)
-				button.MouseLeave:Connect(function() button.BackgroundTransparency = 0.88 end)
+				-- The press flash is a sibling frame rather than a colour tween on
+				-- the button itself: tweening the fill fights the hover tween and
+				-- the two end up cancelling each other mid-click.
+				local flash = Instance.new("Frame")
+				flash.Size = UDim2.fromScale(1, 1)
+				flash.BackgroundColor3 = shade
+				flash.BackgroundTransparency = 1
+				flash.BorderSizePixel = 0
+				flash.ZIndex = 0
+				flash.Parent = button
+				corner(flash, 9)
+
+				button.MouseEnter:Connect(function()
+					tween(button, EASE.quick, { BackgroundTransparency = 0.74 })
+					tween(edge, EASE.quick, { Transparency = 0.4 })
+				end)
+				button.MouseLeave:Connect(function()
+					tween(button, EASE.soft, { BackgroundTransparency = 0.87 })
+					tween(edge, EASE.soft, { Transparency = 0.68 })
+				end)
 				button.MouseButton1Click:Connect(function()
+					bScale.Scale = 0.97
+					tween(bScale, EASE.snap, { Scale = 1 })
+					flash.BackgroundTransparency = 0.45
+					tween(flash, EASE.slow, { BackgroundTransparency = 1 })
 					if callback then task.spawn(callback) end
 				end)
 
@@ -995,7 +1343,7 @@ function UI.Window(options)
 					cardObject.rows += 1
 					local l = label(body, "", 11, UI.font.mono,
 						UI.theme.text, UI.theme.dimAlpha)
-					l.Size = UDim2.new(1, 0, 0, 14)
+					l.Size = UDim2.new(1, 0, 0, 15)
 					l.LayoutOrder = cardObject.rows
 					l.TextTruncate = Enum.TextTruncate.AtEnd
 					lines[i] = l
@@ -1013,8 +1361,8 @@ function UI.Window(options)
 								l.TextColor3 = UI.theme.accent
 								l.TextTransparency = 0
 							else
-								l.TextColor3 = UI.theme.text
-								l.TextTransparency = UI.theme.dimAlpha
+								l.TextColor3 = UI.theme.accentSoft
+								l.TextTransparency = 0.42
 							end
 						end
 					end,
