@@ -63,10 +63,11 @@ local CONFIG = {
 	-- the bag plus rebirths is how that happens.
 	trainZone = true,
 	rebirth = true,
-	-- Stop rebirthing here and start banking. 10 rebirths unlocks the x15 bag,
-	-- which is the last big free jump; past that each rebirth costs more wins than
-	-- the multiplier is worth while eggs and evolutions are the goal. 0 = no limit.
-	rebirthUntil = 10,
+	-- No limit by default, and that is a deliberate reversal. A rebirth resets every
+	-- win pad on the ladder, so it is not just a multiplier - it is what makes the
+	-- whole ladder payable a second time. Capping it caps the wins. Set a number
+	-- here only if you want to sit on a balance for an egg without it being wiped.
+	rebirthUntil = 0,
 	-- Off by default and honestly so: a tour of twelve pads was walked and Wins
 	-- never moved off zero. The pads sit inside the stages (Worlds.World_1.Stages.
 	-- Stage_001.Wins) and almost certainly want the stage cleared first, which is
@@ -588,12 +589,26 @@ local function runStage()
 			end
 		end
 	end
-	-- With the wall known there is nothing to wait for: the next lap climbs to the
-	-- stage below it and harvests, which is the whole point. Only back off when the
-	-- wall is stage 1 and there is genuinely nowhere to go.
-	STATE.note = "stage " .. id .. " too strong, wall set"
-	STATE.nextStageAt = (STATE.wallAt and STATE.wallAt > 1) and 0
-		or (os.clock() + CONFIG.stageBackoff)
+	-- Failing a stage must NOT mean hammering it again. Everything below it that
+	-- still has an unclaimed pad is collected first - that is where the wins for
+	-- the next evolution come from. Only once the whole ladder below the wall is
+	-- banked is there nothing left to take, and then the answer is a rebirth: it
+	-- resets every pad and they all pay again, with better multipliers behind them.
+	STATE.claimedPads = STATE.claimedPads or {}
+	local unclaimed
+	for candidate = 1, (STATE.wallAt or id) - 1 do
+		if not STATE.claimedPads[candidate] then unclaimed = candidate break end
+	end
+	if unclaimed then
+		STATE.padTarget = unclaimed
+		STATE.note = "walled at " .. id .. ", collecting stage " .. unclaimed .. " first"
+		STATE.nextStageAt = 0
+		return false
+	end
+
+	STATE.ladderDone = true
+	STATE.note = "ladder below " .. id .. " fully banked - needs a rebirth or more damage"
+	STATE.nextStageAt = os.clock() + CONFIG.stageBackoff
 	return false
 end
 
@@ -964,8 +979,13 @@ task.spawn(function()
 			"  rebirth  " .. STATE.rebirths .. "   bag " .. tostring(STATE.zone),
 			"  wins     " .. short(STATE.wins) .. "   money " .. short(STATE.currency),
 			"  stage    " .. tostring(plr:GetAttribute("StageProgressionCurrentStage")) ..
-				"   " .. tostring(plr:GetAttribute("StageProgressionState")) ..
-				"   eggs " .. tostring(STATE.eggs or 0),
+				"   wall " .. tostring(STATE.wallAt or "?") ..
+				"   pad target " .. tostring(STATE.padTarget or "-"),
+			"  banked   " .. (function()
+				local n = 0
+				for _ in pairs(STATE.claimedPads or {}) do n = n + 1 end
+				return n
+			end)() .. " pads this rebirth   eggs " .. tostring(STATE.eggs or 0),
 			"  body     " .. tostring(STATE.body),
 			"  claims   " .. STATE.claims .. " pads this session",
 			"  " .. tostring(STATE.note),
