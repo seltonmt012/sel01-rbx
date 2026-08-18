@@ -70,6 +70,14 @@
       "detect": "local rs = game:GetService('ReplicatedStorage') local ts = rs:FindFirstChild('TS') local c = ts and ts:FindFirstChild('constants') return c ~= nil and c:FindFirstChild('DiggingConfig', true) ~= nil and c:FindFirstChild('SprayBottles', true) ~= nil"
     },
     {
+      "alias": "muscleevo",
+      "name": "+1 Muscle Evolution",
+      "file": "games/muscleevo.lua",
+      "places": [133007106457547],
+      "status": "ok",
+      "detect": "local rs = game:GetService('ReplicatedStorage') local sh = rs:FindFirstChild('Shared') local cfg = sh and sh:FindFirstChild('Configs') return cfg ~= nil and cfg:FindFirstChild('StrengthLevels') ~= nil and cfg:FindFirstChild('WinButtons') ~= nil"
+    },
+    {
       "alias": "eggfarm",
       "name": "Grow a Chicken Fighter",
       "file": "games/eggfarm.lua",
