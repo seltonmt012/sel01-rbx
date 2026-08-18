@@ -1677,7 +1677,10 @@ local function finishRun()
     -- pad is 7x1x7 and the tube under it is the whole target, so the only aim
     -- that cannot miss is its centre from directly above, with gravity doing the
     -- moving. That is still real physics, which is what the server wants to see.
-    local above = vent.Position + Vector3.new(0, 14, 0)
+    -- Just above the pad, not 14 studs up: there is solid floor between the two,
+    -- so dropping from height lands on that floor and the character stands there
+    -- at y 59 with the pad at 46.5, going nowhere.
+    local above = vent.Position + Vector3.new(0, 2.5, 0)
 
     local hp = hrp()
     if not hp then return end
@@ -1686,11 +1689,13 @@ local function finishRun()
     task.wait(0.35)
 
     -- Kill the sideways drift every frame or the leftover velocity from the last
-    -- hop carries the fall off centre; vertical is left to gravity.
+    -- hop carries the fall off centre, and drive downwards rather than waiting
+    -- for gravity: from 2.5 studs a free fall is far too gentle to punch through
+    -- and the character just sits on the pad.
     local push = RunService.Heartbeat:Connect(function()
         local cur = hrp()
         if cur then
-            cur.AssemblyLinearVelocity = Vector3.new(0, cur.AssemblyLinearVelocity.Y, 0)
+            cur.AssemblyLinearVelocity = Vector3.new(0, -28, 0)
         end
     end)
 
