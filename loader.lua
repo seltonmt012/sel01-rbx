@@ -57,7 +57,11 @@ local function notify(text, duration)
 end
 
 local function httpGet(url)
-    local ok, body = pcall(function() return game:HttpGet(url, true) end)
+    -- HttpGet's second argument is the CACHE flag, and passing true was a bug:
+    -- after a publish the next teleport re-ran the loader and it served the
+    -- previous copy out of the client's own cache, so a freshly fixed script
+    -- came back with the old behaviour and looked like the fix had not worked.
+    local ok, body = pcall(function() return game:HttpGet(url, false) end)
     if ok and type(body) == "string" and #body > 0 then return body end
     -- Some executors only expose the request form.
     local req = (syn and syn.request) or (http and http.request) or http_request or request
