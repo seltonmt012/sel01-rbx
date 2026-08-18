@@ -76,12 +76,18 @@ local CONFIG = {
 	buyGear = true,
 	claimFree = true,     -- offline earnings, forever pack, codes
 	moveSpeed = 90,       -- studs/s for the tween hops; the game does not check it
-	clicksPerSec = 11,    -- DIG_MAX_CLICKS_PER_SECOND is 50
+	-- Progress is clickPower per click against a per-second decay, and both come
+	-- out of digDifficultyFor(itemId, kg, shovelPower). An epic needs roughly 7.5
+	-- clicks a second just to break even, an anomaly about 30. Clicking near the
+	-- game's own ceiling of 50 is therefore the difference between "needs a better
+	-- shovel" and getting the thing out of the ground.
+	clicksPerSec = 35,    -- DIG_MAX_CLICKS_PER_SECOND is 50
 	scan = true,          -- sweep the area before choosing what to dig
 	scanPoints = 4,       -- hops per sweep
 	scanDwell = 0.45,     -- pause at each hop; the stream ticks every 0.4s
 	scanUntil = 4,        -- keep sweeping while fewer than this many nodes are known
 	scanRarity = 3,       -- ...or while the best known node is below this rarity
+	giveUpAfter = 4,      -- seconds without progress before abandoning a dig
 	sellAt = 0.3,         -- sell once the backpack is this full
 	gearEvery = 30,       -- seconds between gear-shopping trips
 	swapExhibits = true,  -- replace the weakest exhibit when a better find turns up
@@ -511,13 +517,43 @@ local function doDig()
 		return false
 	end
 
+	-- Some finds are simply out of reach for the current shovel: the decay eats the
+	-- clicks and the bar sits still or slides back. Grinding the full timeout into
+	-- one of those costs twenty seconds and yields nothing, so a dig that is not
+	-- gaining ground gets abandoned and the node is dropped.
+	local progConn
+	if _G.__DC_PROGCONN then pcall(function() _G.__DC_PROGCONN:Disconnect() end) end
+	local progress, bestProgress, bestAt = 0, 0, os.clock()
+	local okProg, pc = pcall(function()
+		return net("ShovelNetwork").ShovelEvents.DigSceneProgress:connect(function(userId, value)
+			if userId == plr.UserId then progress = value or 0 end
+		end)
+	end)
+	if okProg then progConn = pc _G.__DC_PROGCONN = pc end
+
 	local deadline = os.clock() + 20
+	local stalled = false
 	while finished == nil and os.clock() < deadline and CONFIG.auto and GEN == _G.__DIGCLEAN do
 		pcall(function() ctrl:onDigInput() end)
 		task.wait(interval)
+		if progress > bestProgress + 0.01 then
+			bestProgress, bestAt = progress, os.clock()
+		elseif os.clock() - bestAt > CONFIG.giveUpAfter then
+			stalled = true
+			break
+		end
 	end
 	if okConn then pcall(function() conn:Disconnect() end) end
 	if okStart then pcall(function() startConn:Disconnect() end) end
+	if progConn then pcall(function() progConn:Disconnect() end) end
+
+	if stalled and finished == nil then
+		forgetNode(node.id)
+		STATE.note = string.format("too hard for this shovel (%s, stuck at %.0f%%)",
+			tostring(node.rarity), bestProgress * 100)
+		STATE.tooHard = (STATE.tooHard or 0) + 1
+		return false
+	end
 
 	-- Gone either way: a dug node is consumed, and a timed-out one is usually a
 	-- node that expired underneath us. Leaving it in the map makes the picker
