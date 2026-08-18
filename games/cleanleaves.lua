@@ -1617,6 +1617,64 @@ end
 local finishRetry = 0
 local finishFlip = false
 
+-- The Mansion does not end by falling, it ends by CLICKING the door that sits
+-- in the middle of its hedge maze (`Map.HatchDoor`, whose upright 6.3x3.6x0.3
+-- panel is the door itself -- the flat parts around it are only its frame, and
+-- standing on those does nothing). Walking through it does nothing either; the
+-- user demonstrated the click. Everything here is the game's own click path:
+-- a ClickDetector if there is one, a SurfaceGui button if there is one, and the
+-- HatchClicked remote only as a last resort.
+local function clickExit(model)
+    if not model then return false end
+
+    local panel, any
+    for _, c in ipairs(model:GetDescendants()) do
+        if c:IsA("BasePart") then
+            any = any or c
+            -- upright and thin: that is the door leaf rather than its frame
+            if c.Size.Y > 2 and c.Size.Y < 8 and (c.Size.Z < 1 or c.Size.X < 1) then
+                panel = c
+            end
+        end
+    end
+    panel = panel or any
+    if not panel then return false end
+
+    -- Stand in front of it and hold, like every other position-gated action in
+    -- this game.
+    local aim = panel.Position + panel.CFrame.LookVector * 4 - Vector3.new(0, 1.5, 0)
+    warp(aim)
+    local hold = RunService.Heartbeat:Connect(function()
+        local cur = hrp()
+        if cur then cur.CFrame = CFrame.new(aim) end
+    end)
+    task.wait(CONFIG.settle)
+
+    local fired = false
+    for _, c in ipairs(model:GetDescendants()) do
+        if c:IsA("ClickDetector") and fireclickdetector then
+            pcall(fireclickdetector, c, 1)
+            pcall(fireclickdetector, c)
+            fired = true
+        elseif c:IsA("TextButton") or c:IsA("ImageButton") then
+            if press(c) then fired = true end
+        end
+    end
+
+    if not fired then
+        local hc = Remotes and Remotes:FindFirstChild("HatchClicked")
+        if hc then
+            pcall(function() hc:FireServer() end)
+            pcall(function() hc:FireServer(model) end)
+            fired = true
+        end
+    end
+
+    task.wait(2.0)
+    hold:Disconnect()
+    return fired
+end
+
 local function finishRun()
     if not CONFIG.autoFinish or not IN_RUN then return end
     if os.clock() < finishRetry then return end
@@ -1651,19 +1709,23 @@ local function finishRun()
         vent = best
     end
 
+    -- No fall pad? Then this is a click map. The Mansion is one: its exit is the
+    -- door in the middle of the hedge maze and it has to be clicked, not walked
+    -- into. (An earlier read of this as "finalZone = ALL means the map ends by
+    -- itself" was wrong -- that run was ended by hand.)
     if not (vent and vent:IsA("BasePart")) then
-        -- Not a failure. Maps whose MapConfig says `finalZone = ALL` end
-        -- themselves the moment the last zone completes: on the Mansion the
-        -- server moved the character to the taxi area with WalkSpeed 0 and ran
-        -- the ending with **zero** outgoing calls, booking MapClears.Mansion = 1
-        -- and a 718.4s record without anyone pressing a thing. So say so once
-        -- and stop poking at it.
-        local cfg = MapCfg
-        if cfg and cfg.finalZone == "ALL" then
-            note("map clear - this one ends on its own")
-        else
-            note("run done but no exit trigger found on this map")
+        local door = map and (map:FindFirstChild("HatchDoor") or map:FindFirstChild("EndDoor"))
+        if door then
+            STATE.phase = "finish"
+            STATE.finishing = true
+            STATE.finishAt = os.clock()
+            note("every zone cleared - clicking the maze door")
+            local ok = clickExit(door)
+            STATE.finishing = false
+            finishRetry = os.clock() + (ok and 25 or 10)
+            return
         end
+        note("run done but no exit found on this map")
         finishRetry = os.clock() + 60
         return
     end
@@ -1976,6 +2038,7 @@ _G.__LEAVES_DBG = {
     buyUpgrades = buyUpgrades, cheapestUpgrade = cheapestUpgrade,
     objectives = objectives, questRows = questRows, questVal = questVal,
     finishRun = finishRun, everyZoneDone = everyZoneDone, skipCutscene = skipCutscene,
+    clickExit = clickExit,
     IN_RUN = IN_RUN, LOBBY = LOBBY, myData = myData, lobbyTick = lobbyTick,
     startRun = startRun, setDifficulty = setDifficulty, press = press,
     selectMap = selectMap, mapCards = mapCards,
