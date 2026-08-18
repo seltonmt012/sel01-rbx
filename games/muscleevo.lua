@@ -56,12 +56,17 @@ local CfgStrengthLevels = require(Shared.Configs.StrengthLevels)
 local CONFIG = {
 	auto = false,
 	click = true,          -- FireAutoClick every Heartbeat
-	-- Off. The stages train too - their mobs feed the same Strength - so standing at
-	-- a bag between clears is time thrown away, and the walk back and forth was
-	-- most of what the farm appeared to be doing. It stays available as a fallback
-	-- for when the ladder is walled and there is nothing else to do.
-	trainZone = false,
+	-- On, but it only ever runs when the ladder has nothing left to give: the stage
+	-- step is tried first every cycle and the bag is the fallback underneath it.
+	-- That distinction matters here - once every pad up to the wall is spent, the
+	-- ONLY thing that produces wins is becoming strong enough to pass the wall, and
+	-- the bag plus rebirths is how that happens.
+	trainZone = true,
 	rebirth = true,
+	-- Stop rebirthing here and start banking. 10 rebirths unlocks the x15 bag,
+	-- which is the last big free jump; past that each rebirth costs more wins than
+	-- the multiplier is worth while eggs and evolutions are the goal. 0 = no limit.
+	rebirthUntil = 10,
 	-- Off by default and honestly so: a tour of twelve pads was walked and Wins
 	-- never moved off zero. The pads sit inside the stages (Worlds.World_1.Stages.
 	-- Stage_001.Wins) and almost certainly want the stage cleared first, which is
@@ -344,12 +349,28 @@ end
 -- Only THEN does the stage's Wins pad pay - a tour of twelve pads with nothing
 -- cleared returned exactly zero, and the same pad paid 1 the moment the stage
 -- behind it read StageCompleted.
+-- Looked up by the StageId ATTRIBUTE, not by the folder name. The names are not a
+-- contiguous run - Stage_005 and Stage_012 simply do not exist - so building
+-- "Stage_%03d" from the cursor produced "stage 12 not found" and parked the whole
+-- farm at a stage the map never had.
 local function stageFolder(id)
 	local world = Workspace:FindFirstChild("Worlds")
 	world = world and world:FindFirstChild(plr:GetAttribute("StageProgressionWorldId") or "World_1")
 	local stages = world and world:FindFirstChild("Stages")
 	if not stages then return nil end
-	return stages:FindFirstChild(string.format("Stage_%03d", id))
+	local exact = stages:FindFirstChild(string.format("Stage_%03d", id))
+	if exact and tonumber(exact:GetAttribute("StageId")) == id then return exact end
+	for _, s in ipairs(stages:GetChildren()) do
+		if tonumber(s:GetAttribute("StageId")) == id then return s end
+	end
+	-- nothing with that id: fall forward to the next one that does exist, so a gap
+	-- in the numbering does not stop the climb
+	local best, bestId
+	for _, s in ipairs(stages:GetChildren()) do
+		local sid = tonumber(s:GetAttribute("StageId"))
+		if sid and sid > id and (not bestId or sid < bestId) then best, bestId = s, sid end
+	end
+	return best
 end
 
 local function claimStageWins(stage)
@@ -471,9 +492,29 @@ local function runStage()
 		-- the wall resets the run - so harvesting afterwards always came back with
 		-- zero. Claiming here takes the teleport on purpose: the run restarts, the
 		-- ladder is climbed again, and the same pad pays again next lap.
+		-- A pad pays ONCE. Measured: a full climb from 1 to 11 with every pad on the
+		-- way moved Wins by exactly zero, because all of them had been collected on
+		-- earlier laps, and re-claiming stage 11 returned +0 as well. So the wins in
+		-- this game are not farmed by lapping the ladder - they are the one-time
+		-- reward for reaching a stage that has never been reached before, and they
+		-- grow enormously with height (stage 11 pays 250,000, stage 26 pays 125
+		-- billion). Which means the only thing that produces wins is getting
+		-- STRONGER and pushing the wall further, not running the same lap faster.
+		local firstTime = id > (STATE.bestEver or 0)
 		local wall = STATE.wallAt
 		local topOfSafe = wall and (id + 1 >= wall)
-		if topOfSafe or CONFIG.claimStagePads then
+		-- Claim only when this is ground we have never stood on, and only at the top
+		-- of the lap: the claim teleports us back, so there is exactly one pad per
+		-- lap to be had, and it should be the highest new one. Lapping a ladder
+		-- whose pads are already spent is pure motion, which is what the farm was
+		-- doing while Wins sat unchanged at 2,025.
+		if topOfSafe and not firstTime and not CONFIG.claimStagePads then
+			STATE.note = "stage " .. id .. " cleared, pad already spent"
+			STATE.nextStageAt = os.clock() + CONFIG.stageBackoff
+			return false
+		end
+		if firstTime then STATE.bestEver = id end
+		if (firstTime and topOfSafe) or CONFIG.claimStagePads then
 			local before = (data() or {}).Wins or 0
 			STATE.phase = "harvest " .. id
 			claimStageWins(stage)
@@ -485,9 +526,13 @@ local function runStage()
 			-- with these wins are exactly what moves it, and a wall that is never
 			-- retested pins the farm to whatever it could do an hour ago.
 			STATE.laps = (STATE.laps or 0) + 1
-			if STATE.laps % CONFIG.wallRetryEvery == 0 then
-				STATE.wallAt = nil
-				STATE.note = STATE.note .. ", retrying the wall"
+			-- Probe one stage higher rather than forgetting the wall entirely.
+			-- Clearing it raises the wall by hand on the next failure; wiping the
+			-- wall instead sent the climb straight back into the stage that kills
+			-- it and threw away the lap.
+			if STATE.laps % CONFIG.wallRetryEvery == 0 and STATE.wallAt then
+				STATE.wallAt = STATE.wallAt + 1
+				STATE.note = STATE.note .. ", probing stage " .. STATE.wallAt
 			end
 			STATE.nextStageAt = 0
 			-- The claim teleported us back, so this lap is over.
@@ -507,13 +552,14 @@ local function runStage()
 	-- and reaches the billions past stage 26, so one claim at the top of the climb
 	-- is worth thousands of claims at the bottom. The teleport it triggers is
 	-- exactly what is wanted here - the run resets and the climb starts again.
+	-- A stage that could not be finished is the wall, whether that showed up as a
+	-- death or as a timeout. Both have to set it: relying on the death alone let
+	-- the climb walk into the same stage again on the next lap, die there, and only
+	-- then learn what it already knew - which is why the harvest kept firing one
+	-- stage too late and came back with nothing.
 	STATE.stageFails = (STATE.stageFails or 0) + 1
-	if died then
-		STATE.deaths = (STATE.deaths or 0) + 1
-		-- A death is the ladder telling us where the wall is. Remember it and stop
-		-- throwing runs at that stage until something has actually got stronger.
-		STATE.wallAt = id
-	end
+	if died then STATE.deaths = (STATE.deaths or 0) + 1 end
+	STATE.wallAt = math.min(STATE.wallAt or math.huge, id)
 	local harvestId = STATE.highestCleared or (id - 1)
 	if harvestId >= 1 then
 		local top = stageFolder(harvestId)
@@ -532,8 +578,12 @@ local function runStage()
 			end
 		end
 	end
-	STATE.note = "stage " .. id .. " too strong"
-	STATE.nextStageAt = os.clock() + CONFIG.stageBackoff
+	-- With the wall known there is nothing to wait for: the next lap climbs to the
+	-- stage below it and harvests, which is the whole point. Only back off when the
+	-- wall is stage 1 and there is genuinely nowhere to go.
+	STATE.note = "stage " .. id .. " too strong, wall set"
+	STATE.nextStageAt = (STATE.wallAt and STATE.wallAt > 1) and 0
+		or (os.clock() + CONFIG.stageBackoff)
 	return false
 end
 
@@ -697,6 +747,13 @@ end
 
 local function doRebirth()
 	if not CONFIG.rebirth then return false end
+	-- Rebirth wipes Damage, Level, WINS and Evolutions. Measured: rebirth 5 took
+	-- Strength 15,707,605 back to 1,152 and Wins straight to 0. The multipliers are
+	-- worth it while they are cheap, but past a point every rebirth also throws
+	-- away the wins that were about to buy an egg - so it stops at a chosen count
+	-- and the farm banks from then on.
+	local reb = tonumber((data() or {}).Rebirth) or 0
+	if CONFIG.rebirthUntil > 0 and reb >= CONFIG.rebirthUntil then return false end
 	if not rebirthReady() then return false end
 
 	local button = rebirthButton()
@@ -837,7 +894,13 @@ main:Toggle("Click", CONFIG.click, function(v) CONFIG.click = v end,
 main:Toggle("Best training bag", CONFIG.trainZone, function(v) CONFIG.trainZone = v end,
 	"strongest bag the rebirth count allows, Robux and VIP bags skipped")
 main:Toggle("Auto rebirth", CONFIG.rebirth, function(v) CONFIG.rebirth = v end,
-	"resets for x2/x3/x4 on strength, money and damage", UI.theme.warn)
+	"x2/x3/x4 on strength, money and damage - but WIPES wins and evolutions",
+	UI.theme.warn)
+main:Stepper("Rebirth until", function()
+	return CONFIG.rebirthUntil == 0 and "no limit" or tostring(CONFIG.rebirthUntil)
+end, function(dir)
+	CONFIG.rebirthUntil = math.clamp(CONFIG.rebirthUntil + dir, 0, 40)
+end, "stop rebirthing at this count and start banking wins")
 
 local extra = page:Card("STAGES & WINS", 2)
 extra:Toggle("Run stages", CONFIG.stages, function(v) CONFIG.stages = v end,
