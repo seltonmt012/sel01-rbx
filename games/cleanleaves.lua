@@ -1702,14 +1702,20 @@ local function finishRun()
     -- The vent drops you into the ending sequence, so falling out of the floor
     -- is the success signal, not a bug.
     local t0 = os.clock()
+    local fell = false
     while os.clock() - t0 < 4 do
         if not alive() then break end
         local cur = hrp()
         if not cur then break end
-        if cur.Position.Y < vent.Position.Y - 25 then break end
+        if cur.Position.Y < vent.Position.Y - 25 then fell = true break end
         task.wait(0.1)
     end
     push:Disconnect()
+
+    -- Once it is through, stop. The ending plays out over a while before the
+    -- teleport back to the lobby, and the 6s retry kept shoving the character
+    -- into the hole again the whole time -- long after the clear was booked.
+    if fell then finishRetry = os.clock() + 120 end
     -- Give the fall sequence a moment before the collector is allowed to move
     -- the character again, or it warps straight back out of it.
     task.wait(2.5)
