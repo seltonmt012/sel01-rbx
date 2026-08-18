@@ -770,11 +770,23 @@ local function doDisplay()
 			if not worstSlot or not top then break end
 			if (top.__value or 0) <= (worstValue or 0) * CONFIG.swapMargin then break end
 
+			-- Remember what was standing there: pickupItem empties the slot
+			-- immediately and drops the exhibit into the world. If the follow-up
+			-- placement is refused, the pedestal is left bare and the old piece is
+			-- lying on the floor with a Pick Up prompt on it - so put it back.
+			local evictedUid
+			for _, p in ipairs(peds) do
+				if p:GetAttribute("Slot") == worstSlot then evictedUid = p:GetAttribute("ItemUid") end
+			end
 			local okPick = invoke("PedestalNetwork", "PedestalFunctions", "pickupItem", worstSlot)
 			if not okPick then break end
 			task.wait(0.35)
 			local okSwap, done = invoke("PedestalNetwork", "PedestalFunctions",
 				"placeItem", worstSlot, top.uid)
+			if not (okSwap and done == true) and evictedUid then
+				invoke("PedestalNetwork", "PedestalFunctions", "placeItem", worstSlot, evictedUid)
+				STATE.note = "swap refused, put the old exhibit back"
+			end
 			if okSwap and done == true then
 				swaps = swaps + 1
 				used[worstSlot] = true
