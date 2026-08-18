@@ -394,11 +394,27 @@ local function claimStageWins(stage)
 			local pad = model:FindFirstChild(CfgWinButtons.ClaimPartName or "Claim Part")
 			if pad and pad:IsA("BasePart") then
 				hop(pad.Position + Vector3.new(0, 3, 0), 0.5)
+				-- Hovering over the pad is not touching it. A tween sets the CFrame
+				-- every frame without any physics contact, so the server's Touched
+				-- never fires and the pad just sits there - doing it by hand needed
+				-- one jump to collect, which is exactly the missing contact. Jumping
+				-- and landing produces a real Touched, and firetouchinterest is kept
+				-- as the belt to that braces.
+				local _, _, hum = char()
+				if hum then
+					pcall(function()
+						hum.Jump = true
+						hum:ChangeState(Enum.HumanoidStateType.Jumping)
+					end)
+				end
 				if firetouchinterest then
 					pcall(firetouchinterest, pad, hrp, 0)
 					task.wait(0.15)
 					pcall(firetouchinterest, pad, hrp, 1)
 				end
+				-- let the jump land back on the pad before moving on
+				task.wait(0.9)
+				if hum then pcall(function() hum.Jump = true end) end
 				task.wait(0.6)
 				return true
 			end
