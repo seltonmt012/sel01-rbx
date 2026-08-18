@@ -78,6 +78,14 @@
       "detect": "local rs = game:GetService('ReplicatedStorage') local sh = rs:FindFirstChild('Shared') local cfg = sh and sh:FindFirstChild('Configs') return cfg ~= nil and cfg:FindFirstChild('StrengthLevels') ~= nil and cfg:FindFirstChild('WinButtons') ~= nil"
     },
     {
+      "alias": "powerclick",
+      "name": "+1 Power Per Click",
+      "file": "games/powerclick.lua",
+      "places": [74889851913797],
+      "status": "ok",
+      "detect": "local rs = game:GetService('ReplicatedStorage') return rs:FindFirstChild('ClickTrainEvent') ~= nil and rs:FindFirstChild('WallConfig') ~= nil and rs:FindFirstChild('CaveHitEvent') ~= nil"
+    },
+    {
       "alias": "eggfarm",
       "name": "Grow a Chicken Fighter",
       "file": "games/eggfarm.lua",
