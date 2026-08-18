@@ -527,16 +527,22 @@ local function doBuyGear()
 
 	local jobs = {
 		{ cat = GEAR_CATEGORY.shovel, cfg = CfgShovels, order = "SHOVEL_TIER_ORDER",
-		  tbl = "Shovels", owned = d.OwnedShovels },
+		  tbl = "Shovels", owned = d.OwnedShovels, ownedKey = "OwnedShovels" },
 		{ cat = GEAR_CATEGORY.spray, cfg = CfgSprays, order = "SPRAY_TIER_ORDER",
-		  tbl = "SprayBottles", owned = d.OwnedSprays },
+		  tbl = "SprayBottles", owned = d.OwnedSprays, ownedKey = "OwnedSprays" },
 		{ cat = GEAR_CATEGORY.detector, cfg = CfgDetectors, order = "DETECTOR_TIER_ORDER",
-		  tbl = "Detectors", owned = d.OwnedDetectors },
+		  tbl = "Detectors", owned = d.OwnedDetectors, ownedKey = "OwnedDetectors" },
 	}
 
 	local bought = false
 	for _, job in ipairs(jobs) do
-		local pick = bestGear(job.cfg, job.order, job.tbl, job.owned, d.UnlockedIslands, d.Gold or 0)
+		-- Gold is re-read per job: buying the shovel first leaves the spray and
+		-- detector checks comparing against a balance that is already spent, which
+		-- silently picks something no longer affordable and the purchase answers a
+		-- bare `false` with nothing to read.
+		local fresh = data() or d
+		local owned = fresh[job.ownedKey] or job.owned
+		local pick = bestGear(job.cfg, job.order, job.tbl, owned, fresh.UnlockedIslands, fresh.Gold or 0)
 		if pick then
 			STATE.phase = "buy " .. job.cat
 			hop(where + Vector3.new(0, 3, 4), 0.8)
@@ -546,6 +552,8 @@ local function doBuyGear()
 				STATE.note = "bought " .. pick
 				bought = true
 				task.wait(0.6)
+			else
+				STATE.note = "buy " .. pick .. " refused (" .. tostring(res) .. ")"
 			end
 		end
 	end
