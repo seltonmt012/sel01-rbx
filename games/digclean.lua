@@ -71,6 +71,8 @@ local CONFIG = {
 	display = true,       -- keep the best finds on museum pedestals
 	polish = true,        -- raise item condition in the polishers
 	plot = true,          -- unlock sections, polishers and upstairs pedestals
+	islands = true,       -- unlock and move to the highest-luck island
+	islandFirst = true,   -- hold gold back from gear once an island is in reach
 	buyGear = true,
 	claimFree = true,     -- offline earnings, forever pack, codes
 	moveSpeed = 90,       -- studs/s for the tween hops; the game does not check it
@@ -99,6 +101,7 @@ local STATE = {
 	busy = false,
 	nextGearAt = 0,
 	gear = "-",
+	island = "-",
 }
 
 _G.__DIGCLEAN = (_G.__DIGCLEAN or 0) + 1
@@ -350,12 +353,25 @@ local function doDig()
 	local ctrl = digController()
 	if not ctrl then STATE.note = "no dig controller" return false end
 
-	-- Standing in a dig area is what makes the server scan for nodes at all.
+	-- Standing INSIDE a dig area is what makes the server scan for nodes at all,
+	-- and the old check only walked when further than 60 studs. Sitting 33 studs
+	-- away - just outside the area, right next to it - left the detector held and
+	-- the node list permanently empty, which reads as "the farm stopped finding
+	-- anything" while everything else looks healthy.
 	local zone, zoneDist = nearestTagged("DigZone")
-	if zone and zoneDist and zoneDist > 60 then
-		STATE.phase = "walk to dig area"
-		local ok, pivot = pcall(function() return zone:GetPivot() end)
-		if ok then hop(pivot.Position + Vector3.new(0, 5, 0)) end
+	if zone then
+		local inside = false
+		if zone:IsA("BasePart") then
+			local local_ = zone.CFrame:PointToObjectSpace(select(2, char()).Position)
+			inside = math.abs(local_.X) <= zone.Size.X / 2
+				and math.abs(local_.Z) <= zone.Size.Z / 2
+		end
+		if not inside then
+			STATE.phase = "walk to dig area"
+			local ok, pivot = pcall(function() return zone:GetPivot() end)
+			if ok then hop(pivot.Position + Vector3.new(0, 5, 0)) end
+			task.wait(0.6)
+		end
 	end
 
 	fire("DetectorNetwork", "DetectorEvents", "SetDetectorHeld", true)
@@ -734,7 +750,13 @@ local function doBuyGear()
 		-- bare `false` with nothing to read.
 		local fresh = data() or d
 		local owned = fresh[job.ownedKey] or job.owned
-		local pick = bestGear(job.cfg, job.order, job.tbl, owned, fresh.UnlockedIslands, fresh.Gold or 0)
+		-- Spend only the surplus above the island reserve, except for anything so
+		-- cheap next to the balance that blocking it would be silly.
+		local gold = fresh.Gold or 0
+		local reserve = CONFIG.islandFirst and islandReserve() or 0
+		local budget = gold
+		if reserve > 0 then budget = math.max(gold - reserve, gold * 0.01) end
+		local pick = bestGear(job.cfg, job.order, job.tbl, owned, fresh.UnlockedIslands, budget)
 		if pick then
 			STATE.phase = "buy " .. job.cat
 			hop(where + Vector3.new(0, 3, 4), 0.8)
@@ -752,6 +774,82 @@ local function doBuyGear()
 	end
 	until not boughtThisRound or rounds >= 8
 	return bought
+end
+
+--------------------------------------------------------------------------------
+-- islands
+--------------------------------------------------------------------------------
+
+-- The islands carry a LUCK multiplier - 1, 2, 4, 8 - and luck is what decides how
+-- rare a buried item rolls. That makes the island the single biggest upgrade in
+-- the game and it is not gear: Shipwreck Cove costs 1,100,000 and doubles every
+-- roll from then on, while a shovel at 45,000 only makes the same rolls faster.
+local CfgIslands = require(Const.world.Islands)
+
+local function islandInfo(id)
+	return (CfgIslands.Islands or {})[id]
+end
+
+local function bestIsland(d)
+	local unlocked = {}
+	for _, id in ipairs(d.UnlockedIslands or {}) do unlocked[id] = true end
+	local bestUnlocked, bestLuck = CfgIslands.STARTER_ISLAND_ID, 0
+	local nextLocked, nextCost
+	for _, id in ipairs(CfgIslands.ISLAND_ORDER or {}) do
+		local entry = islandInfo(id)
+		if entry then
+			local luck = tonumber(entry.luck) or 1
+			if unlocked[id] then
+				if luck > bestLuck then bestUnlocked, bestLuck = id, luck end
+			elseif not nextLocked then
+				nextLocked, nextCost = id, tonumber(entry.cost) or math.huge
+			end
+		end
+	end
+	return bestUnlocked, bestLuck, nextLocked, nextCost
+end
+
+-- The reserve that stops the starvation pattern: once the next island is within
+-- reach of the current income, gear may only spend the surplus above its price.
+-- Without it a 45,000 shovel every few minutes means 1,100,000 is never reached.
+local RESERVE_WINDOW = 900
+local function islandReserve()
+	local d = data()
+	if not d then return 0 end
+	local _, _, nextLocked, nextCost = bestIsland(d)
+	if not nextLocked or not nextCost then return 0 end
+	local reachable = (d.Gold or 0) + math.max(STATE.goldRate, 0) * RESERVE_WINDOW
+	if reachable >= nextCost then return nextCost end
+	return 0
+end
+
+local function doTravel()
+	local d = data()
+	if not d then return false end
+	local best, luck, nextLocked, nextCost = bestIsland(d)
+
+	-- buy the next island the moment it is affordable; nothing else competes
+	if nextLocked and nextCost and (d.Gold or 0) >= nextCost then
+		STATE.phase = "unlock " .. nextLocked
+		local ok, res = invoke("TravelNetwork", "TravelFunctions", "travel", nextLocked)
+		if ok and res ~= "poor" then
+			STATE.note = "unlocked island " .. nextLocked .. " for " .. short(nextCost)
+			_G.__DC_PLOT = nil
+			return true
+		end
+		STATE.note = "travel(" .. nextLocked .. ") -> " .. tostring(res)
+	end
+
+	-- and make sure we are actually standing on the best one we own
+	if d.CurrentIsland ~= best then
+		STATE.phase = "travel " .. best
+		local ok, res = invoke("TravelNetwork", "TravelFunctions", "travel", best)
+		if ok and res ~= "poor" then
+			STATE.note = "travelled to " .. best .. " (luck x" .. luck .. ")"
+			return true
+		end
+	end
+	return false
 end
 
 -- True when something is affordable and unbought, so the shopping trip is only
@@ -826,6 +924,8 @@ loop(0.5, function()
 		-- inventory to fill, which reads exactly like "it never upgrades".
 		if os.clock() >= (STATE.nextGearAt or 0) then
 			STATE.nextGearAt = os.clock() + math.max(CONFIG.gearEvery, 10)
+			-- Islands go before every other spend: they multiply every future roll.
+			if CONFIG.islands then doTravel() end
 			if CONFIG.plot then doUnlockSection() doPlotUpgrades() end
 			if CONFIG.buyGear and gearPending() then
 				doBuyGear()
@@ -855,6 +955,11 @@ loop(6, function()
 	STATE.tutorial = tutorialStep()
 	STATE.gear = tostring(d.EquippedShovel) .. " / " .. tostring(d.EquippedSpray) ..
 		" / " .. tostring(d.EquippedDetector)
+	local best, luck, nextLocked, nextCost = bestIsland(d)
+	STATE.island = tostring(d.CurrentIsland) .. " luck x" .. tostring(luck == 0 and 1 or luck) ..
+		(nextLocked and ("   next " .. nextLocked .. " " .. short(nextCost)) or "   all owned")
+	local reserve = islandReserve()
+	if reserve > 0 then STATE.island = STATE.island .. "  (reserved)" end
 end)
 
 loop(120, function()
@@ -902,6 +1007,11 @@ extra:Stepper("Keep from rarity", function()
 end, function(dir)
 	CONFIG.minRarityKeep = math.clamp(CONFIG.minRarityKeep + dir, 1, 8)
 end, "anything below this is sold instead of displayed")
+extra:Toggle("Unlock islands", CONFIG.islands, function(v) CONFIG.islands = v end,
+	"luck x1 / x2 / x4 / x8 for 0 / 1.1M / 32M / 120M - the biggest upgrade there is",
+	UI.theme.warn)
+extra:Toggle("Island before gear", CONFIG.islandFirst, function(v) CONFIG.islandFirst = v end,
+	"holds gold back once the next island is within reach of income")
 extra:Toggle("Polish", CONFIG.polish, function(v) CONFIG.polish = v end,
 	"raises condition, which raises value both on a pedestal and at the seller")
 extra:Toggle("Expand plot", CONFIG.plot, function(v) CONFIG.plot = v end,
@@ -935,6 +1045,7 @@ task.spawn(function()
 			"  cleaned  " .. STATE.cleaned,
 			"  sold     " .. short(STATE.sold) .. " gold this session",
 			"  gear     " .. tostring(STATE.gear),
+			"  island   " .. tostring(STATE.island),
 			"  nodes    " .. STATE.nodes .. " visible, last " .. tostring(STATE.lastRarity),
 			"  backpack " .. string.format("%d%%", math.floor(backpackFullness() * 100)),
 			"  " .. tostring(STATE.note),
@@ -961,6 +1072,7 @@ _G.__DIGCLEAN_DBG = {
 	doDig = doDig, doClean = doClean, doSell = doSell, doDisplay = doDisplay,
 	doBuyGear = doBuyGear, claimFree = claimFree, unstuck = unstuck,
 	doPolish = doPolish, doUnlockSection = doUnlockSection, doPlotUpgrades = doPlotUpgrades,
+	doTravel = doTravel, bestIsland = bestIsland, islandReserve = islandReserve,
 	closeModals = closeModals, plotNumber = plotNumber,
 	pickNode = pickNode, nodeList = nodeList, digController = digController,
 	invoke = invoke, fire = fire, hop = hop, npcNamed = npcNamed,
