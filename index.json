@@ -62,6 +62,14 @@
       "detect": "local rs = game:GetService('ReplicatedStorage') local cfg = rs:FindFirstChild('Config') return cfg ~= nil and cfg:FindFirstChild('Treadmills') ~= nil and cfg:FindFirstChild('Upgrades') ~= nil and rs:FindFirstChild('Remotes') ~= nil and rs.Remotes:FindFirstChild('PromptTreadmill') ~= nil"
     },
     {
+      "alias": "digclean",
+      "name": "Dig & Clean",
+      "file": "games/digclean.lua",
+      "places": [83038462357724],
+      "status": "ok",
+      "detect": "local rs = game:GetService('ReplicatedStorage') local ts = rs:FindFirstChild('TS') local c = ts and ts:FindFirstChild('constants') return c ~= nil and c:FindFirstChild('DiggingConfig', true) ~= nil and c:FindFirstChild('SprayBottles', true) ~= nil"
+    },
+    {
       "alias": "eggfarm",
       "name": "Grow a Chicken Fighter",
       "file": "games/eggfarm.lua",
