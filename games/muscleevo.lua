@@ -65,10 +65,19 @@ local CONFIG = {
 	claimWins = false,
 	buyBody = true,        -- buy the best affordable evolution
 	stages = true,         -- walk the stage ladder for Wins
-	eggs = true,           -- open the best egg the Wins balance covers
-	stageTimeout = 30,     -- seconds to clear a stage before giving up on it
-	stageBackoff = 90,     -- seconds of training after a stage proved too strong
-	stageEvery = 20,       -- seconds between stage attempts while training
+	-- Off by default, honestly. The price is scraped off the egg's billboard and it
+	-- misread "25K" as 10, so every cycle it walked to an egg it could not afford,
+	-- fired the prompt and came back empty - which cost the stage runner its turn.
+	-- The cheapest egg is 25,000 Wins anyway, far past anything reached so far.
+	eggs = false,
+	stageTimeout = 20,     -- seconds to clear a stage before giving up on it
+	stageBackoff = 60,     -- seconds of training after a stage proved too strong
+	stageChain = 25,       -- stages to run back to back before checking anything else
+	keepAlive = true,      -- top the health up while inside a stage
+	-- Off: the pad teleports you back and resets the run, which pins the ladder to
+	-- stage 1. It is switched on automatically once the climb stalls, where the
+	-- teleport costs nothing because there is nowhere further to go.
+	claimStagePads = false,
 	moveSpeed = 90,
 	claimEvery = 45,       -- seconds between win-pad tours
 	maxClaimTravel = 900,  -- studs; further pads are on another stage entirely
@@ -151,20 +160,77 @@ end
 -- choice is read from the world rather than from a table that could drift:
 -- Multiplier, RequiredRebirths, and - the ones to avoid - DevProductId,
 -- RequiredGamepassId and AdminOnly.
+-- Restricted to the world we are actually in. Without that the picker found a x60
+-- bag inside Workspace.Worlds.Backrooms and marched the character four thousand
+-- studs across the map to stand in it - which also took it out of range of its own
+-- stages, so Stage_001.Zone was not even streamed in any more and every stage run
+-- failed instantly while the panel happily reported "training x60".
+local function currentWorldFolder()
+	local worlds = Workspace:FindFirstChild("Worlds")
+	if not worlds then return nil end
+	local id = plr:GetAttribute("CurrentWorldId")
+		or (data() or {}).CurrentWorldId or "World_1"
+	return worlds:FindFirstChild(id) or worlds:FindFirstChild("World_1")
+end
+
 local function bestTrainZone()
 	local d = data()
 	local rebirths = d and tonumber(d.Rebirth) or 0
+	-- Rejecting anything that sits inside a DIFFERENT world folder, rather than
+	-- requiring membership in ours: the real bags are not under Worlds at all, so
+	-- an inclusive filter threw every one of them away and left the picker with
+	-- nothing.
+	local worlds = Workspace:FindFirstChild("Worlds")
+	local mine = currentWorldFolder()
+	local function foreignWorld(inst)
+		if not worlds then return false end
+		for _, w in ipairs(worlds:GetChildren()) do
+			if w ~= mine and inst:IsDescendantOf(w) then return true end
+		end
+		return false
+	end
 	local best, bestMulti
 	for _, z in ipairs(CollectionService:GetTagged("TrainZone")) do
-		local multi = tonumber(z:GetAttribute("Multiplier")) or 0
-		local needs = tonumber(z:GetAttribute("RequiredRebirths")) or 0
-		local paid = z:GetAttribute("DevProductId") or z:GetAttribute("RequiredGamepassId")
-		local admin = z:GetAttribute("AdminOnly") or z:GetAttribute("AdminBag")
-		if not paid and not admin and rebirths >= needs then
-			if not bestMulti or multi > bestMulti then best, bestMulti = z, multi end
+		if not foreignWorld(z) then
+			local multi = tonumber(z:GetAttribute("Multiplier")) or 0
+			local needs = tonumber(z:GetAttribute("RequiredRebirths")) or 0
+			local paid = z:GetAttribute("DevProductId") or z:GetAttribute("RequiredGamepassId")
+			local admin = z:GetAttribute("AdminOnly") or z:GetAttribute("AdminBag")
+			if not paid and not admin and rebirths >= needs then
+				if not bestMulti or multi > bestMulti then best, bestMulti = z, multi end
+			end
 		end
 	end
 	return best, bestMulti or 0
+end
+
+-- Getting stranded is a real failure mode here: a portal or a stray teleport can
+-- leave the character in another world, where none of its own bags or stages are
+-- streamed in, and then nothing resolves and it just stands there. Walking back to
+-- the current world's Train Stands re-streams everything.
+local function comeHome()
+	local _, hrp = char()
+	if not hrp then return false end
+	local world = currentWorldFolder()
+	local stands = world and world:FindFirstChild("Train Stands")
+
+	-- Remember where home was while it is still streamed in. Once the character is
+	-- in another world the Train Stands model is gone too, GetPivot fails, and a
+	-- rescue that depends on reading it can never fire - which is exactly how it
+	-- ended up parked in the Backrooms twice with nothing resolving.
+	if stands then
+		local ok, pivot = pcall(function() return stands:GetPivot() end)
+		if ok then _G.__MUSCLE_HOME = pivot.Position end
+	end
+
+	local home = _G.__MUSCLE_HOME
+	if not home then return false end
+	if (home - hrp.Position).Magnitude < 400 then return false end
+	STATE.phase = "back to " .. tostring(world and world.Name or "world")
+	STATE.note = "was stranded outside its own world"
+	hrp.CFrame = CFrame.new(home + Vector3.new(0, 6, 0))
+	task.wait(2)
+	return true
 end
 
 local function standInZone()
@@ -309,13 +375,27 @@ local function runStage()
 	local id = tonumber(plr:GetAttribute("StageProgressionCurrentStage")) or 1
 	local stage = stageFolder(id)
 	if not stage then STATE.note = "stage " .. id .. " not found" return false end
+	-- The Zone part streams out when the character is far away, so a missing Zone
+	-- means "walk closer first", not "give up".
 	local zone = stage:FindFirstChild("Zone")
-	if not zone then return false end
+	if not zone then
+		local ok, pivot = pcall(function() return stage:GetPivot() end)
+		if ok then
+			STATE.phase = "to stage " .. id
+			hop(pivot.Position + Vector3.new(0, 6, 0), 0.6)
+			task.wait(0.6)
+			zone = stage:FindFirstChild("Zone")
+		end
+		if not zone then
+			STATE.note = "stage " .. id .. " zone not loaded"
+			return false
+		end
+	end
 
 	STATE.phase = "stage " .. id
 	STATE.stage = id
 	STATE.inStage = true
-	hop(zone.Position + Vector3.new(0, 4, 0), 1)
+	hop(zone.Position + Vector3.new(0, 4, 0), 0.35)
 
 	-- The clicking loop is already running on Heartbeat; here we only wait for the
 	-- server to call the stage done, and give up rather than stand there forever
@@ -326,28 +406,56 @@ local function runStage()
 	while os.clock() < deadline and CONFIG.auto and GEN == _G.__MUSCLE do
 		local state = plr:GetAttribute("StageProgressionState")
 		if state == "StageCompleted" then break end
-		local _, hrp = char()
+		local _, hrp, hum = char()
 		if hrp and (hrp.Position - zone.Position).Magnitude > 20 then
-			hop(zone.Position + Vector3.new(0, 4, 0), 0.3)
+			hop(zone.Position + Vector3.new(0, 4, 0), 0.2)
 		end
-		task.wait(0.5)
+		-- Dying drops the run and costs the whole timeout, so the health is held up
+		-- while inside a stage. This is a client-side write and the server keeps its
+		-- own copy, so it is NOT god mode - it only stops the local ragdoll/reset
+		-- from interrupting a clear that is already going through.
+		if CONFIG.keepAlive and hum and hum.Health < hum.MaxHealth then
+			pcall(function() hum.Health = hum.MaxHealth end)
+		end
+		task.wait(0.15)
 	end
 	STATE.inStage = false
 
 	if plr:GetAttribute("StageProgressionState") == "StageCompleted" then
-		local before = (data() or {}).Wins or 0
-		claimStageWins(stage)
-		task.wait(0.8)
-		local after = (data() or {}).Wins or 0
 		STATE.stageFails = 0
-		STATE.note = "stage " .. id .. " cleared, +" .. short(after - before) .. " wins"
+		-- Do NOT touch the Wins pad here. Claiming it teleports the player back to
+		-- the start and resets the run, so the cursor never leaves stage 1: watched
+		-- live it cycled StageActivated -> RunReset -> StageActivated forever while
+		-- collecting the same single win over and over. Climbing is worth far more -
+		-- stage 1's pad pays 1, stage 8's pays 7,500 - so the pad is only collected
+		-- when the ladder has actually stalled.
+		if CONFIG.claimStagePads then
+			local before = (data() or {}).Wins or 0
+			claimStageWins(stage)
+			task.wait(0.8)
+			STATE.note = "stage " .. id .. " cleared, +" ..
+				short(((data() or {}).Wins or 0) - before) .. " wins"
+		else
+			STATE.note = "stage " .. id .. " cleared, moving up"
+		end
 		return true
 	end
 
-	-- Not cleared in time: almost always too little damage. Back off to the bag
-	-- and let strength build instead of grinding a wall.
+	-- Not cleared in time: almost always too little damage. Before backing off to
+	-- the bag, cash in the pad of this stage - the climb has stalled here, so the
+	-- teleport it causes costs nothing, and the wins buy the evolution that breaks
+	-- the wall.
 	STATE.stageFails = (STATE.stageFails or 0) + 1
-	STATE.note = "stage " .. id .. " too strong, training instead"
+	if STATE.stageFails >= 2 then
+		local before = (data() or {}).Wins or 0
+		claimStageWins(stage)
+		task.wait(0.8)
+		local gained = ((data() or {}).Wins or 0) - before
+		if gained > 0 then STATE.note = "stalled on " .. id .. ", banked " .. short(gained) .. " wins" end
+	end
+	if not STATE.note or not STATE.note:find("banked") then
+		STATE.note = "stage " .. id .. " too strong, training instead"
+	end
 	STATE.nextStageAt = os.clock() + CONFIG.stageBackoff
 	return false
 end
@@ -361,6 +469,7 @@ end
 -- eggs at once, which is the same rate with a worse failure mode.
 local function openBestEgg()
 	if not CONFIG.eggs then return false end
+	if os.clock() < (STATE.nextEggAt or 0) then return false end
 	local d = data()
 	if not d then return false end
 	local wins = tonumber(d.Wins) or 0
@@ -396,13 +505,31 @@ local function openBestEgg()
 	local ok, pivot = pcall(function() return best:GetPivot() end)
 	if ok then hop(pivot.Position + Vector3.new(0, 3, 4), 0.5) end
 	local prompt = best:FindFirstChildWhichIsA("ProximityPrompt", true)
-	if prompt then
-		pcall(function() fireproximityprompt(prompt) end)
-		task.wait(0.8)
+	if not prompt then return false end
+
+	-- Counted by the pet inventory actually growing, not by the prompt firing.
+	-- The price is scraped off a billboard and the first version misread "25K" as
+	-- 10, so every cycle it "succeeded", returned true, and the whole loop stopped
+	-- before it ever reached the stages - the stage cursor sat on 1 while the
+	-- status line cheerfully said "egg 10".
+	local function petCount()
+		local d2 = data()
+		if not d2 or type(d2.Pets) ~= "table" then return 0 end
+		local n = 0
+		for _ in pairs(d2.Pets) do n = n + 1 end
+		return n
+	end
+	local before = petCount()
+	pcall(function() fireproximityprompt(prompt) end)
+	task.wait(1)
+	if petCount() > before then
 		STATE.eggs = (STATE.eggs or 0) + 1
 		STATE.note = "opened an egg for " .. short(bestPrice)
 		return true
 	end
+	-- nothing hatched: park eggs for a while instead of blocking the cycle
+	STATE.nextEggAt = os.clock() + 120
+	STATE.note = "egg did not open (read " .. short(bestPrice) .. ")"
 	return false
 end
 
@@ -422,8 +549,19 @@ local function buyBestBody()
 	local have = tonumber(d.EquippedBody)
 	if not want or want == have then return false end
 
+	-- Same world only. The evolution ladders repeat in every world, and walking to
+	-- the Backrooms copy of body 3 is what kept dragging the character out of its
+	-- own map in the first place.
+	local worlds = Workspace:FindFirstChild("Worlds")
+	local mine = currentWorldFolder()
 	for _, stand in ipairs(CollectionService:GetTagged("BodyStand")) do
-		if tonumber(stand:GetAttribute("BodyId")) == want then
+		local foreign = false
+		if worlds then
+			for _, w in ipairs(worlds:GetChildren()) do
+				if w ~= mine and stand:IsDescendantOf(w) then foreign = true break end
+			end
+		end
+		if not foreign and tonumber(stand:GetAttribute("BodyId")) == want then
 			local prompt = stand:FindFirstChildWhichIsA("ProximityPrompt", true)
 			if prompt then
 				STATE.phase = "evolve " .. want
@@ -548,6 +686,7 @@ loop(1, function()
 	if STATE.busy then return end
 	STATE.busy = true
 	local ok, err = pcall(function()
+		if comeHome() then return end
 		-- Spending first, so a cleared stage's wins turn into an evolution or an
 		-- egg before the next stage attempt, then progression, then the bag.
 		if doRebirth() then return end
@@ -557,9 +696,18 @@ loop(1, function()
 			STATE.nextClaimAt = os.clock() + math.max(CONFIG.claimEvery, 15)
 			if claimWins() then return end
 		end
+		-- Stages chain straight into each other. Going back to the punching bag
+		-- between them was pure loss: the mobs raise strength as well, so a cleared
+		-- stage is strictly better than the same seconds spent at the bag. The bag
+		-- is now only the fallback for when a stage actually proved too strong.
 		if CONFIG.stages and os.clock() >= (STATE.nextStageAt or 0) then
-			STATE.nextStageAt = os.clock() + math.max(CONFIG.stageEvery, 10)
-			if runStage() then return end
+			local chained = 0
+			while CONFIG.auto and CONFIG.stages and GEN == _G.__MUSCLE
+				and chained < CONFIG.stageChain do
+				if not runStage() then break end
+				chained = chained + 1
+			end
+			if chained > 0 then return end
 		end
 		standInZone()
 		STATE.phase = "training " .. STATE.zone
@@ -620,8 +768,13 @@ extra:Toggle("Run stages", CONFIG.stages, function(v) CONFIG.stages = v end,
 extra:Toggle("Open eggs", CONFIG.eggs, function(v) CONFIG.eggs = v end,
 	"best egg the Wins balance covers, plain Open only", UI.theme.warn)
 extra:Stepper("Stage timeout", function() return CONFIG.stageTimeout .. "s" end,
-	function(dir) CONFIG.stageTimeout = math.clamp(CONFIG.stageTimeout + dir * 5, 10, 120) end,
+	function(dir) CONFIG.stageTimeout = math.clamp(CONFIG.stageTimeout + dir * 5, 5, 120) end,
 	"give up and go train when a stage takes longer than this")
+extra:Stepper("Chain stages", function() return CONFIG.stageChain .. "x" end,
+	function(dir) CONFIG.stageChain = math.clamp(CONFIG.stageChain + dir * 5, 1, 50) end,
+	"how many stages to run back to back before looking at anything else")
+extra:Toggle("Keep alive in stage", CONFIG.keepAlive, function(v) CONFIG.keepAlive = v end,
+	"tops the health up so a death does not throw away a clear in progress")
 extra:Toggle("Claim win pads", CONFIG.claimWins, function(v) CONFIG.claimWins = v end,
 	"tours the richest reachable pads, never the 2x Robux twins")
 extra:Toggle("Buy evolutions", CONFIG.buyBody, function(v) CONFIG.buyBody = v end,
