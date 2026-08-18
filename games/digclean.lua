@@ -75,7 +75,8 @@ local CONFIG = {
 	claimFree = true,     -- offline earnings, forever pack, codes
 	moveSpeed = 90,       -- studs/s for the tween hops; the game does not check it
 	clicksPerSec = 11,    -- DIG_MAX_CLICKS_PER_SECOND is 50
-	sellAt = 0.8,         -- sell once the backpack is this full
+	sellAt = 0.3,         -- sell once the backpack is this full
+	gearEvery = 30,       -- seconds between gear-shopping trips
 	minRarityKeep = 3,    -- rarity index at or above which an item is displayed
 }
 
@@ -96,6 +97,8 @@ local STATE = {
 	lastGoldAt = 0,
 	tutorial = -1,
 	busy = false,
+	nextGearAt = 0,
+	gear = "-",
 }
 
 _G.__DIGCLEAN = (_G.__DIGCLEAN or 0) + 1
@@ -464,9 +467,16 @@ local function doDisplay()
 	local peds = plot and plot:FindFirstChild("Plot") and plot.Plot:FindFirstChild("Pedestals")
 	if not peds then return false end
 
-	local free = {}
+	-- The inventory still lists an item that is standing on a pedestal, so the
+	-- placed uids have to be subtracted or the same rare find is "missing from the
+	-- museum" forever: every cycle drove to the plot, tried to place it again, got
+	-- a bare false, and drove back. That ping-pong is what stalled the digging.
+	local free, placed = {}, {}
 	for _, p in ipairs(peds:GetChildren()) do
-		if p:GetAttribute("Owned") and (p:GetAttribute("ItemUid") or "") == "" then
+		local uid = p:GetAttribute("ItemUid") or ""
+		if uid ~= "" then
+			placed[uid] = true
+		elseif p:GetAttribute("Owned") then
 			free[#free + 1] = p:GetAttribute("Slot")
 		end
 	end
@@ -478,7 +488,7 @@ local function doDisplay()
 	-- nothing for the seven cycles it took to notice them.
 	local candidates = {}
 	for _, entry in ipairs(inventoryList()) do
-		if not entry.dirty then
+		if not entry.dirty and not placed[entry.uid] then
 			local rarity = RARITY[(CfgItems.Items[entry.id] or {}).rarity] or 1
 			if rarity >= CONFIG.minRarityKeep then
 				entry.__value = valueOf(entry)
@@ -709,7 +719,14 @@ local function doBuyGear()
 		  tbl = "Detectors", owned = d.OwnedDetectors, ownedKey = "OwnedDetectors" },
 	}
 
+	-- One trip buys as many tiers as the balance covers, not one per visit. Gold
+	-- accumulates while digging, so a single-purchase trip left affordable gear
+	-- sitting in the shop for as long as it took the backpack to fill again.
 	local bought = false
+	local rounds = 0
+	repeat
+	local boughtThisRound = false
+	rounds = rounds + 1
 	for _, job in ipairs(jobs) do
 		-- Gold is re-read per job: buying the shovel first leaves the spray and
 		-- detector checks comparing against a balance that is already spent, which
@@ -726,13 +743,31 @@ local function doBuyGear()
 				invoke("ShopNetwork", "ShopFunctions", "equipGear", job.cat, pick)
 				STATE.note = "bought " .. pick
 				bought = true
+				boughtThisRound = true
 				task.wait(0.6)
 			else
 				STATE.note = "buy " .. pick .. " refused (" .. tostring(res) .. ")"
 			end
 		end
 	end
+	until not boughtThisRound or rounds >= 8
 	return bought
+end
+
+-- True when something is affordable and unbought, so the shopping trip is only
+-- walked when it would actually do something.
+local function gearPending()
+	local d = data()
+	if not d then return false end
+	local checks = {
+		{ CfgShovels, "SHOVEL_TIER_ORDER", "Shovels", d.OwnedShovels },
+		{ CfgSprays, "SPRAY_TIER_ORDER", "SprayBottles", d.OwnedSprays },
+		{ CfgDetectors, "DETECTOR_TIER_ORDER", "Detectors", d.OwnedDetectors },
+	}
+	for _, c in ipairs(checks) do
+		if bestGear(c[1], c[2], c[3], c[4], d.UnlockedIslands, d.Gold or 0) then return true end
+	end
+	return false
 end
 
 local function claimFree()
@@ -784,9 +819,18 @@ loop(0.5, function()
 		if CONFIG.display then doDisplay() end
 		if CONFIG.sell and backpackFullness() >= CONFIG.sellAt then
 			doSell()
-			if CONFIG.plot then doUnlockSection() doPlotUpgrades() end
-			if CONFIG.buyGear then doBuyGear() end
 			closeModals()
+		end
+		-- Shopping runs on its own clock. Hanging it off the sell trip meant that
+		-- with a 50-slot backpack an affordable upgrade waited minutes for the
+		-- inventory to fill, which reads exactly like "it never upgrades".
+		if os.clock() >= (STATE.nextGearAt or 0) then
+			STATE.nextGearAt = os.clock() + math.max(CONFIG.gearEvery, 10)
+			if CONFIG.plot then doUnlockSection() doPlotUpgrades() end
+			if CONFIG.buyGear and gearPending() then
+				doBuyGear()
+				closeModals()
+			end
 		end
 		if CONFIG.dig then doDig() end
 	end)
@@ -809,6 +853,8 @@ loop(6, function()
 	end
 	STATE.lastGold, STATE.lastGoldAt = STATE.gold, now
 	STATE.tutorial = tutorialStep()
+	STATE.gear = tostring(d.EquippedShovel) .. " / " .. tostring(d.EquippedSpray) ..
+		" / " .. tostring(d.EquippedDetector)
 end)
 
 loop(120, function()
@@ -872,7 +918,7 @@ extra:Slider("Move speed", 30, 200, CONFIG.moveSpeed, function(v)
 end, "studs per second for the hops")
 extra:Button("Unstuck", unstuck, UI.theme.bad)
 
-local out = page:Card("STATUS", 0):Readout(11, function(text)
+local out = page:Card("STATUS", 0):Readout(13, function(text)
 	if text:find("tutorial") then return UI.theme.warn end
 	if text:find("^AUTO") then return UI.theme.good end
 	return nil
@@ -888,6 +934,7 @@ task.spawn(function()
 			"  dug      " .. STATE.dug .. " total, " .. STATE.digs .. " this session",
 			"  cleaned  " .. STATE.cleaned,
 			"  sold     " .. short(STATE.sold) .. " gold this session",
+			"  gear     " .. tostring(STATE.gear),
 			"  nodes    " .. STATE.nodes .. " visible, last " .. tostring(STATE.lastRarity),
 			"  backpack " .. string.format("%d%%", math.floor(backpackFullness() * 100)),
 			"  " .. tostring(STATE.note),
