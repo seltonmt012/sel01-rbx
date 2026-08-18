@@ -48,6 +48,7 @@ local ClickController = require(Client.Controllers.GameBased.ClickController)
 local CfgRebirth = require(Shared.Configs.Rebirth)
 local CfgWinButtons = require(Shared.Configs.WinButtons)
 local CfgStrengthLevels = require(Shared.Configs.StrengthLevels)
+local CfgEggs = require(Shared.Configs.Eggs)
 
 --------------------------------------------------------------------------------
 -- config / state
@@ -75,11 +76,8 @@ local CONFIG = {
 	claimWins = false,
 	buyBody = true,        -- buy the best affordable evolution
 	stages = true,         -- walk the stage ladder for Wins
-	-- Off by default, honestly. The price is scraped off the egg's billboard and it
-	-- misread "25K" as 10, so every cycle it walked to an egg it could not afford,
-	-- fired the prompt and came back empty - which cost the stage runner its turn.
-	-- The cheapest egg is 25,000 Wins anyway, far past anything reached so far.
-	eggs = false,
+	eggs = true,           -- open the richest egg the Wins balance covers
+	eggEvery = 20,         -- seconds between egg trips
 	stageTimeout = 20,     -- seconds to clear a stage before giving up on it
 	stageBackoff = 60,     -- seconds of training after a stage proved too strong
 	stageChain = 25,       -- stages to run back to back before checking anything else
@@ -626,38 +624,52 @@ local function openBestEgg()
 	if not d then return false end
 	local wins = tonumber(d.Wins) or 0
 
-	local best, bestPrice
-	for _, egg in ipairs(CollectionService:GetTagged("Egg")) do
-		if not egg:GetAttribute("EggStageLockHidden") then
-			local price = tonumber(egg:GetAttribute("Price")) or tonumber(egg:GetAttribute("Wins"))
-			-- the price is usually only on the billboard, so fall back to reading it
-			if not price then
-				local label = egg:FindFirstChildWhichIsA("BillboardGui", true)
-				if label then
-					for _, t in ipairs(label:GetDescendants()) do
-						if t:IsA("TextLabel") then
-							local num, suffix = tostring(t.Text):match("([%d%.]+)%s*([KMBT]?)")
-							if num then
-								local mult = ({ K = 1e3, M = 1e6, B = 1e9, T = 1e12 })[suffix] or 1
-								price = tonumber(num) * mult
-								break
-							end
-						end
-					end
-				end
-			end
-			if price and price <= wins and (not bestPrice or price > bestPrice) then
-				best, bestPrice = egg, price
-			end
+	-- Prices come from Configs.Eggs, not off the billboard. Scraping the sign read
+	-- "25K" as 10 and sent the farm to an egg it could not pay for, every cycle.
+	-- The config also carries RequiredWorldId, RequiredCompletedStage, ModelName
+	-- and HatchDistance, which is everything needed to pick one properly.
+	local worldId = plr:GetAttribute("CurrentWorldId") or d.CurrentWorldId or "World_1"
+	local bestStage = STATE.bestEver or tonumber(plr:GetAttribute("StageProgressionCurrentStage")) or 1
+	local bestId, bestEntry
+	for id, entry in pairs(CfgEggs) do
+		local worldOk = (entry.RequiredWorldId == nil) or (entry.RequiredWorldId == worldId)
+		local stageOk = (entry.RequiredCompletedStage == nil)
+			or (bestStage >= tonumber(entry.RequiredCompletedStage))
+		local price = tonumber(entry.Price)
+		if worldOk and stageOk and price and price <= wins then
+			-- richest egg the balance covers: the drop tables get strictly better
+			if not bestEntry or price > tonumber(bestEntry.Price) then bestId, bestEntry = id, entry end
 		end
 	end
-	if not best then return false end
+	if not bestEntry then return false end
+	local bestPrice = tonumber(bestEntry.Price)
 
-	STATE.phase = "egg " .. short(bestPrice)
-	local ok, pivot = pcall(function() return best:GetPivot() end)
-	if ok then hop(pivot.Position + Vector3.new(0, 3, 4), 0.5) end
-	local prompt = best:FindFirstChildWhichIsA("ProximityPrompt", true)
-	if not prompt then return false end
+	local model = Workspace:FindFirstChild(bestEntry.ModelName or bestId, true)
+	if not model then
+		STATE.nextEggAt = os.clock() + 60
+		STATE.note = "egg " .. tostring(bestId) .. " has no model here"
+		return false
+	end
+
+	STATE.phase = "egg " .. tostring(bestId)
+	local ok, pivot = pcall(function() return model:GetPivot() end)
+	if ok then
+		-- HatchDistance is the server's own range check, so land well inside it
+		local reach = math.max((tonumber(bestEntry.HatchDistance) or 11) - 4, 3)
+		hop(pivot.Position + Vector3.new(0, 3, math.min(reach, 5)), 0.5)
+	end
+	-- Eggs are NOT proximity prompts. Each one owns a ScreenGui called
+	-- Info_<EggId> whose Canvas.BottomButtons holds three buttons: Open, "Open x3"
+	-- and "Auto Open". Only the plain Open is used - the other two are the Robux
+	-- conveniences sitting right next to it, so the name is matched exactly.
+	local info = plr.PlayerGui:FindFirstChild("Info_" .. tostring(bestId))
+	local holder = info and info:FindFirstChild("BottomButtons", true)
+	local button = holder and holder:FindFirstChild("Open")
+	if not (button and button:IsA("TextButton")) then
+		STATE.nextEggAt = os.clock() + 60
+		STATE.note = "egg " .. tostring(bestId) .. " has no Open button"
+		return false
+	end
 
 	-- Counted by the pet inventory actually growing, not by the prompt firing.
 	-- The price is scraped off a billboard and the first version misread "25K" as
@@ -672,16 +684,26 @@ local function openBestEgg()
 		return n
 	end
 	local before = petCount()
-	pcall(function() fireproximityprompt(prompt) end)
-	task.wait(1)
-	if petCount() > before then
+	local winsBefore = tonumber((data() or {}).Wins) or 0
+	-- Same full press sequence the rebirth button needed: Activated alone is not
+	-- enough, the handler hangs off the whole Down/Up/Click chain.
+	for _, event in ipairs({ "MouseButton1Down", "MouseButton1Up", "MouseButton1Click", "Activated" }) do
+		local okConns, conns = pcall(function() return getconnections(button[event]) end)
+		if okConns then
+			for _, conn in ipairs(conns) do pcall(function() conn:Fire() end) end
+		end
+		task.wait(0.15)
+	end
+	task.wait(1.2)
+	local after = data() or {}
+	if petCount() > before or (tonumber(after.Wins) or 0) < winsBefore then
 		STATE.eggs = (STATE.eggs or 0) + 1
-		STATE.note = "opened an egg for " .. short(bestPrice)
+		STATE.note = "hatched " .. tostring(bestId) .. " for " .. short(bestPrice)
+		STATE.nextEggAt = os.clock() + math.max(CONFIG.eggEvery, 5)
 		return true
 	end
-	-- nothing hatched: park eggs for a while instead of blocking the cycle
-	STATE.nextEggAt = os.clock() + 120
-	STATE.note = "egg did not open (read " .. short(bestPrice) .. ")"
+	STATE.nextEggAt = os.clock() + 60
+	STATE.note = "egg " .. tostring(bestId) .. " prompt did nothing"
 	return false
 end
 
