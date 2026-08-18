@@ -104,7 +104,9 @@ local CONFIG = {
     lobbyClassReserve  = 150,       -- keep this much for upgrades before spinning
     lobbyStart         = true,      -- walk onto a pad and confirm a run
     lobbyDifficulty    = "Easy",    -- Easy 90m/1x … Impossible 20m/2.5x gems
-    lobbyMap           = "House",   -- House | Mansion (Grocery is COMING SOON)
+    -- Auto = the furthest map that is unlocked, so a newly freed map is taken
+    -- without touching this file. House | Mansion pin it instead.
+    lobbyMap           = "Auto",
 
     autoVent      = false,   -- unlock vents (1 cash each), not needed to farm
     autoUpgrade   = false,   -- tool upgrades: useless while we batch-collect
@@ -1212,6 +1214,26 @@ end
 
 local function selectMap(target)
     if not target or target == "" then return true end
+
+    -- "Auto" takes the last card that is not locked. The list is ordered by
+    -- progression (House, Mansion, Grocery), so this follows the account: today
+    -- it picks the Mansion, and the day Grocery stops reading COMING SOON it
+    -- moves on by itself without anyone editing a config.
+    if tostring(target):lower() == "auto" then
+        local best
+        for _, m in ipairs(mapCards()) do
+            if not m.locked then best = m end
+        end
+        if not best then
+            LOBBY.note = "no unlocked map in the list"
+            return false
+        end
+        press(best.card)
+        task.wait(0.35)
+        LOBBY.note = "map " .. best.label .. " (auto)"
+        return true
+    end
+
     local want = tostring(target):lower()
     for _, m in ipairs(mapCards()) do
         if m.key:lower() == want or m.label:lower():find(want, 1, true) then
@@ -1858,8 +1880,9 @@ lobbyCard:Toggle("Spin for a class", CONFIG.lobbyClassSpin, function(v) CONFIG.l
     "40 diamonds and Starter (no bonus) is 40% of the wheel", UI.theme.bad)
 lobbyCard:Toggle("Start a run", CONFIG.lobbyStart, function(v) CONFIG.lobbyStart = v end,
     "stand on a team pad and confirm", UI.theme.good)
-lobbyCard:Dropdown("Map", { "House", "Mansion" }, CONFIG.lobbyMap,
-    function(v) CONFIG.lobbyMap = v end)
+lobbyCard:Dropdown("Map", { "Auto", "House", "Mansion" }, CONFIG.lobbyMap,
+    function(v) CONFIG.lobbyMap = v end,
+    "Auto takes the furthest map that is unlocked")
 lobbyCard:Dropdown("Difficulty", { "Easy", "Medium", "Hard", "Impossible" }, CONFIG.lobbyDifficulty,
     function(v) CONFIG.lobbyDifficulty = v end)
 lobbyCard:Button("Start now", function() task.spawn(startRun) end, UI.theme.good)
