@@ -64,6 +64,11 @@ local CONFIG = {
 	-- not built yet. Leaving it on only steals time from the bag.
 	claimWins = false,
 	buyBody = true,        -- buy the best affordable evolution
+	stages = true,         -- walk the stage ladder for Wins
+	eggs = true,           -- open the best egg the Wins balance covers
+	stageTimeout = 30,     -- seconds to clear a stage before giving up on it
+	stageBackoff = 90,     -- seconds of training after a stage proved too strong
+	stageEvery = 20,       -- seconds between stage attempts while training
 	moveSpeed = 90,
 	claimEvery = 45,       -- seconds between win-pad tours
 	maxClaimTravel = 900,  -- studs; further pads are on another stage entirely
@@ -164,6 +169,11 @@ end
 
 local function standInZone()
 	if not CONFIG.trainZone then return end
+	-- Locked out while a stage run is in progress. Without this the training step
+	-- yanked the body back to the bag on the very next cycle and the stage zone was
+	-- never actually entered: the distance to the zone sat at 95 studs the whole
+	-- time while the log happily reported "stage 1".
+	if STATE.inStage then return end
 	local zone, multi = bestTrainZone()
 	if not zone then return end
 	STATE.zoneMulti = multi
@@ -251,6 +261,149 @@ local function claimWins()
 	STATE.claims = STATE.claims + claimed
 	if claimed > 0 then STATE.note = "toured " .. claimed .. " win pads" end
 	return claimed > 0
+end
+
+--------------------------------------------------------------------------------
+-- stages
+--------------------------------------------------------------------------------
+
+-- This is the Loot Evo shape again: walk into the stage's Zone, its mobs spawn
+-- into your own folder under StageProgressionMobs, the click doubles as the
+-- attack, and when they are down the player attribute flips to StageCompleted.
+-- Only THEN does the stage's Wins pad pay - a tour of twelve pads with nothing
+-- cleared returned exactly zero, and the same pad paid 1 the moment the stage
+-- behind it read StageCompleted.
+local function stageFolder(id)
+	local world = Workspace:FindFirstChild("Worlds")
+	world = world and world:FindFirstChild(plr:GetAttribute("StageProgressionWorldId") or "World_1")
+	local stages = world and world:FindFirstChild("Stages")
+	if not stages then return nil end
+	return stages:FindFirstChild(string.format("Stage_%03d", id))
+end
+
+local function claimStageWins(stage)
+	local folder = stage:FindFirstChild("Wins")
+	if not folder then return false end
+	local _, hrp = char()
+	if not hrp then return false end
+	for _, model in ipairs(folder:GetChildren()) do
+		if not isDoublePad(model) then
+			local pad = model:FindFirstChild(CfgWinButtons.ClaimPartName or "Claim Part")
+			if pad and pad:IsA("BasePart") then
+				hop(pad.Position + Vector3.new(0, 3, 0), 0.5)
+				if firetouchinterest then
+					pcall(firetouchinterest, pad, hrp, 0)
+					task.wait(0.15)
+					pcall(firetouchinterest, pad, hrp, 1)
+				end
+				task.wait(0.6)
+				return true
+			end
+		end
+	end
+	return false
+end
+
+local function runStage()
+	if not CONFIG.stages then return false end
+	local id = tonumber(plr:GetAttribute("StageProgressionCurrentStage")) or 1
+	local stage = stageFolder(id)
+	if not stage then STATE.note = "stage " .. id .. " not found" return false end
+	local zone = stage:FindFirstChild("Zone")
+	if not zone then return false end
+
+	STATE.phase = "stage " .. id
+	STATE.stage = id
+	STATE.inStage = true
+	hop(zone.Position + Vector3.new(0, 4, 0), 1)
+
+	-- The clicking loop is already running on Heartbeat; here we only wait for the
+	-- server to call the stage done, and give up rather than stand there forever
+	-- when the damage is not enough yet. The body is re-pinned into the zone every
+	-- second because dying or being knocked back drops you outside it, and outside
+	-- the zone no mobs spawn at all.
+	local deadline = os.clock() + CONFIG.stageTimeout
+	while os.clock() < deadline and CONFIG.auto and GEN == _G.__MUSCLE do
+		local state = plr:GetAttribute("StageProgressionState")
+		if state == "StageCompleted" then break end
+		local _, hrp = char()
+		if hrp and (hrp.Position - zone.Position).Magnitude > 20 then
+			hop(zone.Position + Vector3.new(0, 4, 0), 0.3)
+		end
+		task.wait(0.5)
+	end
+	STATE.inStage = false
+
+	if plr:GetAttribute("StageProgressionState") == "StageCompleted" then
+		local before = (data() or {}).Wins or 0
+		claimStageWins(stage)
+		task.wait(0.8)
+		local after = (data() or {}).Wins or 0
+		STATE.stageFails = 0
+		STATE.note = "stage " .. id .. " cleared, +" .. short(after - before) .. " wins"
+		return true
+	end
+
+	-- Not cleared in time: almost always too little damage. Back off to the bag
+	-- and let strength build instead of grinding a wall.
+	STATE.stageFails = (STATE.stageFails or 0) + 1
+	STATE.note = "stage " .. id .. " too strong, training instead"
+	STATE.nextStageAt = os.clock() + CONFIG.stageBackoff
+	return false
+end
+
+--------------------------------------------------------------------------------
+-- eggs
+--------------------------------------------------------------------------------
+
+-- Eggs are stands priced in Wins with an Open / Open x3 / Auto Open panel. Only
+-- the plain Open is used: "Auto Open" is the paid convenience and x3 spends three
+-- eggs at once, which is the same rate with a worse failure mode.
+local function openBestEgg()
+	if not CONFIG.eggs then return false end
+	local d = data()
+	if not d then return false end
+	local wins = tonumber(d.Wins) or 0
+
+	local best, bestPrice
+	for _, egg in ipairs(CollectionService:GetTagged("Egg")) do
+		if not egg:GetAttribute("EggStageLockHidden") then
+			local price = tonumber(egg:GetAttribute("Price")) or tonumber(egg:GetAttribute("Wins"))
+			-- the price is usually only on the billboard, so fall back to reading it
+			if not price then
+				local label = egg:FindFirstChildWhichIsA("BillboardGui", true)
+				if label then
+					for _, t in ipairs(label:GetDescendants()) do
+						if t:IsA("TextLabel") then
+							local num, suffix = tostring(t.Text):match("([%d%.]+)%s*([KMBT]?)")
+							if num then
+								local mult = ({ K = 1e3, M = 1e6, B = 1e9, T = 1e12 })[suffix] or 1
+								price = tonumber(num) * mult
+								break
+							end
+						end
+					end
+				end
+			end
+			if price and price <= wins and (not bestPrice or price > bestPrice) then
+				best, bestPrice = egg, price
+			end
+		end
+	end
+	if not best then return false end
+
+	STATE.phase = "egg " .. short(bestPrice)
+	local ok, pivot = pcall(function() return best:GetPivot() end)
+	if ok then hop(pivot.Position + Vector3.new(0, 3, 4), 0.5) end
+	local prompt = best:FindFirstChildWhichIsA("ProximityPrompt", true)
+	if prompt then
+		pcall(function() fireproximityprompt(prompt) end)
+		task.wait(0.8)
+		STATE.eggs = (STATE.eggs or 0) + 1
+		STATE.note = "opened an egg for " .. short(bestPrice)
+		return true
+	end
+	return false
 end
 
 --------------------------------------------------------------------------------
@@ -395,11 +548,18 @@ loop(1, function()
 	if STATE.busy then return end
 	STATE.busy = true
 	local ok, err = pcall(function()
+		-- Spending first, so a cleared stage's wins turn into an evolution or an
+		-- egg before the next stage attempt, then progression, then the bag.
 		if doRebirth() then return end
 		if buyBestBody() then return end
+		if openBestEgg() then return end
 		if os.clock() >= STATE.nextClaimAt then
 			STATE.nextClaimAt = os.clock() + math.max(CONFIG.claimEvery, 15)
 			if claimWins() then return end
+		end
+		if CONFIG.stages and os.clock() >= (STATE.nextStageAt or 0) then
+			STATE.nextStageAt = os.clock() + math.max(CONFIG.stageEvery, 10)
+			if runStage() then return end
 		end
 		standInZone()
 		STATE.phase = "training " .. STATE.zone
@@ -454,7 +614,14 @@ main:Toggle("Best training bag", CONFIG.trainZone, function(v) CONFIG.trainZone 
 main:Toggle("Auto rebirth", CONFIG.rebirth, function(v) CONFIG.rebirth = v end,
 	"resets for x2/x3/x4 on strength, money and damage", UI.theme.warn)
 
-local extra = page:Card("WINS & BODIES", 2)
+local extra = page:Card("STAGES & WINS", 2)
+extra:Toggle("Run stages", CONFIG.stages, function(v) CONFIG.stages = v end,
+	"walks into the stage, the click kills the mobs, then claims its Wins pad")
+extra:Toggle("Open eggs", CONFIG.eggs, function(v) CONFIG.eggs = v end,
+	"best egg the Wins balance covers, plain Open only", UI.theme.warn)
+extra:Stepper("Stage timeout", function() return CONFIG.stageTimeout .. "s" end,
+	function(dir) CONFIG.stageTimeout = math.clamp(CONFIG.stageTimeout + dir * 5, 10, 120) end,
+	"give up and go train when a stage takes longer than this")
 extra:Toggle("Claim win pads", CONFIG.claimWins, function(v) CONFIG.claimWins = v end,
 	"tours the richest reachable pads, never the 2x Robux twins")
 extra:Toggle("Buy evolutions", CONFIG.buyBody, function(v) CONFIG.buyBody = v end,
@@ -487,6 +654,9 @@ task.spawn(function()
 				or (need and ("   rebirth at " .. need) or "")),
 			"  rebirth  " .. STATE.rebirths .. "   bag " .. tostring(STATE.zone),
 			"  wins     " .. short(STATE.wins) .. "   money " .. short(STATE.currency),
+			"  stage    " .. tostring(plr:GetAttribute("StageProgressionCurrentStage")) ..
+				"   " .. tostring(plr:GetAttribute("StageProgressionState")) ..
+				"   eggs " .. tostring(STATE.eggs or 0),
 			"  body     " .. tostring(STATE.body),
 			"  claims   " .. STATE.claims .. " pads this session",
 			"  " .. tostring(STATE.note),
@@ -509,6 +679,8 @@ _G.__MUSCLE_DBG = {
 	data = data, levelOf = levelOf, hop = hop,
 	bestTrainZone = bestTrainZone, standInZone = standInZone,
 	claimWins = claimWins, buyBestBody = buyBestBody,
+	runStage = runStage, openBestEgg = openBestEgg, stageFolder = stageFolder,
+	claimStageWins = claimStageWins,
 	doRebirth = doRebirth, rebirthReady = rebirthReady,
 	Click = ClickController,
 }
