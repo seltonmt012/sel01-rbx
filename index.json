@@ -53,6 +53,15 @@
       "detect": "local src = game:GetService('ReplicatedStorage'):FindFirstChild('Source') return src ~= nil and src:FindFirstChild('Packets') ~= nil and src:FindFirstChild('Utils') ~= nil"
     },
     {
+      "alias": "speedmonkey",
+      "name": "+1 Speed Monkey Escape",
+      "file": "games/speedmonkey.lua",
+      "places": [114697347887839, 97502234572571],
+      "status": "ok",
+      "note": "second place id is the dev's TestPlaceID out of Config.Game",
+      "detect": "local rs = game:GetService('ReplicatedStorage') local cfg = rs:FindFirstChild('Config') return cfg ~= nil and cfg:FindFirstChild('Treadmills') ~= nil and cfg:FindFirstChild('Upgrades') ~= nil and rs:FindFirstChild('Remotes') ~= nil and rs.Remotes:FindFirstChild('PromptTreadmill') ~= nil"
+    },
+    {
       "alias": "eggfarm",
       "name": "Grow a Chicken Fighter",
       "file": "games/eggfarm.lua",
