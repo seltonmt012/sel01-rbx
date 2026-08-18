@@ -79,7 +79,8 @@ local CONFIG = {
 	clicksPerSec = 11,    -- DIG_MAX_CLICKS_PER_SECOND is 50
 	sellAt = 0.3,         -- sell once the backpack is this full
 	gearEvery = 30,       -- seconds between gear-shopping trips
-	minRarityKeep = 3,    -- rarity index at or above which an item is displayed
+	swapExhibits = true,  -- replace the weakest exhibit when a better find turns up
+	swapMargin = 1.2,     -- how much better it has to be before evicting one
 }
 
 local STATE = {
@@ -502,14 +503,16 @@ local function doDisplay()
 	-- Every qualifying item, most valuable first, into every free pedestal in one
 	-- trip. Placing one per cycle meant a museum with seven empty slots earned
 	-- nothing for the seven cycles it took to notice them.
+	-- An EMPTY pedestal earns nothing at all, so a common duck on it beats a rarity
+	-- filter that leaves it bare. The rarity floor was keeping five of eight
+	-- pedestals empty while the museum is the passive half of the game. Free slots
+	-- take the best of whatever is in the bag; the floor only decides whether an
+	-- item is worth evicting something that is already earning.
 	local candidates = {}
 	for _, entry in ipairs(inventoryList()) do
 		if not entry.dirty and not placed[entry.uid] then
-			local rarity = RARITY[(CfgItems.Items[entry.id] or {}).rarity] or 1
-			if rarity >= CONFIG.minRarityKeep then
-				entry.__value = valueOf(entry)
-				candidates[#candidates + 1] = entry
-			end
+			entry.__value = valueOf(entry)
+			candidates[#candidates + 1] = entry
 		end
 	end
 	if #candidates == 0 then return false end
@@ -520,15 +523,52 @@ local function doDisplay()
 	if ok then hop(pivot.Position + Vector3.new(0, 4, 6)) end
 
 	local placedCount = 0
-	for index, slot in ipairs(free) do
-		local entry = candidates[index]
+	local nextCandidate = 1
+	for _, slot in ipairs(free) do
+		local entry = candidates[nextCandidate]
 		if not entry then break end
-		local okPlace, placed = invoke("PedestalNetwork", "PedestalFunctions", "placeItem", slot, entry.uid)
-		if okPlace and placed == true then
+		local okPlace, done = invoke("PedestalNetwork", "PedestalFunctions", "placeItem", slot, entry.uid)
+		if okPlace and done == true then
 			placedCount = placedCount + 1
-			task.wait(0.4)
+			task.wait(0.35)
+		end
+		nextCandidate = nextCandidate + 1
+	end
+
+	-- Every slot busy: swap out the weakest exhibit whenever the bag holds
+	-- something clearly better. Without this the museum freezes at whatever the
+	-- first eight finds happened to be.
+	if placedCount == 0 and #free == 0 and CONFIG.swapExhibits then
+		local worstSlot, worstValue, worstUid
+		for _, p in ipairs(peds:GetChildren()) do
+			local uid = p:GetAttribute("ItemUid") or ""
+			if uid ~= "" then
+				local v = valueOf({
+					id = p:GetAttribute("ItemId"),
+					kg = p:GetAttribute("Kg"),
+					condition = p:GetAttribute("Condition"),
+				})
+				if not worstValue or v < worstValue then
+					worstSlot, worstValue, worstUid = p:GetAttribute("Slot"), v, uid
+				end
+			end
+		end
+		local top = candidates[1]
+		if worstSlot and top and (top.__value or 0) > (worstValue or 0) * CONFIG.swapMargin then
+			local okPick = invoke("PedestalNetwork", "PedestalFunctions", "pickupItem", worstSlot)
+			if okPick then
+				task.wait(0.4)
+				local okSwap, done = invoke("PedestalNetwork", "PedestalFunctions",
+					"placeItem", worstSlot, top.uid)
+				if okSwap and done == true then
+					STATE.note = string.format("swapped slot %s: %s -> %s",
+						tostring(worstSlot), short(worstValue or 0), short(top.__value or 0))
+					return true
+				end
+			end
 		end
 	end
+
 	if placedCount > 0 then
 		STATE.note = "displayed " .. placedCount .. " item" .. (placedCount == 1 and "" or "s")
 		return true
@@ -687,6 +727,90 @@ local function doSell()
 	return false
 end
 
+--------------------------------------------------------------------------------
+-- islands
+--------------------------------------------------------------------------------
+
+-- The islands carry a LUCK multiplier - 1, 2, 4, 8 - and luck is what decides how
+-- rare a buried item rolls. That makes the island the single biggest upgrade in
+-- the game and it is not gear: Shipwreck Cove costs 1,100,000 and doubles every
+-- roll from then on, while a shovel at 45,000 only makes the same rolls faster.
+--
+-- This block sits ABOVE doBuyGear on purpose. It was written below it once, and
+-- because a Lua local is invisible above its own definition, doBuyGear's call to
+-- islandReserve() resolved to nil - and since the whole cycle runs inside pcall,
+-- the farm just stopped with "attempt to call a nil value" in the footer instead
+-- of crashing loudly.
+local CfgIslands = require(Const.world.Islands)
+
+local function islandInfo(id)
+	return (CfgIslands.Islands or {})[id]
+end
+
+local function bestIsland(d)
+	local unlocked = {}
+	for _, id in ipairs(d.UnlockedIslands or {}) do unlocked[id] = true end
+	local bestUnlocked, bestLuck = CfgIslands.STARTER_ISLAND_ID, 0
+	local nextLocked, nextCost
+	for _, id in ipairs(CfgIslands.ISLAND_ORDER or {}) do
+		local entry = islandInfo(id)
+		if entry then
+			local luck = tonumber(entry.luck) or 1
+			if unlocked[id] then
+				if luck > bestLuck then bestUnlocked, bestLuck = id, luck end
+			elseif not nextLocked then
+				nextLocked, nextCost = id, tonumber(entry.cost) or math.huge
+			end
+		end
+	end
+	return bestUnlocked, bestLuck, nextLocked, nextCost
+end
+
+-- The reserve that stops the starvation pattern: once the next island is within
+-- reach of the current income, gear may only spend the surplus above its price.
+-- Without it a 45,000 shovel every few minutes means 1,100,000 is never reached.
+local RESERVE_WINDOW = 900
+local function islandReserve()
+	local d = data()
+	if not d then return 0 end
+	local _, _, nextLocked, nextCost = bestIsland(d)
+	if not nextLocked or not nextCost then return 0 end
+	local reachable = (d.Gold or 0) + math.max(STATE.goldRate, 0) * RESERVE_WINDOW
+	if reachable >= nextCost then return nextCost end
+	return 0
+end
+
+local function doTravel()
+	local d = data()
+	if not d then return false end
+	local best, luck, nextLocked, nextCost = bestIsland(d)
+
+	-- buy the next island the moment it is affordable; nothing else competes
+	if nextLocked and nextCost and (d.Gold or 0) >= nextCost then
+		STATE.phase = "unlock " .. nextLocked
+		local ok, res = invoke("TravelNetwork", "TravelFunctions", "travel", nextLocked)
+		if ok and res ~= "poor" then
+			STATE.note = "unlocked island " .. nextLocked .. " for " .. short(nextCost)
+			_G.__DC_PLOT = nil
+			return true
+		end
+		STATE.note = "travel(" .. nextLocked .. ") -> " .. tostring(res)
+	end
+
+	-- and make sure we are actually standing on the best one we own
+	if d.CurrentIsland ~= best then
+		STATE.phase = "travel " .. best
+		local ok, res = invoke("TravelNetwork", "TravelFunctions", "travel", best)
+		if ok and res ~= "poor" then
+			STATE.note = "travelled to " .. best .. " (luck x" .. luck .. ")"
+			return true
+		end
+	end
+	return false
+end
+
+--------------------------------------------------------------------------------
+
 -- Gear is island locked and only sold at that island's GearNPC. Ranked on power,
 -- never on price - the ladders happen to agree today and that is not a guarantee.
 local function bestGear(config, orderKey, tableKey, owned, unlockedIslands, gold)
@@ -774,82 +898,6 @@ local function doBuyGear()
 	end
 	until not boughtThisRound or rounds >= 8
 	return bought
-end
-
---------------------------------------------------------------------------------
--- islands
---------------------------------------------------------------------------------
-
--- The islands carry a LUCK multiplier - 1, 2, 4, 8 - and luck is what decides how
--- rare a buried item rolls. That makes the island the single biggest upgrade in
--- the game and it is not gear: Shipwreck Cove costs 1,100,000 and doubles every
--- roll from then on, while a shovel at 45,000 only makes the same rolls faster.
-local CfgIslands = require(Const.world.Islands)
-
-local function islandInfo(id)
-	return (CfgIslands.Islands or {})[id]
-end
-
-local function bestIsland(d)
-	local unlocked = {}
-	for _, id in ipairs(d.UnlockedIslands or {}) do unlocked[id] = true end
-	local bestUnlocked, bestLuck = CfgIslands.STARTER_ISLAND_ID, 0
-	local nextLocked, nextCost
-	for _, id in ipairs(CfgIslands.ISLAND_ORDER or {}) do
-		local entry = islandInfo(id)
-		if entry then
-			local luck = tonumber(entry.luck) or 1
-			if unlocked[id] then
-				if luck > bestLuck then bestUnlocked, bestLuck = id, luck end
-			elseif not nextLocked then
-				nextLocked, nextCost = id, tonumber(entry.cost) or math.huge
-			end
-		end
-	end
-	return bestUnlocked, bestLuck, nextLocked, nextCost
-end
-
--- The reserve that stops the starvation pattern: once the next island is within
--- reach of the current income, gear may only spend the surplus above its price.
--- Without it a 45,000 shovel every few minutes means 1,100,000 is never reached.
-local RESERVE_WINDOW = 900
-local function islandReserve()
-	local d = data()
-	if not d then return 0 end
-	local _, _, nextLocked, nextCost = bestIsland(d)
-	if not nextLocked or not nextCost then return 0 end
-	local reachable = (d.Gold or 0) + math.max(STATE.goldRate, 0) * RESERVE_WINDOW
-	if reachable >= nextCost then return nextCost end
-	return 0
-end
-
-local function doTravel()
-	local d = data()
-	if not d then return false end
-	local best, luck, nextLocked, nextCost = bestIsland(d)
-
-	-- buy the next island the moment it is affordable; nothing else competes
-	if nextLocked and nextCost and (d.Gold or 0) >= nextCost then
-		STATE.phase = "unlock " .. nextLocked
-		local ok, res = invoke("TravelNetwork", "TravelFunctions", "travel", nextLocked)
-		if ok and res ~= "poor" then
-			STATE.note = "unlocked island " .. nextLocked .. " for " .. short(nextCost)
-			_G.__DC_PLOT = nil
-			return true
-		end
-		STATE.note = "travel(" .. nextLocked .. ") -> " .. tostring(res)
-	end
-
-	-- and make sure we are actually standing on the best one we own
-	if d.CurrentIsland ~= best then
-		STATE.phase = "travel " .. best
-		local ok, res = invoke("TravelNetwork", "TravelFunctions", "travel", best)
-		if ok and res ~= "poor" then
-			STATE.note = "travelled to " .. best .. " (luck x" .. luck .. ")"
-			return true
-		end
-	end
-	return false
 end
 
 -- True when something is affordable and unbought, so the shopping trip is only
@@ -1001,12 +1049,13 @@ end, "the game's own ceiling is 50 per second")
 local extra = page:Card("MUSEUM & GEAR", 2)
 extra:Toggle("Display best finds", CONFIG.display, function(v) CONFIG.display = v end,
 	"tourists pay for what is on a pedestal - the passive half of the game")
-extra:Stepper("Keep from rarity", function()
-	local order = CfgItems.RARITY_ORDER
-	return (type(order) == "table" and order[CONFIG.minRarityKeep]) or tostring(CONFIG.minRarityKeep)
+extra:Toggle("Swap exhibits", CONFIG.swapExhibits, function(v) CONFIG.swapExhibits = v end,
+	"once all pedestals are busy, evict the weakest for a clearly better find")
+extra:Stepper("Swap margin", function()
+	return string.format("%.0f%%", (CONFIG.swapMargin - 1) * 100)
 end, function(dir)
-	CONFIG.minRarityKeep = math.clamp(CONFIG.minRarityKeep + dir, 1, 8)
-end, "anything below this is sold instead of displayed")
+	CONFIG.swapMargin = math.clamp(CONFIG.swapMargin + dir * 0.1, 1.05, 3)
+end, "how much more a find must be worth before it takes a slot")
 extra:Toggle("Unlock islands", CONFIG.islands, function(v) CONFIG.islands = v end,
 	"luck x1 / x2 / x4 / x8 for 0 / 1.1M / 32M / 120M - the biggest upgrade there is",
 	UI.theme.warn)
