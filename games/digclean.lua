@@ -85,7 +85,8 @@ local CONFIG = {
 	scan = true,          -- sweep the area before choosing what to dig
 	scanPoints = 4,       -- hops per sweep
 	scanDwell = 0.45,     -- pause at each hop; the stream ticks every 0.4s
-	scanUntil = 4,        -- keep sweeping while fewer than this many nodes are known
+	scanUntil = 6,        -- sweep while fewer than this many nodes are known
+	scanEvery = 25,       -- and at most this often when the field is merely dull
 	scanRarity = 3,       -- ...or while the best known node is below this rarity
 	giveUpAfter = 4,      -- seconds without progress before abandoning a dig
 	sellAt = 0.3,         -- sell once the backpack is this full
@@ -274,9 +275,12 @@ local function armNodeListener()
 					local kept = _G.__DC_SEEN[n.id]
 					_G.__DC_SEEN[n.id] = {
 						id = n.id, position = n.position, rarity = n.rarity,
-						-- first sighting wins: the node dies 120s after IT spawned,
-						-- not 120s after we last happened to walk past it
+						-- first sighting wins for ageing: the node dies 120s after IT
+						-- spawned, not 120s after we last happened to walk past it
 						seenAt = kept and kept.seenAt or now,
+						-- ...but lastSeen tracks every stream, which is what tells us
+						-- the server still considers it there right now
+						lastSeen = now,
 					}
 				end
 			end
@@ -456,10 +460,18 @@ local function doDig()
 
 	-- Sweep first, then choose. Digging whatever is underfoot means the rarity of
 	-- every find is pure luck; sweeping first turns it into a pick from the field.
+	-- Sweep when the field is thin, or occasionally when everything known is
+	-- mediocre - but NOT every cycle. The first version swept whenever the best
+	-- node was below rare, and on a field of thirty commons that is always true, so
+	-- it spent its whole life walking in circles over ground it had already
+	-- uncovered instead of digging what it had found.
 	local node = pickNode()
 	local known = #nodeList()
-	if CONFIG.scan and (known < CONFIG.scanUntil or not node
-		or (RARITY[node.rarity] or 1) < CONFIG.scanRarity) then
+	local thin = known < CONFIG.scanUntil or not node
+	local mediocre = node and (RARITY[node.rarity] or 1) < CONFIG.scanRarity
+	local cooled = os.clock() >= (STATE.nextScanAt or 0)
+	if CONFIG.scan and (thin or (mediocre and cooled)) then
+		STATE.nextScanAt = os.clock() + CONFIG.scanEvery
 		sweepArea(zone, CONFIG.scanPoints)
 		node = pickNode()
 	end
@@ -478,6 +490,18 @@ local function doDig()
 	STATE.lastRarity = tostring(node.rarity)
 	STATE.phase = "dig " .. tostring(node.rarity)
 	hop(node.position + Vector3.new(0, 3, 0), 0.8)
+
+	-- Standing on a remembered position is not the same as the detector having the
+	-- node right now: the stream runs every 0.4s (DETECTOR_STREAM_INTERVAL) and
+	-- attemptDig only bites on something currently detected. Waiting two ticks and
+	-- then checking the node is still being streamed is what separates "it is
+	-- there" from "it was there when we saw it", and it is why so many picks came
+	-- back as stale after a hop across the beach.
+	-- Give the stream two ticks to re-acquire, but do NOT refuse to dig on the
+	-- strength of that alone: requiring a fresh sighting after every hop rejected
+	-- every single node and the farm dug nothing at all. The cheap 1.6s
+	-- start-timeout below is the honest test of whether the node is really there.
+	task.wait(0.7)
 
 	local finished, started
 	if _G.__DC_ENDCONN then pcall(function() _G.__DC_ENDCONN:Disconnect() end) end
@@ -603,9 +627,15 @@ local function inventoryList()
 	return out
 end
 
+-- itemValueFor(itemId, conditionNAME, kg) - in that order, with the condition as
+-- the plain string. Called as (id, kg, condition) it throws inside the pcall and
+-- every item scored 0, so "best" and "worst" were both zero: the museum never
+-- swapped anything and the display order was arbitrary. Checked against the
+-- in-game labels - duck / ok / 2kg comes back 391, which is what the pedestal says.
 local function valueOf(entry)
+	if not entry or not entry.id then return 0 end
 	local ok, v = pcall(function()
-		return CfgItems.itemValueFor(entry.id, entry.kg, entry.condition)
+		return CfgItems.itemValueFor(entry.id, entry.condition or "ok", tonumber(entry.kg) or 0)
 	end)
 	return ok and tonumber(v) or 0
 end
@@ -621,20 +651,41 @@ local function plotNumber()
 	return _G.__DC_PLOT
 end
 
+-- There is more than one pedestal group. The ground floor sits in Plot.Pedestals
+-- (slots 1-8, owned from the start), and a SECOND set of eight lives in
+-- Plot.PlotComponents.Sections.Floor2.Pedestals as slots 9-16 - locked until the
+-- Floor2 section is bought, and each one purchased separately after that. Reading
+-- only the first folder meant the museum could never grow past eight exhibits no
+-- matter how much was unlocked.
+local function allPedestals(plotNum)
+	local plot = Workspace:FindFirstChild("Plots")
+	plot = plot and plot:FindFirstChild("Plot_" .. tostring(plotNum))
+	local inner = plot and plot:FindFirstChild("Plot")
+	if not inner then return {} end
+	local out = {}
+	for _, d in ipairs(inner:GetDescendants()) do
+		if d:IsA("Model") and d.Name:sub(1, 9) == "Pedestal_" and d:GetAttribute("Slot") then
+			out[#out + 1] = d
+		end
+	end
+	table.sort(out, function(a, b)
+		return (a:GetAttribute("Slot") or 0) < (b:GetAttribute("Slot") or 0)
+	end)
+	return out
+end
+
 local function doDisplay()
 	local plotNum = plotNumber()
 	if not plotNum then return false end
-	local plot = Workspace:FindFirstChild("Plots")
-	plot = plot and plot:FindFirstChild("Plot_" .. tostring(plotNum))
-	local peds = plot and plot:FindFirstChild("Plot") and plot.Plot:FindFirstChild("Pedestals")
-	if not peds then return false end
+	local peds = allPedestals(plotNum)
+	if #peds == 0 then return false end
 
 	-- The inventory still lists an item that is standing on a pedestal, so the
 	-- placed uids have to be subtracted or the same rare find is "missing from the
 	-- museum" forever: every cycle drove to the plot, tried to place it again, got
 	-- a bare false, and drove back. That ping-pong is what stalled the digging.
 	local free, placed = {}, {}
-	for _, p in ipairs(peds:GetChildren()) do
+	for _, p in ipairs(peds) do
 		local uid = p:GetAttribute("ItemUid") or ""
 		if uid ~= "" then
 			placed[uid] = true
@@ -642,7 +693,10 @@ local function doDisplay()
 			free[#free + 1] = p:GetAttribute("Slot")
 		end
 	end
-	if #free == 0 then return false end
+	-- Deliberately NOT returning when every pedestal is busy: that early exit was
+	-- left over from the fill-only version and it made the swap path below
+	-- unreachable, so a 46,775 guitar sat in the bag while a 240 glass bottle kept
+	-- its slot until the next sell trip threw the guitar away.
 	table.sort(free)
 
 	-- Every qualifying item, most valuable first, into every free pedestal in one
@@ -664,8 +718,16 @@ local function doDisplay()
 	table.sort(candidates, function(a, b) return (a.__value or 0) > (b.__value or 0) end)
 
 	STATE.phase = "display"
-	local ok, pivot = pcall(function() return peds:GetPivot() end)
-	if ok then hop(pivot.Position + Vector3.new(0, 4, 6)) end
+	-- Pedestals is a FOLDER, and a Folder has no GetPivot. The call sat inside a
+	-- pcall, so it failed silently and the hop to the plot never happened - which
+	-- is why pickupItem kept refusing and not one exhibit was ever swapped. Aim at
+	-- an actual pedestal model instead.
+	local anchorPos
+	for _, p in ipairs(peds) do
+		local okPivot, pivot = pcall(function() return p:GetPivot() end)
+		if okPivot then anchorPos = pivot.Position break end
+	end
+	if anchorPos then hop(anchorPos + Vector3.new(0, 4, 6), 0.6) end
 
 	local placedCount = 0
 	local nextCandidate = 1
@@ -683,35 +745,52 @@ local function doDisplay()
 	-- Every slot busy: swap out the weakest exhibit whenever the bag holds
 	-- something clearly better. Without this the museum freezes at whatever the
 	-- first eight finds happened to be.
-	if placedCount == 0 and #free == 0 and CONFIG.swapExhibits then
-		local worstSlot, worstValue, worstUid
-		for _, p in ipairs(peds:GetChildren()) do
-			local uid = p:GetAttribute("ItemUid") or ""
-			if uid ~= "" then
-				local v = valueOf({
-					id = p:GetAttribute("ItemId"),
-					kg = p:GetAttribute("Kg"),
-					condition = p:GetAttribute("Condition"),
-				})
-				if not worstValue or v < worstValue then
-					worstSlot, worstValue, worstUid = p:GetAttribute("Slot"), v, uid
+	-- Keep swapping while the bag still beats the museum, not once per cycle. A
+	-- single swap per visit meant a 98KG fire hydrant went on display while two
+	-- 474-gold old boots kept their slots and the rest of the haul was sold off
+	-- before the next cycle ever looked at them.
+	local swaps = 0
+	if CONFIG.swapExhibits and #free == 0 then
+		local used = {}
+		for _ = 1, 8 do
+			local worstSlot, worstValue
+			for _, p in ipairs(peds) do
+				local uid = p:GetAttribute("ItemUid") or ""
+				local slot = p:GetAttribute("Slot")
+				if uid ~= "" and not used[slot] then
+					local v = valueOf({
+						id = p:GetAttribute("ItemId"),
+						kg = p:GetAttribute("Kg"),
+						condition = p:GetAttribute("Condition"),
+					})
+					if not worstValue or v < worstValue then worstSlot, worstValue = slot, v end
 				end
 			end
-		end
-		local top = candidates[1]
-		if worstSlot and top and (top.__value or 0) > (worstValue or 0) * CONFIG.swapMargin then
+			local top = candidates[nextCandidate]
+			if not worstSlot or not top then break end
+			if (top.__value or 0) <= (worstValue or 0) * CONFIG.swapMargin then break end
+
 			local okPick = invoke("PedestalNetwork", "PedestalFunctions", "pickupItem", worstSlot)
-			if okPick then
-				task.wait(0.4)
-				local okSwap, done = invoke("PedestalNetwork", "PedestalFunctions",
-					"placeItem", worstSlot, top.uid)
-				if okSwap and done == true then
-					STATE.note = string.format("swapped slot %s: %s -> %s",
-						tostring(worstSlot), short(worstValue or 0), short(top.__value or 0))
-					return true
-				end
+			if not okPick then break end
+			task.wait(0.35)
+			local okSwap, done = invoke("PedestalNetwork", "PedestalFunctions",
+				"placeItem", worstSlot, top.uid)
+			if okSwap and done == true then
+				swaps = swaps + 1
+				used[worstSlot] = true
+				STATE.note = string.format("swapped %s -> %s (%s)",
+					short(worstValue or 0), short(top.__value or 0),
+					tostring((CfgItems.Items[top.id] or {}).displayName or top.id))
+			else
+				break
 			end
+			nextCandidate = nextCandidate + 1
+			task.wait(0.3)
 		end
+	end
+	if swaps > 0 then
+		STATE.swaps = (STATE.swaps or 0) + swaps
+		return true
 	end
 
 	if placedCount > 0 then
@@ -926,8 +1005,13 @@ local function islandReserve()
 	if not d then return 0 end
 	local _, _, nextLocked, nextCost = bestIsland(d)
 	if not nextLocked or not nextCost then return 0 end
-	local reachable = (d.Gold or 0) + math.max(STATE.goldRate, 0) * RESERVE_WINDOW
-	if reachable >= nextCost then return nextCost end
+	local gold = d.Gold or 0
+	-- Two ways in, because the income figure is jumpy: one mythic sale is worth
+	-- twenty commons, so a rate sampled over a few seconds swings between 90 and
+	-- 300 a second and the reserve kept flicking off again. The second condition is
+	-- a plain floor - once a sixth of the price is banked, stop spending it.
+	local reachable = gold + math.max(STATE.goldRate, 0) * RESERVE_WINDOW
+	if reachable >= nextCost or gold >= nextCost * 0.15 then return nextCost end
 	return 0
 end
 
