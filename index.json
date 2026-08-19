@@ -193,6 +193,17 @@
       "detect": "local rs = game:GetService('ReplicatedStorage') local rem = rs:FindFirstChild('Remotes') return rem ~= nil and rem:FindFirstChild('RequestBlastStart') ~= nil and rem:FindFirstChild('RequestBlastRelease') ~= nil and rem:FindFirstChild('RequestEquipBestBrainrots') ~= nil and rs:FindFirstChild('PowerBlastCore') ~= nil"
     },
     {
+      "alias": "looksclick",
+      "name": "+1 Looks Per Click",
+      "file": "games/looksclick.lua",
+      "places": [
+        102355196524321
+      ],
+      "status": "ok",
+      "note": "warp networking; channels are hashed, names come from the client sources",
+      "detect": "local rs = game:GetService('ReplicatedStorage') local sh = rs:FindFirstChild('Shared') local mods = sh and sh:FindFirstChild('Modules') local pkg = rs:FindFirstChild('Packages') return mods ~= nil and mods:FindFirstChild('LooksPerClick') ~= nil and mods:FindFirstChild('NPCsConfig') ~= nil and pkg ~= nil and pkg:FindFirstChild('warp') ~= nil"
+    },
+    {
       "alias": "eggfarm",
       "name": "Grow a Chicken Fighter",
       "file": "games/eggfarm.lua",
