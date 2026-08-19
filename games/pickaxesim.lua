@@ -56,6 +56,7 @@ local EggData     = require(Tables.Eggs)
 local RebirthData = require(Tables.Rebirths)
 local WorldData   = require(Tables.Worlds)
 local TrainData   = require(Tables.Training)
+local PetLib      = require(ReplicatedStorage.Modules.Shared.PetLib)
 
 ----------------------------------------------------------------------------
 -- config / state
@@ -70,6 +71,8 @@ local CONFIG = {
     autoHatch    = true,    -- walks to the egg first, it is position gated
     autoWorld    = true,    -- move up a world as soon as the rebirths allow
     autoRewards  = true,    -- daily reward, lucky block, the description code
+    autoPets     = true,    -- EquipBest, and delete the overflow
+    keepPets     = 30,      -- how many pets to keep before culling
     minePhase    = 90,      -- seconds of mining per cycle
     trainPhase   = 90,      -- seconds of training per cycle
     sellGap      = 0.05,    -- one call per ore unit; this is the pacing
@@ -79,7 +82,7 @@ local CONFIG = {
 local STATE = {
     coins = 0, gems = 0, power = 0, rebirths = 0, blocks = 0,
     pickaxe = "-", world = 1, phase = "starting", note = "",
-    sold = 0, bought = 0, rebirthsDone = 0, hatched = 0,
+    sold = 0, bought = 0, rebirthsDone = 0, hatched = 0, petsDeleted = 0, petPower = 0,
     nextRebirthCost = 0, nextPickaxe = "-", nextPickaxeCost = 0,
 }
 
@@ -305,6 +308,46 @@ local function climbWorlds()
     end
 end
 
+-- The game equips hatched pets on its own but not the best ones: measured 9
+-- pets owned, 5 equipped and PetPower 14 while the best single pet was worth
+-- 40.  One EquipBest call took it to 57.
+local function equipBestPets()
+    invoke("Pet", { Action = "EquipBest" })
+end
+
+-- Storage is 50 by default and hatching fills it fast.  Delete takes a list of
+-- pet ids; PetLib sorts the unequipped ones by power so the equipped team is
+-- never touched.
+local function cullPets()
+    local petsFolder = Stats:FindFirstChild("Pets")
+    local petStats = Stats:FindFirstChild("PetStats")
+    if not (petsFolder and petStats) then return end
+
+    local count = petStats:FindFirstChild("PetCount")
+    local storage = petStats:FindFirstChild("PetStorage")
+    count = count and count.Value or 0
+    storage = storage and storage.Value or 50
+    if count <= math.min(CONFIG.keepPets, storage - 5) then return end
+
+    local ok, sorted = pcall(PetLib.SortUnequippedPetByPower, LocalPlayer)
+    if not ok or type(sorted) ~= "table" then return end
+
+    local doomed = {}
+    for index = #sorted, 1, -1 do
+        local entry = sorted[index]
+        local name = type(entry) == "table" and (entry.Name or entry.Id) or (typeof(entry) == "Instance" and entry.Name)
+        if name then
+            doomed[#doomed + 1] = name
+            if #doomed >= math.min(25, count - CONFIG.keepPets) then break end
+        end
+    end
+    if #doomed == 0 then return end
+
+    invoke("Pet", { Action = "Delete", Pets = doomed })
+    STATE.petsDeleted = STATE.petsDeleted + #doomed
+    note("deleted %d weak pets (%d owned)", #doomed, count)
+end
+
 local function freeRewards()
     invoke("Redeem Code", "update17")
     invoke("Claim Daily")
@@ -348,6 +391,15 @@ end)
 
 loop("eggs", 25, function()
     if CONFIG.autoHatch then hatchEggs() end
+end)
+
+loop("pets", 20, function()
+    if not CONFIG.autoPets then return end
+    equipBestPets()
+    cullPets()
+    local petStats = Stats:FindFirstChild("PetStats")
+    local petPower = petStats and petStats:FindFirstChild("PetPower")
+    STATE.petPower = petPower and petPower.Value or 0
 end)
 
 loop("rewards", 300, function()
@@ -444,17 +496,20 @@ spend:Toggle("Climb worlds", CONFIG.autoWorld, function(v) CONFIG.autoWorld = v 
     "moves up as soon as the rebirths cover the requirement")
 spend:Toggle("Free rewards", CONFIG.autoRewards, function(v) CONFIG.autoRewards = v end,
     "daily reward, lucky block and the code from the game description")
+spend:Toggle("Pets", CONFIG.autoPets, function(v) CONFIG.autoPets = v end,
+    "EquipBest (measured 14 -> 57 pet power) and deletes the overflow")
 
 local readout = page:Card("STATUS", 0)
-local out = readout:Readout(9)
+local out = readout:Readout(10)
 
 task.spawn(function()
     while alive() do
         out:set({
             "RUN",
             string.format("  phase %s   world %d   pickaxe %s", STATE.phase, STATE.world, tostring(STATE.pickaxe)),
-            string.format("  sold %d   pickaxes %d   rebirths %d   eggs %d",
-                STATE.sold, STATE.bought, STATE.rebirthsDone, STATE.hatched),
+            string.format("  sold %d   pickaxes %d   rebirths %d   eggs %d   pets -%d",
+                STATE.sold, STATE.bought, STATE.rebirthsDone, STATE.hatched, STATE.petsDeleted),
+            string.format("  pet power %s", abbreviate(STATE.petPower)),
             "ECONOMY",
             string.format("  coins %s   gems %s", abbreviate(STATE.coins), abbreviate(STATE.gems)),
             string.format("  power %s / %s for the next rebirth",

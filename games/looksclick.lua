@@ -73,6 +73,7 @@ local CONFIG = {
 	gear = true,            -- best affordable gear in this world, touched from afar
 	portals = true,         -- take the world portal once its Looks wall is passed
 	rebirth = true,         -- Rebirth("Max") - this is what unlocks the trainers
+	gearFirst = true,       -- never rebirth while saving for the next gear tier
 	freebies = true,        -- free spin, group reward, offline earnings, leave gift
 
 	trainSeconds = 30,      -- seconds on the trainer before each mogging trip
@@ -406,6 +407,43 @@ end
 -- spending
 --------------------------------------------------------------------------------
 
+-- The cheapest gear tier that would actually be an upgrade. This is the reserve
+-- every other spender has to respect: a rebirth zeroes the balance, so rebirthing
+-- while saving for the next tier means the tier is never reached - the starvation
+-- pattern, and it kept this farm on the 800-wins Sunscreen while the NPCs it was
+-- mogging paid 100K a piece.
+-- The shop is a LADDER and it is climbed one rung at a time: standing on the
+-- Exfoliant (rung 12) with 17M wins against its 12M price bought nothing at all,
+-- while the very next rung above the worn gear went through immediately. So the
+-- only thing worth asking for is the cheapest entry whose Multiplier beats what
+-- is worn - never the best affordable one.
+local function gearLadder()
+	local cfg = conf("GearConfig") or {}
+	local shop = worldFolder()
+	shop = shop and shop:FindFirstChild("GearShop")
+	if not shop then return {} end
+	local rungs = {}
+	for _, model in ipairs(shop:GetChildren()) do
+		local entry = cfg[model.Name]
+		local cost = entry and tonumber(entry.Cost)
+		local mul = entry and tonumber(entry.Multiplier)
+		local order = entry and tonumber(entry.Order)
+		-- entries with no numeric Cost/Order are the Robux ones (God Crown)
+		if cost and mul and order and not entry.Premium then
+			rungs[#rungs + 1] = { model = model, entry = entry, cost = cost, mul = mul, order = order }
+		end
+	end
+	table.sort(rungs, function(a, b) return a.order < b.order end)
+	return rungs
+end
+
+local function nextGear()
+	for _, rung in ipairs(gearLadder()) do
+		if rung.mul > (STATE.gearMul or 0) then return rung.model, rung.cost, rung end
+	end
+	return nil
+end
+
 -- Gear is a best-only ladder and the shop model's ButtonTop is a TouchInterest
 -- that answers from 108 studs, so this never moves the character.
 local function gearPass()
@@ -435,12 +473,21 @@ local function gearPass()
 	end
 	if not button then return end
 	local before = plr:GetAttribute("BestGearMultiplier") or 0
+	-- the touch answers from about a hundred studs, but the trainer and the shop
+	-- are further apart than that, so park on the button when it is out of range
+	local stop
+	if (hrp.Position - button.Position).Magnitude > 80 then
+		local target = CFrame.new(button.Position + Vector3.new(0, 3, 0))
+		stop = pin(function() return target end)
+		task.wait(0.6)
+	end
 	pcall(function()
 		firetouchinterest(hrp, button, 0)
 		task.wait(0.15)
 		firetouchinterest(hrp, button, 1)
 	end)
 	task.wait(1)
+	if stop then stop() end
 	local after = plr:GetAttribute("BestGearMultiplier") or before
 	if after > before then
 		STATE.gear = bestEntry.Name or best.Name
@@ -453,6 +500,14 @@ end
 -- button does. Rebirths are the only thing that unlocks the stronger trainers.
 local function rebirthPass()
 	if CONFIG.rebirthUntil > 0 and STATE.rebirths >= CONFIG.rebirthUntil then return end
+	-- A rebirth wipes the balance, so it waits while an affordable gear upgrade is
+	-- still pending: the cycle buys it on its next pass, the balance drops below
+	-- the tier, and only then does this fire. Without the hold the rebirth loop
+	-- kept eating 2.3M wins a cycle and the farm stayed on the 800-wins Sunscreen.
+	if CONFIG.gearFirst then
+		local _, cost = nextGear()
+		if cost and STATE.wins >= cost then return end
+	end
 	local before = STATE.rebirths
 	fire("Rebirth", true, "Max")
 	task.wait(1.5)
@@ -508,7 +563,7 @@ local function freePass()
 end
 
 local function spendPass()
-	if CONFIG.gear then gearPass() end
+	-- gear runs inside the cycle instead, because buying it may need the body
 	if CONFIG.rebirth then rebirthPass() end
 	if CONFIG.portals then portalPass() end
 end
@@ -520,6 +575,7 @@ end
 local function cyclePass()
 	if STATE.bodyOwner then return end
 	withBody("cycle", function()
+		if CONFIG.gear then gearPass() end
 		if CONFIG.trainer then trainPhase() end
 		if CONFIG.mog then mogPhase() end
 	end)
@@ -583,6 +639,8 @@ spend:Toggle("Buy gear", CONFIG.gear, function(v) CONFIG.gear = v end,
 	UI.theme.warn)
 spend:Toggle("Auto rebirth", CONFIG.rebirth, function(v) CONFIG.rebirth = v end,
 	"Rebirth(\"Max\") - the only thing that unlocks stronger trainers", UI.theme.warn)
+spend:Toggle("Gear before rebirth", CONFIG.gearFirst, function(v) CONFIG.gearFirst = v end,
+	"a rebirth wipes the balance; without this the next gear tier is never reached")
 spend:Stepper("Rebirth until", function()
 	return CONFIG.rebirthUntil == 0 and "no limit" or short(CONFIG.rebirthUntil)
 end, function(dir)
@@ -642,6 +700,7 @@ _G.__LOOKSCLICK_DBG = {
 	bestTrainer = bestTrainer, trainPhase = trainPhase,
 	bestZone = bestZone, bestNPC = bestNPC, mogOnce = mogOnce, mogPhase = mogPhase,
 	gearPass = gearPass, rebirthPass = rebirthPass, portalPass = portalPass,
+	nextGear = nextGear,
 	freePass = freePass, spendPass = spendPass, cyclePass = cyclePass,
 	worldFolder = worldFolder,
 }

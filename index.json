@@ -204,6 +204,16 @@
       "detect": "local rs = game:GetService('ReplicatedStorage') local sh = rs:FindFirstChild('Shared') local mods = sh and sh:FindFirstChild('Modules') local pkg = rs:FindFirstChild('Packages') return mods ~= nil and mods:FindFirstChild('LooksPerClick') ~= nil and mods:FindFirstChild('NPCsConfig') ~= nil and pkg ~= nil and pkg:FindFirstChild('warp') ~= nil"
     },
     {
+      "alias": "pickaxesim",
+      "name": "Pickaxe Simulator!",
+      "file": "games/pickaxesim.lua",
+      "places": [
+        82013336390273
+      ],
+      "status": "ok",
+      "detect": "local rs = game:GetService('ReplicatedStorage') local t = rs:FindFirstChild('Tables') return rs:FindFirstChild('Paper') ~= nil and t ~= nil and t:FindFirstChild('Pickaxes') ~= nil and t:FindFirstChild('Rebirths') ~= nil and rs:FindFirstChild('Stats') ~= nil"
+    },
+    {
       "alias": "eggfarm",
       "name": "Grow a Chicken Fighter",
       "file": "games/eggfarm.lua",
