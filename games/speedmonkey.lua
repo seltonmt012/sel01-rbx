@@ -46,6 +46,7 @@ local CfgCharms = require(ReplicatedStorage.Config.Charms)
 local CfgCodes = require(ReplicatedStorage.Config.Codes)
 local CfgTrails = require(ReplicatedStorage.Config.Trails)
 local CfgAuras = require(ReplicatedStorage.Config.Auras)
+local CfgPotions = require(ReplicatedStorage.Config.Potions)
 
 --------------------------------------------------------------------------------
 -- config / state
@@ -62,6 +63,8 @@ local CONFIG = {
 	autoAura = true,       -- so do auras, and the two stack
 	autoWorld = true,      -- move up a world as soon as the rebirths allow it
 	autoFree = true,       -- free reward / offline earnings / streak
+	autoPotion = true,     -- drink Speed potions now, hold Wins potions for the next world
+	potionHold = 0.5,      -- hold a Wins potion once this share of the next world's rebirths is banked
 	stage = 0,             -- 0 = highest stage of the current world
 	charmReserve = 2,      -- keep balance >= reserve x the next upgrade threshold
 }
@@ -82,6 +85,9 @@ local STATE = {
 	charmsBought = 0,
 	entering = false,      -- true while the body is being walked into a new world
 	blocked = nil,         -- set when the server refused something, kept visible
+	stalls = 0,            -- how often the watchdog had to rebuild the target
+	stallRef = 0,          -- highest wins seen; growth past it means the farm lives
+	stallAt = 0,           -- os.clock of the last growth
 }
 
 -- Re-executing does not restart the Lua VM, so the previous run's pin and loops
@@ -383,11 +389,29 @@ end
 -- ...and never below what is already worn. The first run bought a Blue trail (x2)
 -- for 30K while a Rainbow (x5) was equipped, because "best unowned and affordable"
 -- says nothing about whether it is an upgrade at all. Wasted wins, nothing gained.
+-- The reserve above is right for a charm, which multiplies nothing, and wrong for
+-- a trail. Both halves of this decision multiply the SAME number - the speed award
+-- - and both are permanent, while an upgrade tier costs nothing at all and only
+-- needs the balance to REACH its threshold. So buying a trail does not lose the
+-- tier, it delays it, and when the trail multiplies harder than the tier would the
+-- delay is the cheaper half. Measured on the stuck run: Yin Yang x250 equipped,
+-- Bloodmoon x750 for 9.72e20 sitting affordable at a 1.76e21 balance, blocked for
+-- hours by a 2x reserve on a 2.39e21 threshold that is worth x1.95.
+local function upgradeGain()
+	local current = math.max(plr.Data.SelectedUpgrade.Value, unlockedUpgrade())
+	local a, b = CfgUpgrades[current], CfgUpgrades[current + 1]
+	if not (a and b and a.Multi and b.Multi and a.Multi > 0) then return math.huge end
+	return b.Multi / a.Multi
+end
+
 local function bestBuy(config, ownedFolder, floorMulti)
 	local pick, pickMulti = nil, floorMulti or 0
+	local gate = upgradeGain()
 	for name, entry in pairs(config) do
-		if not owned(ownedFolder, name) and entry.Multi > pickMulti and canSpend(entry.Price) then
-			pick, pickMulti = name, entry.Multi
+		if not owned(ownedFolder, name) and entry.Multi > pickMulti then
+			local gain = entry.Multi / math.max(floorMulti or 0, 1)
+			local affordable = (gain >= gate and entry.Price <= STATE.wins) or canSpend(entry.Price)
+			if affordable then pick, pickMulti = name, entry.Multi end
 		end
 	end
 	return pick, pickMulti
@@ -462,6 +486,41 @@ local function buyCharms()
 	Remotes.EquipBestCharms:FireServer()
 end
 
+-- Potions were sitting unused for a whole session: five of them in Data.Potions
+-- with Data.ActivePotions empty. Verified: Remotes.UsePotion:FireServer(name)
+-- takes the plain inventory name, consumed one ("Speed Potion (10m)" 1 -> 0) and
+-- put "x2 Speed = 598" into ActivePotions, so the value there is seconds left.
+--
+-- They are used at different times on purpose. A Speed potion doubles the XP
+-- award, and XP is what the run is actually short of - levels make rebirths and
+-- rebirths are the ONLY gate on the next world - so it burns immediately. A Wins
+-- potion doubles a number that is worth a thousand times more one world up
+-- (World3 stage 9 pays 4e17, World4 stage 9 pays 1e24), so it waits until there
+-- is no world left to unlock.
+local function usePotions()
+	if not CONFIG.autoPotion then return end
+	local active = {}
+	for _, c in ipairs(plr.Data.ActivePotions:GetChildren()) do active[c.Name] = true end
+	-- "hold until the world is unlocked" is not enough on its own: the world after
+	-- this one is not unlockable yet either, so the bottle gets drunk minutes before
+	-- the switch that makes it worth a million times more. Hold it while the next
+	-- world is genuinely in reach - measured here at 19 of the 24 rebirths it wants.
+	local nextNeed = CfgMain.WorldRebirthsRequired["World" .. (world() + 1)]
+	local holdWins = world() ~= desiredWorld()
+		or (nextNeed and rebirths() >= nextNeed * CONFIG.potionHold) or false
+	for _, entry in ipairs(plr.Data.Potions:GetChildren()) do
+		local cfg = CfgPotions.ByName and CfgPotions.ByName[entry.Name]
+		local category = cfg and cfg.Category or (entry.Name:find("Wins") and "Wins" or "Speed")
+		local buff = cfg and cfg.BuffName or ("x2 " .. category)
+		if entry.Value > 0 and not active[buff] and not (category == "Wins" and holdWins) then
+			Remotes.UsePotion:FireServer(entry.Name)
+			active[buff] = true
+			STATE.note = "potion " .. entry.Name
+			task.wait(0.5)
+		end
+	end
+end
+
 local function claimFree()
 	if not CONFIG.autoFree then return end
 	if plr:GetAttribute("HasOfflineReward") then
@@ -509,6 +568,53 @@ local function unstuck()
 end
 
 --------------------------------------------------------------------------------
+-- watchdog
+--------------------------------------------------------------------------------
+
+-- Meant for unattended runs. Everything here recovers from something that was
+-- actually seen going wrong: the body drifting off the plate after a respawn, a
+-- rebirth or a world switch leaving the old target behind, and a stage whose
+-- plate had not streamed in yet when retarget last looked. The rule is the same
+-- one the rest of this file uses - a server value has to move, so the trigger is
+-- the wins balance standing still, never a counter this script keeps itself.
+local STALL_SECONDS = 90
+
+local function watchdog(now)
+	if not CONFIG.auto then
+		STATE.stallAt = now
+		return
+	end
+	-- offline earnings and rebirths both move the balance, so growth is the honest
+	-- signal that the farm is alive.
+	if STATE.wins > (STATE.stallRef or 0) then
+		STATE.stallRef, STATE.stallAt = STATE.wins, now
+		return
+	end
+	STATE.stallAt = STATE.stallAt or now
+	if STATE.entering then return end
+	if now - STATE.stallAt < STALL_SECONDS then return end
+
+	STATE.stalls = (STATE.stalls or 0) + 1
+	STATE.stallAt = now
+	-- Drop the target and rebuild it from the checkpoint, which is the only part
+	-- of the map that is always loaded, then let retarget upgrade to the plate
+	-- once it has streamed in.
+	STATE.target = nil
+	STATE.targetName = "-"
+	STATE.blocked = nil
+	local cp = checkpoint(world(), highestStage(world()))
+	if cp then
+		pcall(function() plr:RequestStreamAroundAsync(cp) end)
+		STATE.target = cp
+	end
+	local _, hrp, hum = char()
+	if hrp then hrp.Anchored = false end
+	if hum then hum.PlatformStand = false end
+	retarget()
+	STATE.note = "stall " .. STATE.stalls .. ": re-targeted " .. tostring(STATE.targetName)
+end
+
+--------------------------------------------------------------------------------
 -- loops
 --------------------------------------------------------------------------------
 
@@ -538,6 +644,7 @@ loop(1, nil, function()
 	retarget()
 	tryRebirth()
 	applyUpgrade()
+	watchdog(now)
 end)
 
 -- slow: the things that only change every so often
@@ -546,6 +653,7 @@ loop(15, nil, function()
 	buyTrail()
 	buyAura()
 	buyCharms()
+	usePotions()
 	claimFree()
 end)
 
@@ -602,6 +710,8 @@ spend:Stepper("Upgrade reserve", function() return CONFIG.charmReserve .. "x" en
 local extra = farm:Card("EXTRAS", 2)
 extra:Toggle("Claim free rewards", CONFIG.autoFree, function(v) CONFIG.autoFree = v end,
 	"offline earnings, playtime reward, streak")
+extra:Toggle("Drink potions", CONFIG.autoPotion, function(v) CONFIG.autoPotion = v end,
+	"speed now, wins held back until the last world is reached", UI.theme.warn)
 extra:Button("Redeem codes", function() task.spawn(redeemCodes) end)
 extra:Label("codes need the group - all six answer not_in_group")
 extra:Button("Unstuck", unstuck, UI.theme.bad)
@@ -634,6 +744,8 @@ task.spawn(function()
 				(plr.Data.EquippedAura.Value .. " x" ..
 				 tostring((CfgAuras[plr.Data.EquippedAura.Value] or {}).Multi)) or "none"),
 			"  charms   " .. STATE.charmsBought .. " bought this session",
+			"  watchdog " .. STATE.stalls .. " stalls, last growth " ..
+				string.format("%.0fs ago", math.max(0, os.clock() - (STATE.stallAt or 0))),
 			"  " .. tostring(STATE.note),
 		}
 		if STATE.blocked then lines[#lines + 1] = "  blocked  " .. STATE.blocked end
@@ -656,8 +768,9 @@ _G.__MONKEY_DBG = {
 	retarget = retarget, applyUpgrade = applyUpgrade, tryRebirth = tryRebirth,
 	tryWorld = tryWorld, buyCharms = buyCharms, claimFree = claimFree,
 	buyTrail = buyTrail, buyAura = buyAura, canSpend = canSpend,
+	usePotions = usePotions, upgradeGain = upgradeGain, desiredWorld = desiredWorld,
 	unlockedUpgrade = unlockedUpgrade, nextUpgradeThreshold = nextUpgradeThreshold,
-	redeemCodes = redeemCodes, unstuck = unstuck,
+	redeemCodes = redeemCodes, unstuck = unstuck, watchdog = watchdog,
 	wins = wins, xp = xp, level = level, rebirths = rebirths, world = world,
 	winPlate = winPlate, checkpoint = checkpoint, bestUpgrade = bestUpgrade,
 }
