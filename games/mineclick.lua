@@ -115,6 +115,7 @@ local CONFIG = {
 	auto = false,
 	click = true,            -- one Click per Heartbeat, the server's whole budget
 	autoLoot = true,         -- the cash engine: race the other players to the loot
+	autoSell = true,         -- GotoSurface + SellAllLoot whenever the bag is full
 	autoMine = true,         -- stand in the stage hitbox, the client breaks the walls
 	autoTrain = true,        -- park in the best free training area when idle
 	autoPickaxe = true,
@@ -123,6 +124,12 @@ local CONFIG = {
 	autoRebirth = true,
 	lootRange = 0,           -- 0 = the whole map, otherwise studs from the character
 	pickaxeReserve = true,   -- keep the cash the next pickaxe needs
+	-- Settle is a race setting, not a safety setting. Loot is contested by every
+	-- player on the server: measured 17 grabs worth 1,878 cash at 0.35s, and
+	-- nothing at all at 1.2s, because somebody else always got there first.
+	settle = 0.35,
+	stageDwell = 6,          -- seconds spent breaking one stage before re-checking
+	lootWait = 0.6,          -- seconds to wait for a drop before calling a stage empty
 }
 
 local STATE = {
@@ -204,14 +211,31 @@ end
 -- ItemId / StageId / IsTaken attributes. IsTaken == false means it is up for
 -- grabs, and touching it pays out immediately - there is no inventory step and
 -- no sell step, which is the single most surprising thing about this game.
+-- Loot in a stage the player has not reached cannot be taken - the server just
+-- ignores the touch, and the game says so in its own words ("finish stage X
+-- first"). StagesUnlocked is that record, and a REBIRTH WIPES IT: after six
+-- rebirths it came back empty, so the whole map was off limits again while the
+-- first version of this script still ran across it grabbing at nothing.
+local function maxUnlockedStage()
+	local best = 1
+	for key, value in pairs(data().StagesUnlocked or {}) do
+		local num = tonumber(key) or tonumber(value)
+		if num and num > best then best = num end
+	end
+	return best
+end
+
 local function freeLoot()
 	local out = {}
 	local hrp = root()
 	local from = hrp and hrp.Position
 	local stages = Workspace:FindFirstChild("Stages")
 	if not stages then return out end
+	local allowed = maxUnlockedStage()
 	for _, stage in ipairs(stages:GetChildren()) do
-		local spawns = stage:FindFirstChild("Spawnpoints")
+		local num = tonumber(stage.Name:match("%d+")) or 1
+		-- reached AND finished, or the server answers "Complete Stage n First!"
+		local spawns = (num <= allowed and stageDone(num)) and stage:FindFirstChild("Spawnpoints") or nil
 		if spawns then
 			for _, part in ipairs(spawns:GetChildren()) do
 				if part:IsA("BasePart") and part:GetAttribute("IsTaken") == false then
@@ -227,6 +251,38 @@ local function freeLoot()
 	return out
 end
 
+-- The backpack is the whole reason a pickup can silently fail. `player.data
+-- .Storage` is how full it is and `Data.BackpackSize` is the cap; at 5/5 every
+-- prompt answers "Backpack is full! (Goto Surface)" and pays nothing, which is
+-- exactly what a bot looks like when it teleports onto loot all day and earns
+-- zero. Verified: GotoSurface emptied it 5 -> 0 and SellAllLoot then paid 93,840.
+local function storage()
+	local folder = plr:FindFirstChild("data")
+	local value = folder and folder:FindFirstChild("Storage")
+	return value and value.Value or 0
+end
+
+local function backpackFull()
+	return storage() >= (data().BackpackSize or 3)
+end
+
+local function sellRun()
+	if storage() <= 0 then return false end
+	STATE.mode = "sell"
+	STATE.targetName = "surface (selling " .. storage() .. ")"
+	local before = data().Cash or 0
+	GotoSurface:FireServer()
+	task.wait(1.2)
+	SellAllLoot:FireServer()
+	task.wait(1.2)
+	local gained = (data().Cash or 0) - before
+	if gained > 0 then
+		STATE.sold = (STATE.sold or 0) + gained
+		STATE.note = "sold for " .. short(gained)
+	end
+	return true
+end
+
 local function itemValue(part)
 	local id = part:GetAttribute("ItemId")
 	local entry = id and ItemsList[id]
@@ -236,24 +292,51 @@ end
 -- Touch is what pays. A ProximityPrompt exists on some of them but only once the
 -- client has built it, so the touch path is the reliable one and the prompt is
 -- fired as a second chance.
+-- The body has to ARRIVE before the touch counts. Warping in and firing in the
+-- same breath is what made the first version look busy and earn nothing: it hit
+-- the part while the server still had the character somewhere else. So it
+-- settles first, then touches repeatedly, and the payout is confirmed against
+-- the cash balance rather than against the call returning.
 local function grab(part)
 	local hrp = root()
 	if not hrp or not part.Parent then return false end
 	STATE.target = part.Position + Vector3.new(0, 2, 0)
 	local _, id = itemValue(part)
 	STATE.targetName = "loot " .. tostring(id)
-	task.wait(0.35)
-	pcall(function()
-		firetouchinterest(hrp, part, 0)
-		firetouchinterest(hrp, part, 1)
-	end)
-	local prompt = part:FindFirstChildOfClass("ProximityPrompt")
-	if prompt then pcall(fireproximityprompt, prompt) end
-	task.wait(0.15)
-	if part:GetAttribute("IsTaken") ~= false then
-		STATE.picked = STATE.picked + 1
-		return true
+
+	local before = data().Cash or 0
+	task.wait(CONFIG.settle)
+
+	-- The pickup is an E press, not a touch. Two things made the first versions
+	-- teleport onto loot and come back with nothing: the ProximityPrompt is a
+	-- DESCENDANT (it hangs under the item model, not on the spawn part), and it
+	-- does not exist until the client has built it for a nearby item - so the
+	-- prompt has to be waited for, then held for its HoldDuration.
+	local prompt
+	local deadline = os.clock() + 1.5
+	repeat
+		prompt = part:FindFirstChildWhichIsA("ProximityPrompt", true)
+		if prompt then break end
+		task.wait(0.1)
+	until os.clock() > deadline
+
+	for _ = 1, 3 do
+		if not part.Parent then break end
+		if prompt then
+			pcall(fireproximityprompt, prompt, prompt.HoldDuration or 0)
+		end
+		pcall(function()
+			firetouchinterest(hrp, part, 0)
+			firetouchinterest(hrp, part, 1)
+		end)
+		task.wait(0.25)
+		if (data().Cash or 0) > before then
+			STATE.picked = STATE.picked + 1
+			return true
+		end
+		prompt = prompt or part:FindFirstChildWhichIsA("ProximityPrompt", true)
 	end
+	if not prompt then STATE.blocked = "no pickup prompt on " .. tostring(id) end
 	return false
 end
 
@@ -263,22 +346,37 @@ end
 
 -- The deepest stage whose hitbox exists. Standing in it is the entire job: the
 -- game's own StageClient zone handler picks the next unbroken wall and swings.
-local function deepestStage()
+-- The stage to WORK ON is one deeper than the deepest one unlocked, because
+-- breaking the walls in a stage is what unlocks it - measured: standing in the
+-- stage 2 hitbox with StagesUnlocked = {1} broke three walls and the record came
+-- back {1, 2}. TeleportToStage itself neither charges nor unlocks anything, so
+-- the body simply parks in the next hitbox. Only when that stage is out of walls
+-- does the target move on.
+-- A stage counts as DONE when it has no unbroken wall left, and that is what the
+-- game means by "Complete Stage 12 First!" - the message every pickup in an
+-- unfinished stage answers with. Reaching a stage is not finishing it, so
+-- StagesUnlocked alone is the wrong test: the record read 1..12 while stages 3,
+-- 10 and 12 were still refusing their loot.
+local function stageDone(stageNum)
+	local ok, wall = pcall(StageClient.GetNextWall, StageClient, stageNum)
+	return ok and wall == nil
+end
+
+-- Work the LOWEST unfinished stage, not the deepest reachable one. Going deep
+-- first is what left a trail of half-cleared stages whose loot could never be
+-- taken, while the body hammered a wall far below that its pickaxe cannot chew.
+local function workStage()
 	local stages = Workspace:FindFirstChild("Stages")
 	if not stages then return nil end
-	local best, bestNum = nil, 0
-	for _, folder in ipairs(stages:GetChildren()) do
-		local num = tonumber(folder.Name:match("%d+"))
-		local hitbox = folder:FindFirstChild("Hitbox")
-		if num and hitbox and num > bestNum then
-			-- only stages the player has actually reached; StagesUnlocked is the
-			-- server's own record and TeleportToStage refuses the rest
-			if (data().StagesUnlocked or {})[num] or (data().StagesUnlocked or {})[tostring(num)] or num == 1 then
-				best, bestNum = hitbox, num
-			end
-		end
+	local limit = math.min(maxUnlockedStage() + 1, 30)
+	for num = 1, limit do
+		local folder = stages:FindFirstChild("Stage " .. num)
+		local hitbox = folder and folder:FindFirstChild("Hitbox")
+		if hitbox and not stageDone(num) then return hitbox, num end
 	end
-	return best, bestNum
+	local folder = stages:FindFirstChild("Stage " .. limit)
+	local hitbox = folder and folder:FindFirstChild("Hitbox")
+	return hitbox, limit
 end
 
 local function wallsLeft(stageNum)
@@ -471,7 +569,61 @@ end
 -- Loot first because it is the only contested resource on the server: 223 spawn
 -- points, 0-9 free at a time, and whoever arrives first is paid. Mining is
 -- uncontested and waits. Training is what happens when there is nothing to grab.
+-- Everything that is free inside ONE stage, nearest first. Loot appears in the
+-- stage you are breaking, so this is the list that matters after a wall falls -
+-- not whatever is lying around the rest of the map, which belongs to whoever is
+-- standing next to it.
+local function stageLoot(stageNum)
+	local out = {}
+	local folder = Workspace.Stages:FindFirstChild("Stage " .. stageNum)
+	local spawns = folder and folder:FindFirstChild("Spawnpoints")
+	if not spawns then return out end
+	local hrp = root()
+	local from = hrp and hrp.Position
+	for _, part in ipairs(spawns:GetChildren()) do
+		if part:IsA("BasePart") and part:GetAttribute("IsTaken") == false then
+			out[#out + 1] = { part = part, dist = from and (part.Position - from).Magnitude or 0 }
+		end
+	end
+	table.sort(out, function(a, b) return a.dist < b.dist end)
+	return out
+end
+
+-- Clear a stage's loot until it stays empty for a full sweep. The user watched
+-- the first version break a stage and walk away from its drops, which is where
+-- the whole cash income was going.
+local function collectStage(stageNum)
+	local empty = 0
+	while empty < 2 and CONFIG.auto and GEN == _G.__MINECLICK do
+		if backpackFull() then
+			if CONFIG.autoSell then sellRun() end
+			return
+		end
+		local loot = stageLoot(stageNum)
+		if #loot == 0 then
+			empty = empty + 1
+			task.wait(CONFIG.lootWait)
+		else
+			empty = 0
+			STATE.mode = "loot"
+			for _, entry in ipairs(loot) do
+				if not CONFIG.auto or GEN ~= _G.__MINECLICK then return end
+				if entry.part.Parent and entry.part:GetAttribute("IsTaken") == false then
+					grab(entry.part)
+				end
+			end
+		end
+	end
+end
+
 local function think()
+	-- Empty the bag first. A full backpack makes every single pickup fail with a
+	-- red "Backpack is full!" and no cash, so nothing else is worth doing.
+	if CONFIG.autoSell and backpackFull() then
+		sellRun()
+		return
+	end
+
 	if CONFIG.autoLoot then
 		local loot = freeLoot()
 		if #loot > 0 then
@@ -487,14 +639,57 @@ local function think()
 		end
 	end
 
-	local hitbox, stageNum = deepestStage()
-	if CONFIG.autoMine and hitbox and wallsLeft(stageNum) then
-		STATE.mode = "mine"
+	-- Nothing free right now. That is the NORMAL state, not a reason to run off:
+	-- loot appears while you are standing in the stage, so the body parks in the
+	-- deepest hitbox it is allowed into and waits there. Breaking walls happens
+	-- in the same spot because the game's own zone handler does it, so waiting
+	-- and mining are the same action.
+	local hitbox, stageNum = workStage()
+	if CONFIG.autoMine and hitbox then
 		STATE.stage = stageNum
 		STATE.target = hitbox.Position
-		STATE.targetName = "stage " .. stageNum .. " (walls open)"
-		task.wait(1)
-		return
+
+		-- Park in the hitbox AND fire HitWall directly: the client's own zone
+		-- loop only swings while it has a wall resolved, and it stops as soon as
+		-- the stage is spent, while the remote takes the wall index straight.
+		--
+		-- Progress is measured as DAMAGE, not as broken walls. Deep walls have
+		-- more health than one dwell window can chew through, and counting only
+		-- breaks made the script declare a perfectly good stage dead.
+		local before = data().WallsBroken or 0
+		local damaged = false
+		local hpConn = UpdateWallHealth.OnClientEvent:Connect(function() damaged = true end)
+		local deadline = os.clock() + CONFIG.stageDwell
+		while os.clock() < deadline and CONFIG.auto and GEN == _G.__MINECLICK do
+			local wall = wallsLeft(stageNum) or 1
+			HitWall:FireServer(stageNum, wall)
+			task.wait(0.12)
+		end
+		hpConn:Disconnect()
+		local gained = (data().WallsBroken or 0) - before
+		if damaged and gained <= 0 then
+			STATE.mode = "mine"
+			STATE.targetName = "stage " .. stageNum .. " (chewing, wall not down yet)"
+			STATE.blocked = nil
+			return
+		end
+
+		if gained > 0 then
+			STATE.mode = "mine"
+			STATE.targetName = "stage " .. stageNum .. " (+" .. gained .. " walls)"
+			STATE.blocked = nil
+			-- The drops belong to the stage that was just broken, so empty it
+			-- before moving on. Walking away from them was the whole bug.
+			if CONFIG.autoLoot then collectStage(stageNum) end
+			return
+		end
+
+		-- Nothing moved. That is either a spent stage or a server that will not
+		-- take this stage yet, and hammering it forever is how a farm looks busy
+		-- while earning zero - so say it and go train instead.
+		STATE.mode = "wait"
+		STATE.targetName = "stage " .. stageNum .. " took no hits"
+		STATE.blocked = "stage " .. stageNum .. " refuses hits - walls spent for this server"
 	end
 
 	if CONFIG.autoTrain then
@@ -603,10 +798,18 @@ main:Toggle("Auto click", CONFIG.click, function(v) CONFIG.click = v end,
 	"one Click per frame - that is the server's whole budget")
 main:Toggle("Auto loot", CONFIG.autoLoot, function(v) CONFIG.autoLoot = v end,
 	"grabs free spawn points, pays cash on touch")
+main:Toggle("Auto sell", CONFIG.autoSell, function(v) CONFIG.autoSell = v end,
+	"full bag = every pickup fails, so it surfaces and sells")
 main:Toggle("Auto mine", CONFIG.autoMine, function(v) CONFIG.autoMine = v end,
 	"stands in the deepest stage hitbox, the game breaks the walls")
 main:Toggle("Auto train", CONFIG.autoTrain, function(v) CONFIG.autoTrain = v end,
 	"best free area: Coal x1.5 up to Demonite x10")
+main:Stepper("Settle time", function() return CONFIG.settle .. "s" end,
+	function(dir) CONFIG.settle = math.clamp(CONFIG.settle + dir * 0.2, 0.2, 3) end,
+	"wait after warping before touching - too short and the touch is ignored")
+main:Stepper("Stage dwell", function() return CONFIG.stageDwell .. "s" end,
+	function(dir) CONFIG.stageDwell = math.clamp(CONFIG.stageDwell + dir, 1, 20) end,
+	"loot appears while you stand in the stage, so it waits there")
 main:Stepper("Loot range", function()
 	return CONFIG.lootRange == 0 and "whole map" or (CONFIG.lootRange .. " studs")
 end, function(dir)
@@ -648,8 +851,9 @@ task.spawn(function()
 				"   str x" .. LevelsHelper:GetStrengthMultiplier(STATE.rebirths),
 			"  pick   " .. tostring(d.EquippedPickaxeId) .. " (" ..
 				short(tonumber((PickaxeList[d.EquippedPickaxeId or ""] or {}).Strength) or 0) .. " str)",
-			"  walls  " .. STATE.walls .. "   bag " .. tostring(d.BackpackSize) ..
-				"   ws +" .. tostring(d.ExtraWalkSpeed),
+			"  bag    " .. storage() .. " / " .. tostring(d.BackpackSize) ..
+				"   sold " .. short(STATE.sold or 0),
+			"  walls  " .. STATE.walls .. "   ws +" .. tostring(d.ExtraWalkSpeed),
 			"  target " .. STATE.targetName,
 			"  loot   " .. STATE.picked .. " grabbed",
 			"  " .. STATE.note,
@@ -673,7 +877,8 @@ _G.__MINECLICK_DBG = {
 	data = data, freeLoot = freeLoot, grab = grab, think = think,
 	buyPickaxe = buyPickaxe, buyAura = buyAura, buyUpgrades = buyUpgrades,
 	tryRebirth = tryRebirth, claimFree = claimFree, unstuck = unstuck,
-	bestTrainingArea = bestTrainingArea, deepestStage = deepestStage,
+	bestTrainingArea = bestTrainingArea, workStage = workStage,
+	maxUnlockedStage = maxUnlockedStage,
 	nextPickaxeCost = nextPickaxeCost, canSpend = canSpend,
 }
 
