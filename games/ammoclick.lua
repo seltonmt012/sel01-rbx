@@ -79,6 +79,9 @@ local CONFIG = {
     autoRewards   = true,   -- daily reward and banked spins
     autoTitles    = true,   -- free title rolls, equips the best one owned
     autoPets      = true,   -- keeps the strongest pets in the slots (x185 measured)
+    autoCullPets  = true,   -- deletes everything below the keep list
+    keepPets      = 15,     -- how many of the best to keep around
+    cullBatch     = 25,     -- deletions per pass; one call, indices shift after
     depthSafety   = 0.5,    -- a stage is only targeted if its worst wall costs
                             -- at most this share of the ammo balance
     titleFloor    = 1000,   -- a roll costs 5 wins; do not roll a balance to zero
@@ -92,7 +95,7 @@ local CONFIG = {
 local STATE = {
     ammo = 0, wins = 0, rebirths = 0, pets = 0,
     cursor = 1, target = 1, stage = 1,
-    claims = 0, rebirthsDone = 0, eggsOpened = 0, boostsBought = 0,
+    claims = 0, rebirthsDone = 0, eggsOpened = 0, boostsBought = 0, petsDeleted = 0,
     bag = "-", weapon = "-", title = "-", titleMult = 0, petMult = 1,
     level = 0, levelMax = 0, uiOwner = nil,
     note = "starting", phase = "idle",
@@ -449,6 +452,43 @@ local function equipBestPets()
     end
 end
 
+-- Only the best PetSlots pets do anything, so everything below them is dead
+-- weight in the inventory.  PetsService:DeletePets takes a list of
+-- { Index = <position in DATA.Pets>, Id = <pet id> } and DeletePet takes the two
+-- as separate arguments; both answer nil and are confirmed by the list getting
+-- shorter.  Deleting shifts every index behind it - equipped ones included, the
+-- server remaps them - so the whole cull goes out as ONE call and the pets are
+-- re-equipped afterwards.
+local function cullPets()
+    local pets = DATA.Pets or {}
+    local keep = math.max(CONFIG.keepPets, (DATA.PetSlots or 3) + 1)
+    if #pets <= keep then return end
+
+    local ranked = {}
+    for index, pet in ipairs(pets) do
+        ranked[#ranked + 1] = { index = index, mult = pet.Multiplier or 0, id = pet.Id }
+    end
+    table.sort(ranked, function(a, b) return a.mult > b.mult end)
+
+    local equipped = {}
+    for _, index in ipairs(DATA.Equipped or {}) do equipped[index] = true end
+
+    local doomed = {}
+    for rank = keep + 1, #ranked do
+        local entry = ranked[rank]
+        if not equipped[entry.index] and entry.id then
+            doomed[#doomed + 1] = { Index = entry.index, Id = entry.id }
+            if #doomed >= CONFIG.cullBatch then break end
+        end
+    end
+    if #doomed == 0 then return end
+
+    call(PetsSvc:DeletePets(doomed), 8)
+    task.wait(0.6)
+    STATE.petsDeleted = STATE.petsDeleted + #doomed
+    note("deleted %d weak pets (%d left, keeping the best %d)", #doomed, #(DATA.Pets or {}), keep)
+end
+
 local function claimFreeRewards()
     local info = call(DailySvc:GetClaimInfo(), 6)
     if type(info) == "table" and info.canClaim then
@@ -504,6 +544,7 @@ loop("spend", 6, function()
     if CONFIG.autoWeapon then equipBestWeapon() end
     if CONFIG.autoBoosts then buyBoosts() end
     if CONFIG.autoEggs   then openBestEgg() end
+    if CONFIG.autoCullPets then cullPets() end
     if CONFIG.autoPets   then equipBestPets() end
 end)
 
@@ -627,6 +668,16 @@ spend:Toggle("Title rolls", CONFIG.autoTitles, function(v) CONFIG.autoTitles = v
     "rolls cost nothing; titles run x1.2 to x150 and equip themselves")
 spend:Toggle("Equip pets", CONFIG.autoPets, function(v) CONFIG.autoPets = v end,
     "only equipped pets count - the best three measured x185 on the click")
+spend:Toggle("Delete weak pets", CONFIG.autoCullPets, function(v) CONFIG.autoCullPets = v end,
+    "clears out everything below the keep list, equipped ones are safe", UI.theme.warn)
+local keepRefresh
+keepRefresh = spend:Stepper("Keep best pets",
+    function() return tostring(CONFIG.keepPets) end,
+    function(step)
+        CONFIG.keepPets = math.clamp(CONFIG.keepPets + step * 5, 5, 200)
+        if keepRefresh then pcall(keepRefresh) end
+    end,
+    "how many of the strongest pets survive the cull")
 
 local tuning = farmPage:Card("TUNING", 1)
 tuning:Slider("Depth safety %", 10, 90, CONFIG.depthSafety * 100, function(v)
@@ -647,7 +698,8 @@ task.spawn(function()
         out:set({
             "RUN",
             string.format("  stage %s   wall %d   phase %s", tostring(STATE.target), STATE.cursor, STATE.phase),
-            string.format("  claims %d   rebirths %d", STATE.claims, STATE.rebirthsDone),
+            string.format("  claims %d   rebirths %d   pets deleted %d",
+                STATE.claims, STATE.rebirthsDone, STATE.petsDeleted),
             "ECONOMY",
             string.format("  ammo %s   wins %s", abbreviate(STATE.ammo), abbreviate(STATE.wins)),
             string.format("  rebirths %d   pets %d (x%.1f)   gun %s",
@@ -671,7 +723,7 @@ _G.__AMMOCLICK_DBG = {
     STAGE_RANGE = STAGE_RANGE, bestStage = bestStage, bestBag = bestBag,
     claimFreeWeapons = claimFreeWeapons, equipBestWeapon = equipBestWeapon,
     buyBoosts = buyBoosts, openBestEgg = openBestEgg, equipBestPets = equipBestPets,
-    rollTitle = rollTitle,
+    cullPets = cullPets, rollTitle = rollTitle,
     claimFreeRewards = claimFreeRewards, call = call,
     cursor = function() return cursor end,
 }
