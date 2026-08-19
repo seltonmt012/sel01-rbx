@@ -207,6 +207,16 @@ local function poolOf(stageId)
 	return stage and stage:FindFirstChild(WATER_PART)
 end
 
+-- Stand ON the surface, not in the middle of the block. The water parts are solid
+-- (CanCollide true) and the deep ones are nearly eight studs thick, so aiming at
+-- Position + 3 puts the character inside the geometry and the physics engine
+-- ejects it: at stage 7 that left it 45 studs away with the drain reading 0/s
+-- while everything looked like it was working.
+local function poolStand(part)
+	if not part then return nil end
+	return part.Position + Vector3.new(0, part.Size.Y / 2 + 3, 0)
+end
+
 local function stageRows()
 	local out = invoke(fn("Stage", "[C-S]GetStageState"))
 	return type(out) == "table" and out or {}
@@ -460,7 +470,7 @@ local function drainPhase(seconds)
 		local part = (current == stageId) and pool or poolOf(current)
 		if part then
 			if current ~= stageId then stageId, pool = current, part end
-			return part.Position + Vector3.new(0, 3, 0)
+			return poolStand(part)
 		end
 		return nil
 	end)
@@ -514,7 +524,12 @@ local function ladderBuy(helper, getter, buyEvent, equipEvent, ownedGetter, labe
 	local owned = {}
 	local data = invoke(ownedGetter)
 	if type(data) == "table" and type(data.Owned) == "table" then
-		for _, id in pairs(data.Owned) do owned[tostring(id)] = true end
+		-- Owned is a SET: { ["10"] = true, ["1"] = true, ... }. Reading the values
+		-- instead of the keys stored `owned["true"]`, so the ownership check never
+		-- matched and the buy remote was fired again for tiers already owned.
+		for id, flag in pairs(data.Owned) do
+			if flag then owned[tostring(id)] = true end
+		end
 	end
 	local equipped = type(data) == "table" and data.Equipped or nil
 
@@ -880,7 +895,7 @@ win:Refresh()
 _G.__DRAINWATER_DBG = {
 	CONFIG = CONFIG, STATE = STATE,
 	refresh = refresh, short = short, pin = pin, invoke = invoke,
-	poolOf = poolOf, stageRows = stageRows, remainingOf = remainingOf,
+	poolOf = poolOf, poolStand = poolStand, stageRows = stageRows, remainingOf = remainingOf,
 	claimableFish = claimableFish, claimNearby = claimNearby, carried = carried,
 	tankState = tankState, worstDisplayed = worstDisplayed,
 	plotTrip = plotTrip, plotButtons = plotButtons,
