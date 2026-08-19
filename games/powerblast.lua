@@ -63,7 +63,9 @@ local CONFIG = {
     -- spending
     autoAura         = true,    -- climb the aura ladder (the whole progression)
     autoUpgrades     = true,    -- Strength / Inventory / TeleportSpeed ladders
-    autoBaseFloors   = true,    -- 100M / 1T / 10Q floors, +10 slots each
+    autoBaseFloors   = true,    -- unlock the next floor (lot name, one per call)
+    autoSlots        = true,    -- buy the individual locked slots (position gated)
+    autoLevels       = true,    -- level placed brainrots - ~15s payback, max 500
     autoRebirth      = false,   -- resets Power, so it is opt-in
 
     -- freebies
@@ -74,11 +76,15 @@ local CONFIG = {
     -- tuning
     blastGap         = 2.9,     -- measured floor; COOLDOWN is 2.5
     burstBlasts      = 6,       -- blasts per charge cycle
-    maxChargeSeconds = 90,      -- never charge longer than this before blasting
+    maxChargeSeconds = 45,      -- never charge longer than this before blasting
     preRebirthBlasts = 10,      -- harvest at peak power before zeroing it
     collectEvery     = 8,
     equipEvery       = 12,
     spendEvery       = 15,
+    levelsPerPass    = 6,       -- level upgrades fired per spend pass
+    reserveWindow    = 120,     -- an aura is only reserved if income reaches it
+                                -- within this many seconds; otherwise it is a
+                                -- wall, not a target, and blocks everything
 }
 
 -- -------------------------------------------------------------------- state
@@ -470,26 +476,140 @@ local function buyUpgrades(budget)
     return bought
 end
 
--- ------------------------------------------------------------- base floors
+-- ---------------------------------------------------- base floors and slots
 local BaseExpansionConfig = nil
 pcall(function() BaseExpansionConfig = require(Modules:WaitForChild("BaseExpansionConfig")) end)
 
-local function buyBaseFloor(budget)
+-- PurchaseBaseUpgrade takes the LOT NAME, not a floor name. The client walks the
+-- pressed button up to its ancestor whose Parent is workspace.Lots and sends
+-- that. Verified: FireServer("Lot_3") charged exactly 100,000,000 and unlocked
+-- floor 2. It is one level per call - firing it again costs nothing and does
+-- nothing, so the extra slots on the new floor are bought individually below.
+local function buyBaseUpgrade(budget)
     if not (BaseExpansionConfig and BaseExpansionConfig.FloorUpgradeCosts) then return false end
     local lot = myLot()
     if not lot then return false end
     for floor = 2, 4 do
         if not floorUnlocked(floor) then
             local cost = tonumber(BaseExpansionConfig.FloorUpgradeCosts[floor])
-            if cost and cost <= budget then
-                fire(Remotes.PurchaseBaseUpgrade, "Floor" .. floor)
-                note(("bought Floor%d for %s"):format(floor, fmt(cost)))
+            if not (cost and cost <= budget) then return false end
+            fire(Remotes.PurchaseBaseUpgrade, lot.Name)
+            task.wait(2)
+            if floorUnlocked(floor) then
+                note(("unlocked floor %d for %s"):format(floor, fmt(cost)))
                 return true
             end
-            return false -- do not skip past a floor we cannot afford yet
+            return false
         end
     end
     return false
+end
+
+local function slotCost(floor)
+    if BaseExpansionConfig then
+        if BaseExpansionConfig.GetFloorSlotCost then
+            local ok, v = pcall(BaseExpansionConfig.GetFloorSlotCost, floor)
+            if ok and tonumber(v) then return tonumber(v) end
+        end
+        if BaseExpansionConfig.FloorSlotCosts then
+            return tonumber(BaseExpansionConfig.FloorSlotCosts[floor])
+        end
+    end
+    return nil
+end
+
+local function slotPurchasePrompt(slot)
+    for _, d in ipairs(slot:GetDescendants()) do
+        if d:IsA("ProximityPrompt") and d:GetAttribute("PromptType") == "BaseSlotPurchase" then
+            return d
+        end
+    end
+    return nil
+end
+
+-- Every extra slot past the one the floor unlock hands over is its own
+-- "Purchase Slot $100M" ProximityPrompt, and that one IS position gated:
+-- fired from across the map it did nothing (11 slots -> 11), fired while pinned
+-- on it the slot unlocked and 100M was charged. So this is the one routine that
+-- has to leave the blast zone.
+local function buySlots(budget)
+    if STATE.blastBusy then return false end
+    local bought = false
+    for _, s in ipairs(allSlots()) do
+        if not s:GetAttribute("SlotUnlocked") then
+            local prompt = slotPurchasePrompt(s)
+            if prompt then
+                local floor = tonumber(s:GetAttribute("FloorNumber")) or 2
+                local cost  = slotCost(floor)
+                -- slots only get more expensive further in, so a refusal here
+                -- means stop, not skip
+                if not (cost and cost <= budget) then return bought end
+
+                STATE.blastBusy = true
+                STATE.phase = "buying slot"
+                local parent = prompt.Parent
+                local anchor = parent:IsA("BasePart") and parent.Position
+                    or (parent:IsA("Attachment") and parent.WorldPosition)
+                    or s:GetPivot().Position
+                STATE.pinTarget = anchor + Vector3.new(0, 4, 0)
+                task.wait(1.2)
+                pcall(fireproximityprompt, prompt)
+                task.wait(1.4)
+                STATE.pinTarget = nil
+                STATE.blastBusy = false
+
+                if s:GetAttribute("SlotUnlocked") then
+                    budget = budget - cost
+                    bought = true
+                    note(("bought slot %s on floor %d for %s"):format(
+                        tostring(s:GetAttribute("SlotIndex")), floor, fmt(cost)))
+                else
+                    return bought
+                end
+            end
+        end
+    end
+    return bought
+end
+
+-- --------------------------------------------------- brainrot level upgrades
+-- RequestUpgradeBrainrotLevel(slotIndex) is NOT position gated - measured from
+-- 199 studs: slot 9 income 105.00K -> 136.50K for 472.50K, a 15 second payback.
+-- Max level is 500, so this is the strongest money sink in the game and it is
+-- driven purely off the server's reply: fire, then confirm the balance moved.
+-- The upgrade price is never parsed off the label, so no suffix table is needed.
+local function upgradeLevels(budget, maxUpgrades)
+    local done, spent = 0, 0
+    local slots = {}
+    for _, s in ipairs(allSlots()) do
+        if s:GetAttribute("Occupied") then slots[#slots + 1] = s end
+    end
+    -- cheapest first: a low level slot's next level is always the cheapest one
+    table.sort(slots, function(a, b)
+        return (tonumber(a:GetAttribute("IncomeRate")) or 0) < (tonumber(b:GetAttribute("IncomeRate")) or 0)
+    end)
+
+    for _, s in ipairs(slots) do
+        if done >= (maxUpgrades or 6) then break end
+        local idx = tonumber(s:GetAttribute("SlotIndex"))
+        if idx then
+            local before = num("CashRaw")
+            if before <= 0 or (before - spent) <= 0 then break end
+            fire(Remotes.RequestUpgradeBrainrotLevel, idx)
+            task.wait(0.45)
+            local after = num("CashRaw")
+            if after < before then                -- charged -> it worked
+                local cost = before - after
+                spent = spent + cost
+                done  = done + 1
+                if spent > budget then break end
+            end
+        end
+    end
+    if done > 0 then
+        note(("levelled %d brainrots for %s"):format(done, fmt(spent)))
+    end
+    return done > 0
 end
 
 -- ---------------------------------------------------------------- rebirth
@@ -632,18 +752,38 @@ task.spawn(function()
             task.wait(0.5)
         else
             -- ---- charge ----
+            -- Skipped entirely while there are empty slots and nothing in the
+            -- backpack to fill them with: an empty slot earns nothing, so a
+            -- body now beats a better body later.
+            local free = 0
+            for _, s in ipairs(unlockedSlots()) do
+                if not s:GetAttribute("Occupied") then free = free + 1 end
+            end
+            local needBodies = free > 0 and #backpackBrainrots() == 0
+
             local target   = nextZoneTarget()
             local deadline = os.clock() + CONFIG.maxChargeSeconds
             STATE.chargeTarget = target
-            while _G.__POWERBLAST == GEN and STATE.running and CONFIG.autoBlast
+            while (not needBodies) and _G.__POWERBLAST == GEN and STATE.running and CONFIG.autoBlast
                   and num("Power") < target and os.clock() < deadline do
                 STATE.phase = "charging"
                 equipAura()
-                note(("charging %s / %s for the next zone"):format(fmt(num("Power")), fmt(target)))
+                note(("charging %s / %s for %s"):format(
+                    fmt(num("Power")), fmt(target), zoneForPower(target)))
                 task.wait(0.5)
             end
 
             -- ---- burst ----
+            -- Wait for the lock rather than skipping. Skipping looked harmless
+            -- and was not: slot buying holds the lock, the burst was dropped,
+            -- and the outer loop then opened a FRESH charge window - so the farm
+            -- charged forever and fired zero blasts while the plot filled up.
+            local waitedForLock = 0
+            while STATE.blastBusy and waitedForLock < 15 and _G.__POWERBLAST == GEN do
+                STATE.phase = "waiting for lock"
+                task.wait(0.3); waitedForLock = waitedForLock + 0.3
+            end
+
             if not STATE.blastBusy then
                 STATE.blastBusy = true
                 for i = 1, CONFIG.burstBlasts do
@@ -664,19 +804,49 @@ end)
 loop(CONFIG.equipEvery,   "autoEquipBest", function() equipBest() end)
 loop(CONFIG.collectEvery, "autoCollect",   function() collectAll() end)
 
--- spending, in the order the user asked for: power first, then capacity
+-- Spending. Power first, then plot capacity, then the level sink.
+--
+-- The reserve here is the part that went wrong the first time: reserving the
+-- next aura unconditionally froze 1.4B of cash behind an 8.5B Mythic aura that
+-- also needed a rebirth we did not have, so floors, slots and levels all
+-- starved while 63 brainrots piled up unplaceable in the backpack. A reserve is
+-- only allowed to hold cash back when the target is actually REACHABLE soon -
+-- price <= cash + income * window - which is the rule that finally worked in
+-- Sell Ores. Anything further away than that is not a target, it is a wall.
+local function reserveForAura()
+    local target = nextAura()
+    if not target then return 0, nil end
+    local cost   = tonumber(target.cashCost) or 0
+    local reach  = num("CashRaw") + num("PassiveRate") * CONFIG.reserveWindow
+    if cost <= reach then return cost, target end
+    return 0, target
+end
+
 loop(CONFIG.spendEvery, "autoAura", function()
-    local cash = num("CashRaw")
-    if not buyAura() then
-        -- Only spend on anything else with what the next aura does not need.
-        local target = nextAura()
-        local reserve = target and (tonumber(target.cashCost) or 0) or 0
-        local spare = cash - reserve
-        if spare > 0 then
-            if CONFIG.autoBaseFloors and buyBaseFloor(spare) then return end
-            if CONFIG.autoUpgrades then buyUpgrades(spare) end
+    if buyAura() then return end
+
+    local reserve, target = reserveForAura()
+    local spare = num("CashRaw") - reserve
+    if spare <= 0 then
+        if target then
+            note(("saving %s for %s"):format(fmt(target.cashCost), target.displayName or target.id))
         end
+        return
     end
+
+    -- Levels first, and the numbers are not close: a level cost ~472.50K for
+    -- +31.50K/s, a 15 second payback, while a 100M slot seats a ~150K/s
+    -- brainrot and pays back in ~666s. Levels run every pass and are capped by
+    -- levelsPerPass so they cannot eat the whole balance; slots and floors then
+    -- take whatever is left over.
+    if CONFIG.autoLevels then upgradeLevels(spare, CONFIG.levelsPerPass) end
+
+    spare = num("CashRaw") - reserve
+    if spare <= 0 then return end
+
+    if CONFIG.autoBaseFloors and buyBaseUpgrade(spare) then return end
+    if CONFIG.autoSlots     and buySlots(spare)      then return end
+    if CONFIG.autoUpgrades  then buyUpgrades(spare) end
 end)
 
 loop(10, "autoRebirth", function() tryRebirth() end)
@@ -751,7 +921,21 @@ cAura:Toggle("Auto buy auras", CONFIG.autoAura, function(v) CONFIG.autoAura = v 
 cAura:Toggle("Auto upgrades", CONFIG.autoUpgrades, function(v) CONFIG.autoUpgrades = v end,
     "only with cash the next aura does not need")
 cAura:Toggle("Auto base floors", CONFIG.autoBaseFloors, function(v) CONFIG.autoBaseFloors = v end,
-    "100M / 1T / 10Q, +10 slots each", UI.theme.warn)
+    "unlocks the next floor - 100M / 1T / 10Q", UI.theme.warn)
+
+local cPlot = spend:Card("PLOT", 0)
+cPlot:Toggle("Buy locked slots", CONFIG.autoSlots, function(v) CONFIG.autoSlots = v end,
+    "Purchase Slot prompts, 100M each - the only routine that leaves the blast zone", UI.theme.warn)
+cPlot:Toggle("Level brainrots", CONFIG.autoLevels, function(v) CONFIG.autoLevels = v end,
+    "measured 15s payback per level, max level 500", UI.theme.good)
+cPlot:Slider("Levels per pass", 1, 25, CONFIG.levelsPerPass, function(v) CONFIG.levelsPerPass = math.floor(v) end)
+cPlot:Button("Buy slots + level now", function()
+    task.spawn(function()
+        buySlots(num("CashRaw"))
+        equipBest()
+        upgradeLevels(num("CashRaw"), 15)
+    end)
+end)
 
 local cReb = spend:Card("REBIRTH", 2)
 cReb:Toggle("Auto rebirth", CONFIG.autoRebirth, function(v) CONFIG.autoRebirth = v end,
@@ -790,6 +974,13 @@ task.spawn(function()
                 STATE.phase, STATE.blasts, STATE.granted, fmt(power), fmt(STATE.chargeTarget)),
             ("  last %s [%s]  zone %s  dist %d"):format(
                 STATE.lastReward, STATE.lastMutation, STATE.zoneName, STATE.lastDistance),
+            "PLOT",
+            (function()
+                local unl = unlockedSlots()
+                local occ = 0
+                for _, s in ipairs(unl) do if s:GetAttribute("Occupied") then occ = occ + 1 end end
+                return ("  slots %d/%d used   backpack %d waiting"):format(occ, #unl, #backpackBrainrots())
+            end)(),
             "ECONOMY",
             ("  earned %s   collected %s   aura %s"):format(
                 fmt(STATE.cashEarned), fmt(STATE.collected), tostring(attr("EquippedAura", "-"))),
@@ -813,7 +1004,9 @@ _G.__POWERBLAST_DBG = {
     CONFIG = CONFIG, STATE = STATE,
     doBlast = doBlast, equipBest = equipBest, collectAll = collectAll,
     buyAura = buyAura, nextAura = nextAura, auraData = auraData,
-    buyUpgrades = buyUpgrades, buyBaseFloor = buyBaseFloor,
+    buyUpgrades = buyUpgrades, buyBaseUpgrade = buyBaseUpgrade,
+    buySlots = buySlots, upgradeLevels = upgradeLevels, slotCost = slotCost,
+    reserveForAura = reserveForAura, backpackBrainrots = backpackBrainrots,
     tryRebirth = tryRebirth, rebirthRequirement = rebirthRequirement,
     nextZoneTarget = nextZoneTarget, zoneForPower = zoneForPower,
     claimDaily = claimDaily, claimSpin = claimSpin, claimOffline = claimOffline,

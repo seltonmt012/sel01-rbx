@@ -54,7 +54,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local LocalPlayer = Players.LocalPlayer
 
 local Shared            = ReplicatedStorage:WaitForChild("Shared")
-local RebirthConfig     = require(Shared.RebirthConfig)
+local LevelUtil         = require(Shared.LevelUtil)
 local WallHealth        = require(Shared.WallHealth)
 local KickBagConstants  = require(Shared.KickBagConstants)
 local WeaponConfig      = require(Shared.WeaponConfig)
@@ -78,8 +78,10 @@ local CONFIG = {
     autoEggs      = true,   -- best affordable egg, wins-priced ones only
     autoRewards   = true,   -- daily reward and banked spins
     autoTitles    = true,   -- free title rolls, equips the best one owned
+    autoPets      = true,   -- keeps the strongest pets in the slots (x185 measured)
     depthSafety   = 0.5,    -- a stage is only targeted if its worst wall costs
                             -- at most this share of the ammo balance
+    titleFloor    = 1000,   -- a roll costs 5 wins; do not roll a balance to zero
     boostShare    = 0.2,    -- never spend more than this share of the balance
     eggShare      = 0.5,    -- on one boost level / one egg
     hitGap        = 0.3,
@@ -91,7 +93,8 @@ local STATE = {
     ammo = 0, wins = 0, rebirths = 0, pets = 0,
     cursor = 1, target = 1, stage = 1,
     claims = 0, rebirthsDone = 0, eggsOpened = 0, boostsBought = 0,
-    bag = "-", weapon = "-", title = "-", titleMult = 0, uiOwner = nil,
+    bag = "-", weapon = "-", title = "-", titleMult = 0, petMult = 1,
+    level = 0, levelMax = 0, uiOwner = nil,
     note = "starting", phase = "idle",
 }
 
@@ -118,6 +121,7 @@ local EggSvc        = Knit.GetService("EggService")
 local DailySvc      = Knit.GetService("DailyRewardsService")
 local SpinSvc       = Knit.GetService("SpinWheelService")
 local TitleSvc      = Knit.GetService("TitleService")
+local PetsSvc       = Knit.GetService("PetsService")
 
 -- every RemoteFunction here is a Knit promise; nothing in this script may ever
 -- yield forever, so every call goes through the same timeout wrapper.
@@ -255,14 +259,15 @@ local function ownedWeapons()
     return set
 end
 
--- Rebirth is a THRESHOLD, not a price: the server checks wins >= getCost(r) and
--- then charges nothing (measured 16,160 wins before and after seven rebirths in
--- a row).  So every win spent on an egg pushes the next rebirth further away,
--- and a permanent reserve would starve the multipliers that make the depth -
--- which is where the wins come from in the first place.  The reserve therefore
--- only switches on once the threshold is actually reachable from income.
-local rebirthCost = 0
-local income      = 0            -- wins per second, rolling
+-- Rebirth costs NOTHING and is not gated on wins at all - RebirthConfig.getCost
+-- is a red herring.  Measured: a rebirth went through with 4.26M wins while
+-- getCost(19) claimed 7.39M were needed, and the balance did not move.  The real
+-- gate is the LEVEL: LevelUtil.getCappedLevel(ammo, rebirths) has to have
+-- reached LevelUtil.getMaxLevel(rebirths) (210 at 20 rebirths), and since a
+-- rebirth wipes the ammo bar the level falls back to zero and has to be re-earned
+-- - which is what looked like a three second cooldown in the first pass.
+-- Consequence: wins are never held back for a rebirth, everything is spendable.
+local income = 0            -- wins per second, rolling, for the panel
 local lastWins, lastWinTick = wins(), os.clock()
 
 local function refreshIncome()
@@ -275,18 +280,19 @@ local function refreshIncome()
         end
         lastWins, lastWinTick = balance, now
     end
-    local ok, cost = pcall(RebirthConfig.getCost, rebirths())
-    rebirthCost = ok and cost or math.huge
 end
 
-local function reserveActive()
-    return rebirthCost <= wins() + income * 90
+local function levelNow()
+    local ok, level = pcall(LevelUtil.getCappedLevel, ammo(), rebirths())
+    return (ok and type(level) == "number") and level or 0
 end
 
-local function spendable()
-    if reserveActive() then return math.max(0, wins() - rebirthCost) end
-    return wins()
+local function levelMax()
+    local ok, level = pcall(LevelUtil.getMaxLevel, rebirths())
+    return (ok and type(level) == "number") and level or math.huge
 end
+
+local function spendable() return wins() end
 
 ----------------------------------------------------------------------------
 -- actions
@@ -375,10 +381,11 @@ local function openBestEgg()
     end
 end
 
--- TitleService:Roll() costs nothing at all - measured 79 rolls in ten seconds
--- with the wins balance untouched - and a title is a flat multiplier from x1.2
--- (Noob) up to x150 (Eternal, 1 in 3,000,000).  So it is rolled forever in the
--- background and the best one owned is equipped.
+-- TitleService:Roll() costs 5 wins a roll (measured: 10 rolls, -50 wins; the
+-- first pass called it free because the farm was paying in faster than the rolls
+-- took out).  A title is a flat multiplier from x1.2 (Noob) up to x150 (Eternal,
+-- 1 in 3,000,000), so rolling is worth it - but only out of a balance that can
+-- carry it, which is why it is gated below.
 local function titleMultiplier(name)
     if not name then return 0 end
     local ok, mult = pcall(TitleConfig.getMultiplier, name)
@@ -395,6 +402,50 @@ local function rollTitle()
     STATE.title, STATE.titleMult = best or "-", bestMult
     if best and best ~= DATA.Title then
         if call(TitleSvc:Equip(best), 6) then note("title %s x%s equipped", best, tostring(bestMult)) end
+    end
+end
+
+-- Pets only count while EQUIPPED, and PetsService:SetEquipped wants the INDICES
+-- into DATA.Pets, not the pet ids - a call with the GUIDs is accepted, returns
+-- nil and equips nothing, which is exactly what it looked like at first.
+-- Measured with 92 pets owned: nothing equipped 543B ammo per click, the best
+-- three equipped 100.8T, a factor of 185.5 - and 1 + 79 + 61.5 + 44 = 185.5, so
+-- the multiplier is one plus the sum of the equipped pets and only the top
+-- PetSlots of them matter.
+local function equipBestPets()
+    local pets = DATA.Pets or {}
+    if #pets == 0 then return end
+    local slots = DATA.PetSlots or 3
+
+    local ranked = {}
+    for index, pet in ipairs(pets) do
+        ranked[#ranked + 1] = { index = index, mult = pet.Multiplier or 0 }
+    end
+    table.sort(ranked, function(a, b) return a.mult > b.mult end)
+
+    local want, total = {}, 0
+    for i = 1, math.min(slots, #ranked) do
+        want[#want + 1] = ranked[i].index
+        total = total + ranked[i].mult
+    end
+
+    local current = DATA.Equipped or {}
+    local same = #current == #want
+    if same then
+        local have = {}
+        for _, index in ipairs(current) do have[index] = true end
+        for _, index in ipairs(want) do
+            if not have[index] then same = false break end
+        end
+    end
+    if same then
+        STATE.petMult = 1 + total
+        return
+    end
+
+    if call(PetsSvc:SetEquipped(want), 6) ~= nil or true then
+        STATE.petMult = 1 + total
+        note("pets equipped x%.1f (top %d of %d)", 1 + total, #want, #pets)
     end
 end
 
@@ -434,17 +485,17 @@ loop("kick", CONFIG.kickGap, function()
     KickService:AddKick(bag)
 end)
 
--- rebirth.  charges nothing, three second server cooldown, resets only the
--- ammo bar - but it is refused below the wins threshold, so only ask when the
--- balance covers it.
+-- rebirth.  free, no wins involved; it only wants the level bar full, and the
+-- level comes straight out of the ammo balance.
 loop("rebirth", CONFIG.rebirthGap, function()
     if not CONFIG.autoRebirth then return end
-    if wins() < rebirthCost then return end
+    local level, maxLevel = levelNow(), levelMax()
+    STATE.level, STATE.levelMax = level, maxLevel
+    if level < maxLevel then return end
     local res = call(RebirthSvc:Rebirth(), 6)
     if type(res) == "table" and res.success then
         STATE.rebirthsDone = STATE.rebirthsDone + 1
-        note("rebirth %s (threshold was %s wins, nothing charged)",
-             tostring(res.rebirths), abbreviate(rebirthCost))
+        note("rebirth %s at level %d/%d", tostring(res.rebirths), level, maxLevel)
     end
 end)
 
@@ -453,6 +504,7 @@ loop("spend", 6, function()
     if CONFIG.autoWeapon then equipBestWeapon() end
     if CONFIG.autoBoosts then buyBoosts() end
     if CONFIG.autoEggs   then openBestEgg() end
+    if CONFIG.autoPets   then equipBestPets() end
 end)
 
 loop("rewards", 120, function()
@@ -460,7 +512,9 @@ loop("rewards", 120, function()
 end)
 
 loop("titles", 0.12, function()
-    if CONFIG.autoTitles then rollTitle() end
+    if not CONFIG.autoTitles then return end
+    if wins() < CONFIG.titleFloor then return end
+    rollTitle()
 end)
 
 -- stats for the panel
@@ -558,7 +612,7 @@ engine:Toggle("Auto walls", CONFIG.autoWalls, function(v) CONFIG.autoWalls = v e
 engine:Toggle("Auto claim", CONFIG.autoClaim, function(v) CONFIG.autoClaim = v end,
     "claims the deepest finished stage; a claim resets the run")
 engine:Toggle("Auto rebirth", CONFIG.autoRebirth, function(v) CONFIG.autoRebirth = v end,
-    "free, keeps guns/pets/boosts, only resets the ammo bar", UI.theme.warn)
+    "free and wins-free; fires the moment the level bar is full", UI.theme.warn)
 
 local spend = farmPage:Card("SPENDING", 2)
 spend:Toggle("Guns", CONFIG.autoWeapon, function(v) CONFIG.autoWeapon = v end,
@@ -571,6 +625,8 @@ spend:Toggle("Free rewards", CONFIG.autoRewards, function(v) CONFIG.autoRewards 
     "daily reward and every banked spin")
 spend:Toggle("Title rolls", CONFIG.autoTitles, function(v) CONFIG.autoTitles = v end,
     "rolls cost nothing; titles run x1.2 to x150 and equip themselves")
+spend:Toggle("Equip pets", CONFIG.autoPets, function(v) CONFIG.autoPets = v end,
+    "only equipped pets count - the best three measured x185 on the click")
 
 local tuning = farmPage:Card("TUNING", 1)
 tuning:Slider("Depth safety %", 10, 90, CONFIG.depthSafety * 100, function(v)
@@ -594,12 +650,13 @@ task.spawn(function()
             string.format("  claims %d   rebirths %d", STATE.claims, STATE.rebirthsDone),
             "ECONOMY",
             string.format("  ammo %s   wins %s", abbreviate(STATE.ammo), abbreviate(STATE.wins)),
-            string.format("  rebirths %d   pets %d   gun %s", STATE.rebirths, STATE.pets, tostring(STATE.weapon)),
+            string.format("  rebirths %d   pets %d (x%.1f)   gun %s",
+                STATE.rebirths, STATE.pets, STATE.petMult, tostring(STATE.weapon)),
             string.format("  target %s x%s   title %s x%s", tostring(bag), tostring(mult),
                 tostring(STATE.title), tostring(STATE.titleMult)),
             string.format("  income %s wins/s", abbreviate(income)),
-            string.format("  next rebirth at %s wins%s", abbreviate(rebirthCost),
-                reserveActive() and "  (holding wins)" or ""),
+            string.format("  level %d/%d%s", STATE.level or 0, STATE.levelMax or 0,
+                (STATE.level or 0) >= (STATE.levelMax or math.huge) and "  (rebirth ready)" or ""),
             "NOTE",
             "  " .. tostring(STATE.note),
         })
@@ -613,7 +670,8 @@ _G.__AMMOCLICK_DBG = {
     CONFIG = CONFIG, STATE = STATE, DATA = DATA, WALLS = WALLS,
     STAGE_RANGE = STAGE_RANGE, bestStage = bestStage, bestBag = bestBag,
     claimFreeWeapons = claimFreeWeapons, equipBestWeapon = equipBestWeapon,
-    buyBoosts = buyBoosts, openBestEgg = openBestEgg,
+    buyBoosts = buyBoosts, openBestEgg = openBestEgg, equipBestPets = equipBestPets,
+    rollTitle = rollTitle,
     claimFreeRewards = claimFreeRewards, call = call,
     cursor = function() return cursor end,
 }

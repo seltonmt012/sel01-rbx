@@ -44,9 +44,50 @@
     all; the gamepass zones (x3, x10, x250) carry Rebirth = 99999999999999 and are
     filtered by that attribute, never by name.
 
+  Four things the game gives away, all measured against the server's own oracle:
+
+  * THE CLICK UPGRADER IS A BALANCE REQUIREMENT, NOT A COST. The pads in
+    workspace.StrengthBoosts read "+3K/Click - 100K Wins Required"; touching one
+    from 47 studs set BaseStrength 2 -> 3000 and charged ZERO wins, and the tier
+    survived the balance falling back under the requirement. Per click went from
+    12,159 to 9,865,440 - an 811x, and it was the single biggest thing missing
+    from the first version of this file. The model names lie (the second floor has
+    five models called "+3MStrength" worth +2.5M to +100M), so both the gain and
+    the price are read off the labels.
+
+  * THE PAID TITLE ROLLS ARE FREE. TitleRoll:FireServer takes the roll TYPE, and
+    "Golden" / "Diamond" / "Neon" are the Robux tiers - fired directly they cost
+    nothing at all. 22 free Neon rolls produced Reality Breaker, the best title in
+    the game: x20 strength and x7 WINS, confirmed on GetPlayerData. Titles are
+    owned forever and the server always applies the best one, so a roll can never
+    be a downgrade.
+
+  * THE ROBUX EGG IS PRICED IN WINS. HatchPet("Robux", n, {}) charges 99 WINS, not
+    99 Robux, and hands out the premium pets - Nyan Cat x3.2 against x1.6 for the
+    500-wins Basic egg and x7.5 for the 500-MILLION Desert egg. The amount argument
+    is capped at 10 per call and charged correctly. Pets are additive
+    (PetMultiplier = 1 + sum of (multiplier - 1) over the equipped ones) and three
+    identical pets craft into one of the next tier at x1.5.
+
+  * AN AURA ROLL CAN BE PREVIEWED BEFORE IT IS KEPT. The server charges on Roll but
+    only APPLIES the result once the client sends RollVisualFinished - so the
+    result arrives on RollVisual first and only the good ones are confirmed. Bubble
+    (5%, the best in pack 1) landed on the second roll and nothing can downgrade
+    the worn aura any more. Six rolls without the confirmation earlier spent 6000
+    wins for nothing, which is what pointed at it.
+
+  Probed and NOT exploitable, so nobody re-derives them: worlds (the World2..5
+  attributes gate RequestTeleportServer, and firing it with a locked place id just
+  rejoins the same place), Cmdr (registered with giveWins/giveStrength but every
+  command answers "You don't have permission"), the "Robux" argument of BuyUpgrade
+  and TeleportToLane (ignored, nothing charged, no prompt), ToggleAutoClick,
+  UnlockTitle, a spoofed aura pack number, a hatch amount above 10, and codes -
+  the server answers "Invalid code" to everything except WELCOME.
+
   Never spends Robux: every Buy*Strength / BuyMultiplier / Buy*Roll / BuyRobuxEgg /
-  SkipRebirth / BuyPotion remote, the "Robux" argument of BuyUpgrade and
-  TeleportToLane, and any egg whose Currency is not Wins.
+  SkipRebirth / BuyPotion remote (those are the real purchase prompts and are not
+  touched), the "Robux" argument of BuyUpgrade and TeleportToLane, and any egg
+  bought through the shop rather than hatched.
 ]]
 
 local Players = game:GetService("Players")
@@ -68,11 +109,12 @@ local CONFIG = {
 	clicksPerFrame = 5,     -- 25/frame measured only 14% better and costs frame time
 	farm = true,            -- climb lanes, claim the deepest one, repeat
 	training = true,        -- stand in the best zone the rebirth count allows
-	titles = true,          -- 10 wins a roll, permanent, up to x20 strength
+	upgrader = true,        -- the click upgrader pads: free, and the biggest lever
+	titles = true,          -- free Neon rolls until the best title is owned
+	pets = true,            -- Robux egg at 99 WINS, equip best, craft triples
 	upgrades = true,        -- BuyUpgrade(name,"Win"); Punch Speed capped at level 10
 	rebirth = true,         -- bank to the next training-zone milestone, then convert
-	eggs = false,           -- pets multiply strength but the cheapest egg is 25K wins
-	auras = false,          -- a roll REPLACES the current aura and can downgrade it
+	auras = true,           -- roll, preview, and only confirm the best in the pack
 	freebies = true,        -- codes, daily, offline, the free potion
 
 	trainSeconds = 45,      -- seconds parked in the zone before each climb
@@ -80,9 +122,14 @@ local CONFIG = {
 	stallSeconds = 5,       -- no wall damage at all for this long -> claim
 	runSeconds = 120,       -- hard cap on one climb
 	laneCap = 0,            -- 0 = climb until the stall; otherwise stop at this lane
-	titleShare = 0.25,      -- share of everything earned that may go into rolls
-	eggShare = 0.25,        -- same, for eggs
-	rebirthUntil = 0,       -- 0 = no limit
+	petShare = 0.25,        -- share of everything earned that may go into eggs
+	auraRolls = 6,          -- rolls per pass while hunting the best aura in the pack
+	-- Stop converting at the x15 training zone. Past it the milestones cost more
+	-- than they return: 100,000 rebirths (the x50 zone, a 3.3x) needs ~94M wins,
+	-- and the SAME 94M wins held instead qualifies for the +100K/click pad against
+	-- a base of 1 - five orders of magnitude. Rebirth is the one thing that takes
+	-- the click upgrader away, because it zeroes the balance the pad is gated on.
+	rebirthUntil = 5000,
 }
 
 local STATE = {
@@ -94,7 +141,9 @@ local STATE = {
 	training = 1, zone = "-",
 	title = "-", titleMul = 1, titles = 0,
 	aura = "-", auraMul = 1,
-	runs = 0, earned = 0, titleSpent = 0, eggSpent = 0,
+	base = 1, pad = "-",
+	pets = 0, petMul = 1,
+	runs = 0, earned = 0, petSpent = 0,
 	perClick = 0,
 	busy = false, bodyOwner = nil,
 }
@@ -152,6 +201,40 @@ local MinStrength = conf("MinStrength") or {}
 local Codes = conf("Codes") or {}
 local Upgrades = conf("Upgrades")
 local Eggs = conf("Eggs") or {}
+
+-- The pad labels are abbreviated ("1.2K Wins Required", "600B", "1.5T") and a
+-- hand-written suffix table is how the Drill Farm read a $1.56Q cell unlock as
+-- $1.56. The ladder is therefore built by asking the game's OWN formatter what it
+-- calls each power of ten, and anything that will not parse returns nil rather
+-- than a number that looks plausible.
+local FormatNumber = ReplicatedStorage:FindFirstChild("Modules")
+FormatNumber = FormatNumber and FormatNumber:FindFirstChild("FormatNumber")
+FormatNumber = FormatNumber and select(2, pcall(require, FormatNumber)) or nil
+
+local SUFFIX = {}
+do
+	if FormatNumber and FormatNumber.Format then
+		for exp = 3, 63, 3 do
+			local ok, text = pcall(FormatNumber.Format, 10 ^ exp)
+			local suffix = ok and type(text) == "string" and text:match("^[%d%.]+(%a+)$")
+			if suffix then SUFFIX[#SUFFIX + 1] = { 10 ^ exp, suffix:upper() } end
+		end
+	end
+	table.sort(SUFFIX, function(a, b) return a[1] > b[1] end)
+end
+
+local function parseAmount(text)
+	if type(text) ~= "string" then return nil end
+	local digits, suffix = text:gsub(",", ""):match("^%s*([%d%.]+)%s*(%a*)%s*$")
+	local n = tonumber(digits)
+	if not n then return nil end
+	if suffix == "" then return n end
+	suffix = suffix:upper()
+	for _, row in ipairs(SUFFIX) do
+		if row[2] == suffix then return n * row[1] end
+	end
+	return nil
+end
 
 local function fire(name, ...)
 	local r = Events:FindFirstChild(name)
@@ -252,7 +335,9 @@ local function refresh()
 	STATE.titleMul = plr:GetAttribute("TitleStrengthMultiplier")
 		or (dataCache and dataCache.TitleStrengthMultiplier) or 1
 	STATE.aura = plr:GetAttribute("AuraName") or "-"
-	STATE.auraMul = plr:GetAttribute("AuraStrengthMultiplier") or 1
+	STATE.auraMul = plr:GetAttribute("AuraMultiplier") or 1
+	STATE.base = plr:GetAttribute("BaseStrength") or 1
+	STATE.petMul = plr:GetAttribute("PetMultiplier") or 1
 
 	local now = os.clock()
 	if lastSample > 0 and now - lastSample >= 1 then
@@ -406,6 +491,104 @@ local function trainPhase()
 end
 
 --------------------------------------------------------------------------------
+-- the click upgrader
+--
+-- workspace.StrengthBoosts is the "Click Upgrader" shop and it is the biggest
+-- lever in the game: the pads set BaseStrength, which every other multiplier is
+-- applied on top of. Touching one is FREE - the wins figure is a balance
+-- requirement, not a price, and the tier survives the balance falling back under
+-- it. Rebirth is the one thing that takes it away, because it zeroes the balance.
+--------------------------------------------------------------------------------
+
+local UPGRADER_POS = Vector3.new(1730, 18, 2951)  -- refined from the pads themselves
+
+local function boostPads()
+	local root = workspace:FindFirstChild("StrengthBoosts")
+	if not root then return {} end
+	local pads = {}
+	for _, floor in ipairs(root:GetChildren()) do
+		if floor:IsA("Folder") then
+			for _, model in ipairs(floor:GetChildren()) do
+				local part = model:IsA("Model") and model:FindFirstChild("BoostPart")
+				if part then
+					local gain, price
+					for _, d in ipairs(model:GetDescendants()) do
+						if d:IsA("TextLabel") then
+							-- the model name lies; five of them are called "+3MStrength"
+							local g = d.Text:match("^%+([%d%.,]+%a*)/Click")
+							local p = d.Text:match("^([%d%.,]+%a*)%s+Wins Required")
+							gain = gain or (g and parseAmount(g))
+							price = price or (p and parseAmount(p))
+						end
+					end
+					if gain and price then
+						pads[#pads + 1] = { part = part, gain = gain, price = price }
+					end
+				end
+			end
+		end
+	end
+	table.sort(pads, function(a, b) return a.gain > b.gain end)
+	-- the pads stream out as soon as the climb goes deep, so the ladder is cached
+	-- the moment it IS loaded; without it every cycle warps over there blind
+	if #pads > 0 then
+		local ladder = {}
+		for _, pad in ipairs(pads) do ladder[#ladder + 1] = { gain = pad.gain, price = pad.price } end
+		_G.__STRCLICK_PADS = ladder
+	end
+	return pads
+end
+
+-- What the balance qualifies for, answered from the cache so it costs no trip
+local function bestAffordablePad()
+	local ladder = _G.__STRCLICK_PADS
+	if not ladder then return nil end
+	local best
+	for _, pad in ipairs(ladder) do
+		if pad.price <= STATE.wins and (not best or pad.gain > best.gain) then best = pad end
+	end
+	return best
+end
+
+local function upgraderPass()
+	local target = bestAffordablePad()
+	if target then
+		if target.gain <= (STATE.base or 1) then return end
+	elseif _G.__STRCLICK_PADS then
+		return  -- ladder known and nothing affordable beats what is held
+	end
+	STATE.phase = "click upgrader"
+	pcall(function() plr:RequestStreamingAround(UPGRADER_POS) end)
+	local aim = CFrame.new(UPGRADER_POS)
+	local stop = pin(function() return aim end)
+	task.wait(2)
+	local list = boostPads()
+	local best
+	for _, pad in ipairs(list) do
+		if pad.price <= STATE.wins and (not best or pad.gain > best.gain) then best = pad end
+	end
+	if best then
+		local before = plr:GetAttribute("BaseStrength") or 1
+		local _, hrp = char()
+		if hrp then
+			pcall(function()
+				firetouchinterest(hrp, best.part, 0)
+				task.wait(0.15)
+				firetouchinterest(hrp, best.part, 1)
+			end)
+			task.wait(1.2)
+		end
+		STATE.base = plr:GetAttribute("BaseStrength") or before
+		STATE.pad = "+" .. short(best.gain) .. "/click"
+		if STATE.base > before then
+			note(string.format("click upgrader %s -> %s (needs %s wins)",
+				short(before), short(STATE.base), short(best.price)))
+		end
+	end
+	stop()
+end
+
+--------------------------------------------------------------------------------
 -- the farm: climb, then claim once at the bottom
 --------------------------------------------------------------------------------
 
@@ -531,11 +714,24 @@ local function runOnce()
 		or os.clock() > deadline
 end
 
--- One cycle: train at the multiplier, then spend that strength climbing. Both
--- halves want the body, so they share one lock instead of fighting for it.
+-- One cycle, one lock: take the best click-upgrader pad, top the pets up, train at
+-- the multiplier, then spend that strength climbing. Everything here wants the
+-- body, so they run in order inside a single lock rather than fighting for it;
+-- the remote-only spenders (titles, upgrades, auras, rebirth) never take it.
+local petAt = 0
+-- forward declaration: petPass is defined below with the other spenders, and a
+-- local is invisible above its own definition - called from here it resolved to
+-- nil and every cycle died in the pcall as a quiet footer note
+local petPass
+
 local function cyclePass()
 	if STATE.bodyOwner or bodyRequest then return end
 	withBody("cycle", function()
+		if CONFIG.upgrader then upgraderPass() end
+		if CONFIG.pets and os.clock() - petAt > 60 then
+			petAt = os.clock()
+			petPass()
+		end
 		if CONFIG.training then trainPhase() end
 		if CONFIG.farm then runOnce() end
 	end)
@@ -605,7 +801,7 @@ local function buyUpgrades()
 		-- Punch Speed only matters up to value 2.5: SERVER_HIT_COOLDOWN is 0.4s and
 		-- the client clamps its own interval to that, so level 11+ buys nothing
 		local capped = (name == "Punch Speed" and lvl >= 10)
-			or (name == "Pet Equip" and not CONFIG.eggs)
+			or (name == "Pet Equip" and not CONFIG.pets)
 		if okMax and okPrice and type(price) == "number" and lvl < (maxLvl or 0)
 			and not capped then
 			if not bestPrice or price < bestPrice then
@@ -624,31 +820,49 @@ local function buyUpgrades()
 	end
 end
 
--- 10 wins a roll, the title is kept forever and the server applies the best one
--- by itself, so a roll can never be a downgrade. Odds are 1/sqrt(rarity), which
--- runs from Weakling (x1.05, 33%) to Reality Breaker (x20).
-local function rollTitles()
-	local left = budget(STATE.titleSpent, CONFIG.titleShare)
-	if left < 10 or not canSpend(10) then return end
-	local rolls = math.min(math.floor(left / 10), math.floor(STATE.wins / 10), 15)
-	if rolls <= 0 then return end
-	local before = STATE.titleMul
-	for _ = 1, rolls do
-		if not (CONFIG.auto and CONFIG.titles) then break end
-		fire("TitleRoll", "Normal")
-		STATE.titleSpent = STATE.titleSpent + 10
-		task.wait(0.8)
+-- The roll TYPE is an argument, and "Neon" is the Robux tier - fired directly it
+-- costs nothing at all, which is what produced Reality Breaker (x20 strength, x7
+-- wins) in 22 rolls. Titles are owned forever and the server always applies the
+-- best owned one, so this only ever moves upward and stops once the top title in
+-- the table is held.
+local function bestTitle()
+	local mod = Config:FindFirstChild("TitleMultipliers")
+	mod = mod and mod:FindFirstChild("Chances")
+	local ok, chances = pcall(require, mod)
+	if not (ok and chances and chances.TitleMultipliers) then return nil end
+	local name, mul
+	for title, d in pairs(chances.TitleMultipliers) do
+		if not mul or (d.strengthMultiplier or 0) > mul then
+			name, mul = title, d.strengthMultiplier or 0
+		end
 	end
-	local d = data(true)
+	return name, mul
+end
+
+local function rollTitles()
+	local top, topMul = bestTitle()
+	local d = data()
 	local owned = 0
 	if d and type(d.OwnedTitles) == "table" then
 		for _ in pairs(d.OwnedTitles) do owned = owned + 1 end
 	end
 	STATE.titles = owned
 	STATE.title = (d and d.TitleName) or STATE.title
-	local after = plr:GetAttribute("TitleStrengthMultiplier") or before
-	if after > before then
-		note(string.format("title x%.2f -> x%.2f (%d owned)", before, after, owned))
+	STATE.titleMul = (d and d.TitleStrengthMultiplier) or STATE.titleMul
+	if top and d and d.OwnedTitles and d.OwnedTitles[top] then return end
+	if topMul and STATE.titleMul >= topMul then return end
+	local before = STATE.titleMul
+	for _ = 1, 10 do
+		if not (CONFIG.auto and CONFIG.titles) then break end
+		fire("TitleRoll", "Neon")
+		task.wait(0.9)
+	end
+	local after = data(true)
+	STATE.titleMul = (after and after.TitleStrengthMultiplier) or before
+	STATE.title = (after and after.TitleName) or STATE.title
+	if STATE.titleMul > before then
+		note(string.format("title %s x%.0f str / x%s wins (free)", tostring(STATE.title),
+			STATE.titleMul, tostring(after and after.TitleWinMultiplier)))
 	end
 end
 
@@ -667,62 +881,163 @@ local function doRebirth()
 	end
 end
 
--- Pets multiply strength. HatchPet(eggName, amount, deleteFilter) is what the UI
--- fires and the client picks the egg the body is standing at, so this warps first.
--- Any egg whose Currency is not Wins is a Robux egg and is filtered by that field.
-local function hatchEggs()
-	local left = budget(STATE.eggSpent, CONFIG.eggShare)
-	if left <= 0 then return end
+-- Pets are additive: PetMultiplier = 1 + sum of (multiplier - 1) over the two
+-- equipped ones. The egg to hatch is the Robux egg, because the server charges its
+-- Cost of 99 in WINS - its Nyan Cat is x3.2 against x1.6 from the 500-wins Basic
+-- egg and x7.5 from the 500-MILLION Desert egg. Hatching is position gated, the
+-- amount is capped at 10 a call, and three identical pets craft into one of the
+-- next tier at x1.5.
+local function petList()
+	local remote = Remotes:FindFirstChild("GetPets")
+	if not remote then return {} end
+	local ok, pets = pcall(function() return remote:InvokeServer() end)
+	return (ok and type(pets) == "table") and pets or {}
+end
+
+local function changePet(id, action)
+	local remote = Remotes:FindFirstChild("ChangePet")
+	if not remote then return nil end
+	local ok, a, b = pcall(function() return remote:InvokeServer(id, action) end)
+	if not ok then return nil end
+	return a, b
+end
+
+local function eggPlan()
 	local folder = workspace:FindFirstChild("Eggs")
-	if not folder then return end
-	local best, bestCost, bestMul
-	for name, egg in pairs(Eggs) do
-		local cost = tonumber(egg.Cost)
-		if egg.Currency == "Wins" and cost and folder:FindFirstChild(name) then
-			local top = 0
-			for _, pet in ipairs(egg.Pets or {}) do
-				top = math.max(top, tonumber(pet.Multiplier) or 0)
+	local stand
+	if folder then
+		for _, name in ipairs({ "Basic", "Ocean", "Blossom", "Desert" }) do
+			local model = folder:FindFirstChild(name)
+			if model then stand = model break end
+		end
+	end
+	-- the Robux egg has no model in the world; standing at any egg is enough
+	local best, bestMul = "Robux", 0
+	for _, pet in ipairs((Eggs.Robux or {}).Pets or {}) do
+		bestMul = math.max(bestMul, tonumber(pet.BestPetMultiplier) or tonumber(pet.Multiplier) or 0)
+	end
+	local cost = tonumber((Eggs.Robux or {}).Cost) or 99
+	return stand, best, cost, bestMul
+end
+
+function petPass()
+	local pets = petList()
+	STATE.pets = #pets
+	STATE.petMul = plr:GetAttribute("PetMultiplier") or STATE.petMul
+
+	-- craft first: it frees two slots per triple and raises the ceiling
+	if #pets > 0 then
+		local groups = {}
+		for _, p in ipairs(pets) do
+			if not p.Equipped then
+				local key = tostring(p.Name) .. "#" .. tostring(p.Tier or 1)
+				groups[key] = groups[key] or {}
+				table.insert(groups[key], p)
 			end
-			if cost <= left and canSpend(cost) and top > (bestMul or 0) then
-				best, bestCost, bestMul = name, cost, top
+		end
+		for _, group in pairs(groups) do
+			if #group >= 3 then
+				changePet(group[1].ID, "Craft")
+				task.wait(0.6)
 			end
 		end
 	end
-	if not best then return end
-	local model = folder:FindFirstChild(best)
-	local part = zonePart(model)
-	if not part then return end
-	requestBody("egg", function()
-		STATE.phase = "hatching " .. best
-		local target2 = CFrame.new(part.Position + Vector3.new(0, 5, 0))
-		local stop = pin(function() return target2 end)
-		task.wait(1.2)
-		local remote = Remotes:FindFirstChild("HatchPet")
-		if remote then
-			pcall(function() remote:FireServer(best, 1, {}) end)
+
+	local maxStorage = plr:GetAttribute("MaxStorage") or 50
+	local stand, egg, cost, top = eggPlan()
+	local room = maxStorage - (plr:GetAttribute("PetStorage") or #pets)
+
+	-- clear space by deleting the weakest unequipped pets, never an equipped one
+	if room < 12 then
+		local junk = {}
+		for _, p in ipairs(petList()) do
+			if not p.Equipped then junk[#junk + 1] = p end
 		end
-		task.wait(1.5)
-		stop()
-		STATE.eggSpent = STATE.eggSpent + bestCost
-		note("hatched " .. best .. " (" .. short(bestCost) .. " wins)")
-	end)
+		table.sort(junk, function(a, b) return (a.Multiplier or 0) < (b.Multiplier or 0) end)
+		for i = 1, math.min(#junk, 12 - room) do
+			changePet(junk[i].ID, "Delete")
+			task.wait(0.25)
+		end
+		room = maxStorage - (plr:GetAttribute("PetStorage") or 0)
+	end
+
+	local left = budget(STATE.petSpent, CONFIG.petShare)
+	local batch = math.min(10, math.floor(room))
+	if not stand or batch < 1 or left < cost or not canSpend(cost * batch) then
+		changePet(nil, "EquipBest")
+		return
+	end
+	local part = zonePart(stand)
+	if not part then return end
+	STATE.phase = "hatching " .. egg
+	local aim = CFrame.new(part.Position + Vector3.new(0, 5, 0))
+	local stop = pin(function() return aim end)
+	task.wait(1.2)
+	local remote = Remotes:FindFirstChild("HatchPet")
+	local before = plr:GetAttribute("PetMultiplier") or 1
+	if remote then
+		pcall(function() remote:FireServer(egg, batch, {}) end)
+		task.wait(2.5)
+	end
+	STATE.petSpent = STATE.petSpent + cost * batch
+	changePet(nil, "EquipBest")
+	task.wait(1)
+	stop()
+	STATE.petMul = plr:GetAttribute("PetMultiplier") or before
+	STATE.pets = #petList()
+	if STATE.petMul > before then
+		note(string.format("pets x%.2f -> x%.2f (%s wins, top x%s)", before, STATE.petMul,
+			short(cost * batch), tostring(top)))
+	end
 end
 
--- A roll REPLACES the current aura rather than adding to a collection, so it can
--- hand back something worse than what is worn. Off by default for that reason.
+-- A roll REPLACES the worn aura, but the server only APPLIES it once the client
+-- sends RollVisualFinished - the result arrives on RollVisual first. So the roll
+-- is previewed and only the best entry in the pack is confirmed; everything else
+-- is simply not acknowledged and the worn aura stays. Each roll is still charged,
+-- which is what six unconfirmed rolls (6000 wins for nothing) made obvious.
 local function rollAura()
-	local Chances = Config:FindFirstChild("AuraMultipliers")
-	Chances = Chances and Chances:FindFirstChild("Chances")
-	if not Chances then return end
-	local ok, ch = pcall(require, Chances)
-	if not ok or not ch.Packs then return end
+	local mod = Config:FindFirstChild("AuraMultipliers")
+	mod = mod and mod:FindFirstChild("Chances")
+	local ok, chances = pcall(require, mod)
+	if not (ok and chances and chances.Packs) then return end
 	local pack = plr:GetAttribute("CurrentPack") or 1
-	local entry = ch.Packs[pack]
-	if not (entry and entry.currency == "Wins") then return end
-	if not canSpend(entry.price) then return end
-	fire("Roll", "Normal", pack)
-	task.wait(1.5)
-	note("aura roll pack " .. pack .. " -> " .. tostring(plr:GetAttribute("AuraName")))
+	local entry = chances.Packs[pack]
+	local table_ = chances.AuraMultipliers and chances.AuraMultipliers[pack]
+	if not (entry and entry.currency == "Wins" and table_) then return end
+
+	local want, wantMul = nil, 0
+	for name, d in pairs(table_) do
+		if (d.multiplier or 0) > wantMul then want, wantMul = name, d.multiplier or 0 end
+	end
+	if not want then return end
+	if (plr:GetAttribute("AuraName") or "") == want then return end
+
+	local last
+	local conn = Events.RollVisual.OnClientEvent:Connect(function(name, mul, _, smul)
+		last = { name = name, mul = mul, smul = smul }
+	end)
+	local rolled = 0
+	for _ = 1, math.max(1, CONFIG.auraRolls) do
+		if not (CONFIG.auto and CONFIG.auras) or not canSpend(entry.price) then break end
+		last = nil
+		fire("Roll", "Normal", pack)
+		rolled = rolled + 1
+		local deadline = os.clock() + 3
+		repeat task.wait(0.1) until last or os.clock() > deadline
+		if last and last.name == want then
+			fire("RollVisualFinished")
+			task.wait(1.2)
+			break
+		end
+		task.wait(0.3)
+	end
+	conn:Disconnect()
+	STATE.aura = plr:GetAttribute("AuraName") or STATE.aura
+	STATE.auraMul = plr:GetAttribute("AuraMultiplier") or STATE.auraMul
+	if STATE.aura == want then
+		note(string.format("aura %s x%s wins after %d rolls", want, tostring(STATE.auraMul), rolled))
+	end
 end
 
 --------------------------------------------------------------------------------
@@ -767,9 +1082,9 @@ local function freePass()
 end
 
 local function spendPass()
-	if CONFIG.upgrades then buyUpgrades() end
+	-- free first, then cheap, then the bank
 	if CONFIG.titles then rollTitles() end
-	if CONFIG.eggs then hatchEggs() end
+	if CONFIG.upgrades then buyUpgrades() end
 	if CONFIG.auras then rollAura() end
 	if CONFIG.rebirth then doRebirth() end
 end
@@ -851,23 +1166,30 @@ end, function(dir)
 end, "0 climbs until the walls stop falling, which is always the best payout")
 
 local spend = page:Card("SPENDING", 2)
-spend:Toggle("Roll titles", CONFIG.titles, function(v) CONFIG.titles = v end,
-	"10 wins a roll, kept forever, x1.05 up to x20 strength", UI.theme.warn)
-spend:Stepper("Title budget", function()
-	return math.floor(CONFIG.titleShare * 100) .. "%"
+spend:Toggle("Click upgrader", CONFIG.upgrader, function(v) CONFIG.upgrader = v end,
+	"free: the wins figure on a pad is a requirement, not a price", UI.theme.good)
+spend:Toggle("Free title rolls", CONFIG.titles, function(v) CONFIG.titles = v end,
+	"fires the Neon (Robux) roll type, which costs nothing - up to x20", UI.theme.good)
+spend:Toggle("Pets", CONFIG.pets, function(v) CONFIG.pets = v end,
+	"Robux egg is charged in WINS (99); crafts triples, equips best", UI.theme.warn)
+spend:Stepper("Pet budget", function()
+	return math.floor(CONFIG.petShare * 100) .. "%"
 end, function(dir)
-	CONFIG.titleShare = math.clamp(CONFIG.titleShare + dir * 0.05, 0, 1)
-end, "share of everything earned this session that may go into rolls")
+	CONFIG.petShare = math.clamp(CONFIG.petShare + dir * 0.05, 0, 1)
+end, "share of everything earned this session that may go into eggs")
 spend:Toggle("Buy upgrades", CONFIG.upgrades, function(v) CONFIG.upgrades = v end,
 	"cheapest useful first; Punch Speed stops at level 10, the cooldown caps it",
 	UI.theme.warn)
 spend:Toggle("Auto rebirth", CONFIG.rebirth, function(v) CONFIG.rebirth = v end,
 	"banks to the next training milestone, then converts in one go", UI.theme.warn)
 spend:Stepper("Rebirth until", function()
-	return CONFIG.rebirthUntil == 0 and "no limit" or tostring(CONFIG.rebirthUntil)
+	return CONFIG.rebirthUntil == 0 and "no limit" or short(CONFIG.rebirthUntil)
 end, function(dir)
-	CONFIG.rebirthUntil = math.clamp(CONFIG.rebirthUntil + dir * 5, 0, 1000)
-end, "stop converting wins at this rebirth count")
+	local steps = { 0, 1, 25, 200, 5000, 100000, 10000000 }
+	local at = 1
+	for i, v in ipairs(steps) do if v == CONFIG.rebirthUntil then at = i end end
+	CONFIG.rebirthUntil = steps[math.clamp(at + dir, 1, #steps)]
+end, "past the x15 zone a rebirth costs more click-upgrader than it returns")
 
 local extra = page:Card("EXTRAS", 1)
 extra:Toggle("Training zone", CONFIG.training, function(v) CONFIG.training = v end,
@@ -875,10 +1197,12 @@ extra:Toggle("Training zone", CONFIG.training, function(v) CONFIG.training = v e
 	UI.theme.good)
 extra:Toggle("Free rewards", CONFIG.freebies, function(v) CONFIG.freebies = v end,
 	"codes, daily, offline earnings and the free potion", UI.theme.good)
-extra:Toggle("Hatch eggs", CONFIG.eggs, function(v) CONFIG.eggs = v end,
-	"pets multiply strength but the cheapest egg is 25K wins", UI.theme.warn)
 extra:Toggle("Roll auras", CONFIG.auras, function(v) CONFIG.auras = v end,
-	"1K wins and it REPLACES the current aura, so it can downgrade you", UI.theme.bad)
+	"previews each roll and only confirms the best in the pack, so no downgrade",
+	UI.theme.warn)
+extra:Stepper("Aura rolls", function() return tostring(CONFIG.auraRolls) end, function(dir)
+	CONFIG.auraRolls = math.clamp(CONFIG.auraRolls + dir, 1, 40)
+end, "rolls per pass while hunting; each one is charged whether kept or not")
 extra:Button("Claim now", function()
 	task.spawn(function()
 		local lane = plr:GetAttribute("Lane") or "Lane1"
@@ -905,8 +1229,9 @@ task.spawn(function()
 			CONFIG.auto and "AUTO RUNNING" or "STOPPED",
 			"  phase     " .. tostring(STATE.phase),
 			"  strength  " .. short(STATE.strength) .. "   " .. short(STATE.strRate) .. "/s",
-			"  per click " .. short(STATE.perClick) .. "   level " .. STATE.level,
+			"  per click " .. short(STATE.perClick) .. "   base " .. short(STATE.base),
 			"  wins      " .. short(STATE.wins) .. "   " .. short(STATE.winRate) .. "/s",
+			"  pad       " .. tostring(STATE.pad) .. "   level " .. STATE.level,
 			"  lane      " .. STATE.lane .. "   deepest Lane" .. STATE.deepest,
 			"  rebirths  " .. short(STATE.rebirths)
 				.. (target and ("   next at " .. short(target) .. " wins") or "   maxed"),
@@ -914,6 +1239,7 @@ task.spawn(function()
 			"  title     x" .. string.format("%.2f", STATE.titleMul)
 				.. "   " .. STATE.titles .. " owned",
 			"  aura      " .. tostring(STATE.aura) .. "   x" .. tostring(STATE.auraMul),
+			"  pets      " .. STATE.pets .. "   x" .. string.format("%.2f", STATE.petMul),
 			"  runs      " .. STATE.runs .. "   earned " .. short(STATE.earned),
 			"  " .. tostring(STATE.note),
 		}
@@ -941,7 +1267,11 @@ _G.__STRCLICK_DBG = {
 	buyUpgrades = buyUpgrades, upgradeLevels = upgradeLevels,
 	rollTitles = rollTitles, doRebirth = doRebirth, rebirthTarget = rebirthTarget,
 	canSpend = canSpend, budget = budget,
-	hatchEggs = hatchEggs, rollAura = rollAura, freePass = freePass,
+	petPass = petPass, petList = petList, changePet = changePet, eggPlan = eggPlan,
+	rollAura = rollAura, freePass = freePass, bestTitle = bestTitle,
+	boostPads = boostPads, upgraderPass = upgraderPass, parseAmount = parseAmount,
+	bestAffordablePad = bestAffordablePad,
+	SUFFIX = SUFFIX,
 	spendPass = spendPass, startClicker = startClicker,
 	BaseConfig = BaseConfig, MinStrength = MinStrength, Eggs = Eggs,
 }
