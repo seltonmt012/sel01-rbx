@@ -142,6 +142,27 @@
       "detect": "local rs = game:GetService('ReplicatedStorage') local m = rs:FindFirstChild('Modules') local sh = m and m:FindFirstChild('Shared') if not sh then return false end local svc = sh:FindFirstChild('RemoteEventService') return svc ~= nil and svc:FindFirstChild('AddSpeedRemoteEvent') ~= nil and sh:FindFirstChild('EvolutionData') ~= nil"
     },
     {
+      "alias": "jetpackbrainrots",
+      "name": "+1 Jetpack for Brainrots",
+      "file": "games/jetpackbrainrots.lua",
+      "places": [
+        80234914611737
+      ],
+      "status": "ok",
+      "detect": "local rs = game:GetService('ReplicatedStorage') local src = rs:FindFirstChild('Source') if not src then return false end local info = src:FindFirstChild('Info') return info ~= nil and info:FindFirstChild('BrainrotsInfo') ~= nil and info:FindFirstChild('JetpacksInfo') ~= nil and game.Workspace:FindFirstChild('Brainrots') ~= nil"
+    },
+    {
+      "alias": "mineclick",
+      "name": "+1 Mine Per Click",
+      "file": "games/mineclick.lua",
+      "places": [
+        74193805629461
+      ],
+      "status": "ok",
+      "note": "game runs the ZAC anticheat - executor fingerprint scan only, no movement checks",
+      "detect": "local rs = game:GetService('ReplicatedStorage') local rem = rs:FindFirstChild('Remotes') local srv = rem and rem:FindFirstChild('Server') local db = rs:FindFirstChild('Databases') return srv ~= nil and srv:FindFirstChild('HitWall') ~= nil and db ~= nil and db:FindFirstChild('PickaxeList') ~= nil"
+    },
+    {
       "alias": "eggfarm",
       "name": "Grow a Chicken Fighter",
       "file": "games/eggfarm.lua",
