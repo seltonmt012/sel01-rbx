@@ -20,12 +20,25 @@
 --     frame gained 37 in the same 4s. One per Heartbeat is the entire budget.
 --     The game's own SpeedClient fires it at "MoveDirection > 0 and 8 studs moved
 --     and 0.1s elapsed", i.e. 10/s while running - so the cap is the legit rate.
+--     Re-measured much later at tier 12 / x4000: 8.8 credits/s, and 1, 3 and 10
+--     calls per frame all produced the IDENTICAL gain. One window in between read
+--     25.8/s - that was a global event boost (ReplicatedStorage.GlobalBoosts
+--     .SpeedMultipliers holds a NumberValue while one runs and Helper multiplies
+--     by its NAME), not a higher call rate. Do not tune the loop on it.
+--   * The win pin does NOT cost speed. Same 7s window, farmWins on: 70,857,142/s
+--     and 11,428 wins/s; farmWins off: 70,857,142/s and no wins. Identical.
 --   * Gain per call = UpgradesData[tier].Step x Helper.GetTotalMultiplier(plr),
 --     and Xp rises by the same amount as Speed (level 8 -> 10 in the same 6s that
 --     paid 106 speed). Speed is therefore never spent, it is the progress bar.
 --   * Win plates: Workspace.Wins["1".."10"], paying WinsData 1/3/9/30/80/200/700/
 --     2000/7000/20000. Pad 10 credited 20,000 from a plain CFrame pin with the
 --     player at stage 0, speed 145 - there is NO stage, level or speed gate.
+--     Every world ships its OWN WinsData and its own upgrade pads, which is why
+--     nothing here hardcodes a number. World 2 (place 107654875426558, 5 rebirths
+--     + upgrade 10) pays 60K to 1,000,000,000 per touch and carries upgrade pads
+--     11-22 with Step up to 2,000,000. Measured on arrival: 985,619,427 wins/s
+--     against 20,000/s in world 1, and the panel went from x4,500 to x660,000
+--     multiplier and 2.45T speed/s inside half a minute.
 --     Holding still pays ONCE (0 in 3s): Touched needs the parts to separate, so
 --     the pin flips on/off every frame. Cooldown is per PLAYER, not per pad -
 --     alternating two pads measured 9,250/s against 10,000/s on the single best.
@@ -106,6 +119,7 @@ local CONFIG = {
 	autoItems = true,       -- the bag: additive multipliers + EquipBest
 	autoFree = true,        -- daily login, offline speed
 	autoWorld = false,      -- OFF: this teleports to a different PlaceId
+	useTreadmill = false,   -- park on the best free treadmill INSTEAD of the plate
 
 	evolveReserve = true,   -- never spend the wins the next evolution needs
 	rebirthHold = 45,       -- seconds of win income to wait for a reachable evolve
@@ -117,6 +131,8 @@ local STATE = {
 	phase = "idle",
 	winTarget = nil,        -- Vector3 the pin flips on and off
 	winPadName = "-",
+	treadTarget = nil,
+	treadName = "-",
 	errand = nil,           -- {pos = Vector3} takes the body over from the farm
 	uiOwner = nil,
 	wins = 0, speed = 0, level = 0, rebirths = 0,
@@ -195,6 +211,11 @@ local function startPin()
 			hrp.CFrame = CFrame.new(flip % 6 < 3 and errand.pos or (errand.pos + Vector3.new(0, 12, 0)))
 			return
 		end
+		-- The treadmill has to be STOOD on, so it is an either/or with the plate.
+		if CONFIG.useTreadmill and STATE.treadTarget then
+			hrp.CFrame = CFrame.new(STATE.treadTarget)
+			return
+		end
 		if CONFIG.farmWins and STATE.winTarget then
 			hrp.CFrame = CFrame.new(flip % 2 == 0 and STATE.winTarget or (STATE.winTarget + FLIP_UP))
 		end
@@ -234,6 +255,38 @@ local function retargetWins()
 	STATE.winTarget = bestPos
 	STATE.winPadName = "plate " .. best .. " (" .. short(bestValue) .. "/touch)"
 	STATE.blocked = nil
+end
+
+-- Treadmills, measured rather than believed. They do NOT multiply our calls -
+-- the server runs its own tick there and ours lose out, so the advertised
+-- multiplier is not what shows up on the balance. Same 5s window, same tier:
+--   no treadmill  47,520/s        no treadmill  91.6M/s and 94.9M/s (control)
+--   Basic   x1    37,620/s  -21%  Rebirth3 x2   101.2M/s  +8%
+--   Rebirth1 x1.5 46,640/s   -2%
+-- So the only tier that is worth anything is a high one, it is worth single
+-- digit percent, and standing there costs the ENTIRE win farm (20K wins/s).
+-- Hence the toggle, and hence it is off.
+local TreadmillData = require(Shared.TreadmillData)
+
+local function retargetTreadmill()
+	local folder = Workspace:FindFirstChild("Treadmills")
+	if not folder then return end
+	local reb = rebirths()
+	local best, bestMult, bestPos = nil, -1, nil
+	for _, model in ipairs(folder:GetChildren()) do
+		local entry = TreadmillData[model.Name]
+		-- GamepassName means Robux, and the panel never touches those.
+		if entry and not entry.GamepassName and reb >= (entry.RebirthsRequired or 0) then
+			local part = model:FindFirstChild("TouchPart")
+			if part and (entry.Multiplier or 0) > bestMult then
+				best, bestMult, bestPos = model.Name, entry.Multiplier, part.Position + Vector3.new(0, 4, 0)
+			end
+		end
+	end
+	if bestPos then
+		STATE.treadTarget = bestPos
+		STATE.treadName = best .. " x" .. bestMult
+	end
 end
 
 --------------------------------------------------------------------------------
@@ -477,6 +530,13 @@ local function tryWorld()
 		if entry.PlaceId == game.PlaceId then hereNum = tonumber(name:match("%d+")) or 1 end
 	end
 	if num <= hereNum then return end
+	-- The next world is a different PlaceId, so nothing in this VM survives the
+	-- jump. Arm the hub loader first - it is what brings this script back up on
+	-- the other side, and it re-arms itself for the world after that.
+	pcall(function()
+		queue_on_teleport('loadstring(game:HttpGet("https://raw.githubusercontent.com/' ..
+			'seltonmt012/sel01-rbx/main/loader.lua"))()')
+	end)
 	STATE.note = "teleporting to " .. want
 	WorldsRE:FireServer(want)
 end
@@ -567,7 +627,9 @@ loop(1, nil, function()
 	local ok, multiplier = pcall(Helper.GetTotalMultiplier, plr)
 	STATE.multiplier = ok and multiplier or 1
 
-	if not STATE.errand then retargetWins() end
+	if not STATE.errand then
+		if CONFIG.useTreadmill then retargetTreadmill() else retargetWins() end
+	end
 	if STATE.phase == "idle" then STATE.phase = "farm" end
 
 	tryEvolve()
@@ -619,6 +681,10 @@ main:Toggle("Farm speed", CONFIG.farmSpeed, function(v) CONFIG.farmSpeed = v end
 	"AddSpeed once per frame, the server caps it at ~9/s")
 main:Toggle("Farm wins", CONFIG.farmWins, function(v) CONFIG.farmWins = v end,
 	"flips on and off the plate - holding still pays once")
+main:Toggle("Use treadmill", CONFIG.useTreadmill, function(v)
+	CONFIG.useTreadmill = v
+	STATE.note = v and "treadmill instead of the win plate" or "back on the win plate"
+end, "measured: Basic -21%, Rebirth1 -2%, Rebirth3 +8% - and no wins at all", UI.theme.bad)
 main:Stepper("Win plate", function()
 	return CONFIG.winPad == 0 and "Auto (best)" or ("Plate " .. CONFIG.winPad)
 end, function(dir)
@@ -679,7 +745,7 @@ task.spawn(function()
 				short((UpgradesData[PS.UpgradeSelected.Value] or {}).Step or 0),
 			"  now    " .. PS.EvolutionSelected.Value .. "  ->  " .. STATE.evolveName ..
 				" x" .. STATE.evolveMult,
-			"  plate  " .. STATE.winPadName,
+			"  spot   " .. (CONFIG.useTreadmill and ("treadmill " .. STATE.treadName) or STATE.winPadName),
 			"  worn   " .. PS.TrailEquipped.Value .. " / " .. PS.AuraEquipped.Value,
 			"  bought " .. STATE.bought,
 			"  " .. STATE.note,
