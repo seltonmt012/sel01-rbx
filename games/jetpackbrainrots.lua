@@ -53,7 +53,12 @@ local CONFIG = {
 	autoFreeRewards = true,  -- daily / playtime / group / offline
 	pickupSettle = 1.2,      -- seconds pinned on the item before firing the prompt
 	replaceWeak = true,      -- a full plot swaps its worst earner for a better one
-	upgradesPerPass = 3,     -- prompt fires per levelling pass
+	upgradesPerPass = 4,     -- slots levelled per pass, best payback first
+	paybackCap = 600,        -- seconds; refuse levels slower than this
+	swapsPerPass = 6,        -- how many slots one reconciliation may fix
+	swapMargin = 1.25,       -- a spare must beat the worst slot by this factor
+	sellSpare = true,        -- sell whatever the plot has outgrown
+	autoLuckyBlocks = true,  -- open any lucky block the account is holding
 }
 
 local STATE = {
@@ -61,7 +66,8 @@ local STATE = {
 	slotsUsed = 0, slotsTotal = 0, carrying = false,
 	picked = 0, placed = 0, claims = 0, claimed = 0,
 	upgrades = 0, upgradeSpend = 0, rewards = 0, rebirthsDone = 0,
-	replaced = 0, skipped = 0, rebirthNeed = 0, worst = 0, best = 0,
+	replaced = 0, skipped = 0, sold = 0, blocksOpened = 0,
+	rebirthNeed = 0, worst = 0, best = 0,
 	phase = "idle", note = "-", uiOwner = "-", target = "-",
 	startCash = 0, startedAt = os.clock(),
 }
@@ -199,6 +205,11 @@ local function note(text) STATE.note = text end
 -- above its definition, and because every action runs inside pcall that would
 -- have surfaced as a quiet footer note instead of an error.
 local rarityOf
+
+-- The farm loop calls the reconciliation on the way home, and that lives down in
+-- the money section with the selling. Same reason as above: a local is invisible
+-- above its definition and the pcall around every action would swallow it.
+local reconcilePlot
 
 local function character()
 	local char = plr.Character
@@ -384,9 +395,29 @@ local function carrying()
 	return plr:GetAttribute("isCarryingRewards") == true
 end
 
+-- Brainrots spawn in two places: the normal field (workspace.Brainrots) and
+-- whatever a lucky block drops (workspace.LuckyBlockBrainrots). Both use the
+-- same "Pick up" prompt, so both are scanned - otherwise a block's reward would
+-- sit on the floor while the farm flies past it.
+local function brainrotSources()
+	local out = {}
+	for _, name in ipairs({ "Brainrots", "LuckyBlockBrainrots" }) do
+		local folder = workspace:FindFirstChild(name)
+		if folder then out[#out + 1] = folder end
+	end
+	return out
+end
+
 local function bestBrainrot()
-	local folder = workspace:FindFirstChild("Brainrots")
-	if not folder then return nil end
+	local sources = brainrotSources()
+	if #sources == 0 then return nil end
+	local folder = { GetDescendants = function()
+		local all = {}
+		for _, source in ipairs(sources) do
+			for _, node in ipairs(source:GetDescendants()) do all[#all + 1] = node end
+		end
+		return all
+	end }
 	local best, bestScore, bestName
 	for _, d in ipairs(folder:GetDescendants()) do
 		if d:IsA("ProximityPrompt") then
@@ -481,7 +512,9 @@ local function placeCarried()
 	-- accept it.
 	if carrying() then crossLine() end
 	local slot = freeSlot()
-	if not slot and CONFIG.replaceWeak then
+	-- Swapping lives in reconcilePlot now, which walks every slot; this only
+	-- seats what is waiting when there is room.
+	if false then
 		-- Full plot: only worth it if what is waiting actually beats the worst
 		-- earner. Both numbers are the server's own revenuePerSecond, so this is
 		-- a like-for-like comparison rather than a guess from the rarity name.
@@ -588,6 +621,9 @@ local function farmCycle()
 	STATE.target = entry.model.Name .. " (" .. tostring(entry.rarity) .. ")"
 	if pickUp(entry) and CONFIG.autoPlace then
 		placeCarried()
+		-- One trip home, one full pass over the plot: seat what is better, sell
+		-- what is not. Doing it here means the walk back is never wasted.
+		reconcilePlot()
 	end
 end
 
@@ -616,6 +652,260 @@ local function claimAll()
 		note("claimed " .. short(gained))
 	end
 	return gained
+end
+
+-- The swap leaves the brainrot it pulled out sitting in the inventory, and the
+-- place prompt happily puts it straight back in the freed slot. That churn is
+-- what made the plot's worst slot oscillate between 0.066M/s and 0.088M/s while
+-- the inventory grew from 2 to 5 entries. Selling the leftovers ends it.
+--
+-- There is no sell remote at all - the whole thing is the SellStand in the
+-- world: "Sell Inventory" (everything loose) and a disabled "Sell Brainrot" for
+-- the carried one. Selling the inventory is safe *by construction* because
+-- placed brainrots live in baseInventory, not inventory - but it is still only
+-- fired once nothing waiting beats the worst slot, so a good pickup is never
+-- sold by accident.
+-- Which spares are worth keeping, and it is not just the single best one.
+--
+-- The plot has many slots, so if three spares each beat three different weak
+-- slots, all three belong on the plot and none of them may be sold. Locking only
+-- the top entry - which is what the first version did - sold the second and
+-- third best along with the junk. Compare the sorted spares against the sorted
+-- plot, position by position.
+local function keepers()
+	local waiting = inventoryBrainrots()          -- already best first
+	local placed = placedBrainrots()
+	table.sort(placed, function(a, b) return a.revenue < b.revenue end)  -- worst first
+	local keep = {}
+	for i, spare in ipairs(waiting) do
+		local rival = placed[i]
+		if rival and spare.revenue > rival.revenue * CONFIG.swapMargin then
+			keep[#keep + 1] = spare
+		end
+	end
+	return keep, waiting
+end
+
+-- Lock everything worth keeping so the sell pass cannot take it, and hand back
+-- the list so the caller can unlock afterwards.
+local function lockKeepers()
+	local keep = keepers()
+	for _, entry in ipairs(keep) do
+		invoke("ToggleItemLock", 4, entry.uid)
+		task.wait(0.15)
+	end
+	return keep
+end
+
+local function unlockAll(list)
+	for _, entry in ipairs(list or {}) do
+		invoke("ToggleItemLock", 4, entry.uid)
+		task.wait(0.1)
+	end
+end
+
+-- `force` is used from inside a swap, where the keepers are already locked and
+-- everything else in the inventory is by definition the junk being cleared out.
+local function sellJunkInventory(force)
+	local waiting = inventoryBrainrots()
+	if #waiting == 0 then return 0 end
+	local locked
+	if not force then
+		-- Protect every spare that still beats a slot before anything is sold.
+		locked = lockKeepers()
+		waiting = inventoryBrainrots()
+		if #locked >= #waiting then
+			unlockAll(locked)
+			return 0
+		end
+	end
+
+	local stand = workspace.Map and workspace.Map:FindFirstChild("Stands")
+	stand = stand and stand:FindFirstChild("SellStand")
+	local prompt = stand and stand:FindFirstChild("ProximityPromptSellInventory", true)
+	if not prompt then return 0 end
+
+	local before = num(data().currencies.cash)
+	STATE.phase = "selling " .. #waiting .. " spare"
+	local ok, pivot = pcall(function() return stand:GetPivot() end)
+	if not ok then return 0 end
+	withPin(function() return pivot + Vector3.new(0, 4, 0) end, function()
+		task.wait(1.0)
+		pcall(function() fireproximityprompt(prompt, 1) end)
+		task.wait(1.5)
+	end)
+	local gained = num(data().currencies.cash) - before
+	local left = #inventoryBrainrots()
+	if gained > 0 then
+		STATE.sold = STATE.sold + math.max(#waiting - left, 0)
+		note(string.format("sold %d spare for %s, kept %d",
+			math.max(#waiting - left, 0), short(gained), left))
+	end
+	if locked then unlockAll(locked) end
+	return gained
+end
+
+-- The reconciliation pass, and the part that had to be rewritten: walk the WHOLE
+-- plot, price every slot, price everything waiting in the inventory, and keep
+-- swapping while the best spare beats the worst slot. The first version did one
+-- swap per farm trip and then let the place prompt put the brainrot it had just
+-- pulled straight back, so the same slot kept flipping between two values while
+-- the inventory grew.
+--
+-- A swap only happens with a real margin, otherwise two near-equal brainrots
+-- trade places forever, and each round is confirmed against the plot's own worst
+-- value before the next one starts.
+function reconcilePlot()
+	if not CONFIG.replaceWeak then return 0 end
+	local swaps = 0
+	for _ = 1, CONFIG.swapsPerPass do
+		if _G.__JETPACK ~= generation then break end
+		local waiting = inventoryBrainrots()
+		if #waiting == 0 then break end
+		local worst, worstValue = weakestPlaced()
+
+		-- A free slot needs no swap at all, just a placement.
+		if freeSlot() then
+			if not placeCarried() then break end
+			swaps = swaps + 1
+		elseif worst and waiting[1].revenue > worstValue * CONFIG.swapMargin then
+			local weakSlot = slotByName(worst.slot)
+			local pickup = weakSlot and weakSlot:FindFirstChild("PickupPrompt", true)
+			if not pickup then break end
+			STATE.phase = "swapping slot " .. worst.slot
+
+			-- The order here is the whole fix. Pulling a slot and firing Place
+			-- straight after just puts the SAME brainrot back - the prompt has no
+			-- idea which inventory entry we meant, and the plot's worst slot kept
+			-- flipping between two values while nothing improved.
+			--
+			-- So the inventory is reduced to exactly one candidate first:
+			--   1. lock EVERY spare still worth a slot (ToggleItemLock, verified:
+			--      locked = true). Locking only the best one sold the second and
+			--      third best along with the junk.
+			--   2. pull the weak slot   (it lands in the inventory, unlocked)
+			--   3. sell the inventory   (the lock is respected - 6 entries went to
+			--      1, the locked one survived and the junk paid $46.15B)
+			--   4. place; the pulled brainrot is gone, so the prompt seats a keeper
+			local locked = lockKeepers()
+			task.wait(0.2)
+
+			local ok, pivot = pcall(function() return weakSlot:GetPivot() end)
+			if not ok then break end
+			withPin(function() return pivot + Vector3.new(0, 4, 0) end, function()
+				task.wait(0.9)
+				pcall(function() fireproximityprompt(pickup, 1) end)
+				task.wait(1.0)
+			end)
+
+			if CONFIG.sellSpare then sellJunkInventory(true) end
+
+			withPin(function() return pivot + Vector3.new(0, 4, 0) end, function()
+				task.wait(0.8)
+				local place = weakSlot:FindFirstChild("PlacePrompt", true)
+				if place then
+					pcall(function() fireproximityprompt(place, 1) end)
+					task.wait(1.2)
+				end
+			end)
+			-- Unlock again so the next sell pass is not blocked by them.
+			unlockAll(locked)
+			local _, newWorst = weakestPlaced()
+			if newWorst > worstValue then
+				swaps = swaps + 1
+				STATE.replaced = STATE.replaced + 1
+				note(string.format("slot %s: %s/s -> %s/s", worst.slot,
+					short(worstValue), short(newWorst)))
+			else
+				-- No improvement: the prompt seated something no better. Stop
+				-- rather than trade the same two brainrots back and forth.
+				STATE.skipped = STATE.skipped + 1
+				note("swap did not improve slot " .. worst.slot .. " - stopping")
+				break
+			end
+		else
+			break
+		end
+	end
+	-- Whatever is still loose is by definition worse than every slot, so it is
+	-- money rather than clutter.
+	if CONFIG.sellSpare then sellJunkInventory() end
+	return swaps
+end
+
+-- Lucky blocks.
+--
+-- Thirteen of them exist in Info.LuckyBlocksInfo - ten "regular" (Common through
+-- Secret, plus Celestial and Divine) and three "premium" OP_ ones - and none
+-- carries a price, so they are not bought: they are held as inventory items and
+-- opened at Map.Stands.LuckyBlock (-110, 55, -42), whose prompt reads
+-- "Open / Lucky Blocks". The reward lands in workspace.LuckyBlockBrainrots,
+-- which the farm scan already covers.
+--
+-- Honest status: this account owns none right now, so the open itself could not
+-- be confirmed end to end. Firing the prompt with an empty inventory did nothing
+-- and cost nothing, and `OpenLuckyBlock()` with no argument returned nil. The
+-- routine therefore only acts when a block is actually held, and it confirms by
+-- the block leaving the inventory rather than by any return value.
+local LuckyBlocksInfo
+do
+	local ok, info = pcall(require, Source.Info.LuckyBlocksInfo)
+	if ok then LuckyBlocksInfo = info end
+end
+
+local function heldLuckyBlocks()
+	local d = data()
+	local out = {}
+	if not d or type(d.inventory) ~= "table" then return out end
+	local byKey = LuckyBlocksInfo and LuckyBlocksInfo.byKey or {}
+	for uid, item in pairs(d.inventory) do
+		if type(item) == "table" then
+			local kind = tostring(item.type or ""):lower()
+			if kind:find("lucky") or (item.key and byKey[item.key]) then
+				out[#out + 1] = { uid = uid, key = item.key, rarity =
+					byKey[item.key] and byKey[item.key].rarity or nil }
+			end
+		end
+	end
+	return out
+end
+
+local function openLuckyBlocks()
+	local blocks = heldLuckyBlocks()
+	if #blocks == 0 then return 0 end
+
+	local stand = workspace.Map and workspace.Map:FindFirstChild("Stands")
+	stand = stand and stand:FindFirstChild("LuckyBlock")
+	local prompt = stand and stand:FindFirstChild("ProximityPromptLuckyBlockStand", true)
+	if not stand or not prompt then return 0 end
+
+	STATE.phase = "opening " .. #blocks .. " lucky block(s)"
+	local ok, pivot = pcall(function() return stand:GetPivot() end)
+	if not ok then return 0 end
+	local opened = 0
+	withPin(function() return pivot + Vector3.new(0, 4, 0) end, function()
+		task.wait(1.0)
+		for _, block in ipairs(blocks) do
+			if _G.__JETPACK ~= generation then break end
+			pcall(function() fireproximityprompt(prompt, 1) end)
+			task.wait(1.2)
+			-- The remote is tried with the block's own id as well; whichever of
+			-- the two the server accepts, the inventory entry disappearing is
+			-- the only thing counted.
+			invoke("OpenLuckyBlock", 5, block.uid)
+			task.wait(0.8)
+			local stillHeld = false
+			for _, remaining in ipairs(heldLuckyBlocks()) do
+				if remaining.uid == block.uid then stillHeld = true end
+			end
+			if not stillHeld then
+				opened = opened + 1
+				STATE.blocksOpened = STATE.blocksOpened + 1
+				note("opened a " .. tostring(block.key) .. " lucky block")
+			end
+		end
+	end)
+	return opened
 end
 
 local function claimFreeRewards()
@@ -670,46 +960,91 @@ end
 -- rounding error, while three fires of the prompt took a slot from level 24 to
 -- 27, income 33.4M/s -> 70.0M/s for 2.60B. That is a 71 second payback, which is
 -- better than almost anything else in this game, so it is worth doing early.
-local function upgradeBrainrots()
-	local placed = placedBrainrots()
-	if #placed == 0 then return false end
-	-- Level the strongest one: the price scales with the brainrot, and so does
-	-- the gain, but the multiplier lands on top of a bigger number.
-	table.sort(placed, function(a, b) return a.revenue > b.revenue end)
-	local target = placed[1]
-	local slot = slotByName(target.slot)
-	if not slot then return false end
-	local prompt = slot:FindFirstChild("UpgradePrompt", true)
-	if not prompt then return false end
+-- Every slot carries its own price tag: TextLabelCost ("$66.97B") next to
+-- TextLabelLevel ("Level 36 > 37") and TextLabelRevenue. Those are the green
+-- buttons floating over the plot, and they are what the upgrade actually costs.
+-- The strings are parsed with the game's own BigNum.fromString - a hand written
+-- suffix table is how another game in this repo read a $1.56Q unlock as $1.56.
+local function labelNumber(label)
+	if not label or not label:IsA("TextLabel") then return nil end
+	local cleaned = label.Text:gsub("<[^>]->", ""):gsub("[%$,%s]", "")
+	if cleaned == "" then return nil end
+	local ok, value = pcall(BigNum.fromString, cleaned)
+	if ok and type(value) == "table" then return num(value) end
+	return tonumber(cleaned)
+end
 
-	local d = data()
-	local cashBefore = d and num(d.currencies.cash) or 0
-	local genBefore = d and d.statistics and num(d.statistics.genPerSecond) or 0
+-- One entry per placed brainrot: what levelling it costs and what it is worth.
+-- A level multiplies the brainrot's revenue by about 1.28 (measured: level 24 to
+-- 27 took 33.4M/s to 70.0M/s), so the gain is proportional to what the slot
+-- already earns and the ranking is a real payback, not a price sort - the
+-- cheapest slot is by definition the weakest one.
+local LEVEL_GAIN = 0.28
 
-	STATE.phase = "levelling slot " .. tostring(target.slot)
-	local ok, pivot = pcall(function() return slot:GetPivot() end)
-	if not ok then return false end
-	withPin(function() return pivot + Vector3.new(0, 4, 0) end, function()
-		task.wait(1.0)
-		for _ = 1, CONFIG.upgradesPerPass do
-			if _G.__JETPACK ~= generation then break end
-			pcall(function() fireproximityprompt(prompt, 1) end)
-			task.wait(0.7)
+local function upgradeCandidates()
+	local out = {}
+	for _, entry in ipairs(placedBrainrots()) do
+		local slot = slotByName(entry.slot)
+		local prompt = slot and slot:FindFirstChild("UpgradePrompt", true)
+		local cost = slot and labelNumber(slot:FindFirstChild("TextLabelCost", true))
+		-- A maxed brainrot has no price left on its button, so an unparsable or
+		-- missing cost is the max check - there is no MAX_LEVEL constant in any
+		-- config here (the highest seen on a plot was 36).
+		if slot and prompt and cost and cost > 0 then
+			local gain = entry.revenue * LEVEL_GAIN
+			out[#out + 1] = {
+				slot = entry.slot, node = slot, prompt = prompt, cost = cost,
+				gain = gain, key = entry.key, level = entry.level,
+				payback = cost / math.max(gain, 1),
+			}
 		end
-	end)
-
-	local d2 = data()
-	local spent = cashBefore - (d2 and num(d2.currencies.cash) or cashBefore)
-	local gained = (d2 and d2.statistics and num(d2.statistics.genPerSecond) or genBefore) - genBefore
-	if spent > 0 then
-		STATE.upgrades = STATE.upgrades + 1
-		STATE.upgradeSpend = STATE.upgradeSpend + spent
-		note(string.format("slot %s levelled: -%s for +%s/s (%.0fs payback)",
-			tostring(target.slot), short(spent), short(gained),
-			spent / math.max(gained, 1)))
-		return true
 	end
-	return false
+	table.sort(out, function(a, b) return a.payback < b.payback end)
+	return out
+end
+
+local function upgradeBrainrots()
+	local d = data()
+	if not d then return false end
+	local cash = num(d.currencies.cash)
+	local candidates = upgradeCandidates()
+	if #candidates == 0 then return false end
+
+	-- Walk the ranking and buy everything that is affordable and pays for itself
+	-- inside the cap, best rate first. One pass touches several slots, which is
+	-- the difference to the first version - that one only ever levelled the
+	-- single strongest brainrot and left every green button on the plot alone.
+	local bought = 0
+	for _, c in ipairs(candidates) do
+		if _G.__JETPACK ~= generation then break end
+		if bought >= CONFIG.upgradesPerPass then break end
+		if c.payback <= CONFIG.paybackCap and c.cost <= cash then
+			local cashBefore = num(data().currencies.cash)
+			local genBefore = num(data().statistics.genPerSecond)
+			STATE.phase = "levelling slot " .. tostring(c.slot)
+			local ok, pivot = pcall(function() return c.node:GetPivot() end)
+			if ok then
+				withPin(function() return pivot + Vector3.new(0, 4, 0) end, function()
+					task.wait(0.9)
+					pcall(function() fireproximityprompt(c.prompt, 1) end)
+					task.wait(0.8)
+				end)
+			end
+			local d2 = data()
+			local spent = cashBefore - (d2 and num(d2.currencies.cash) or cashBefore)
+			local gained = (d2 and num(d2.statistics.genPerSecond) or genBefore) - genBefore
+			if spent > 0 then
+				bought = bought + 1
+				cash = d2 and num(d2.currencies.cash) or cash
+				STATE.upgrades = STATE.upgrades + 1
+				STATE.upgradeSpend = STATE.upgradeSpend + spent
+				note(string.format("slot %s %s lvl%d: -%s for +%s/s (%.0fs)",
+					tostring(c.slot), tostring(c.key), c.level, short(spent),
+					short(gained), spent / math.max(gained, 1)))
+			end
+		end
+	end
+	return bought > 0
 end
 
 -- Rebirth is gated on BOOST, nothing else, and the ladder comes from the game's
@@ -878,6 +1213,11 @@ end)
 
 loop(120, "autoFreeRewards", claimFreeRewards)
 
+loop(45, "autoLuckyBlocks", function()
+	if #heldLuckyBlocks() == 0 then return end
+	withUI("lucky blocks", openLuckyBlocks)
+end)
+
 -- Panel ----------------------------------------------------------------------
 
 local UI = (_G.__SEL and _G.__SEL.ui) or loadstring(readfile("ui-template.lua"))()
@@ -913,7 +1253,13 @@ cashCard:Slider("Claim every (s)", 5, 120, CONFIG.claimEvery, function(v)
 end)
 cashCard:Toggle("Auto free rewards", CONFIG.autoFreeRewards,
 	function(v) CONFIG.autoFreeRewards = v end, "offline, daily, playtime, group")
+cashCard:Toggle("Auto lucky blocks", CONFIG.autoLuckyBlocks,
+	function(v) CONFIG.autoLuckyBlocks = v end,
+	"opens held blocks at the stand, reward is picked up by the farm")
 cashCard:Button("Claim now", function() task.spawn(claimAll) end)
+cashCard:Button("Open blocks now", function()
+	task.spawn(function() withUI("lucky blocks", openLuckyBlocks) end)
+end)
 
 local upCard = basePage:Card("UPGRADES", 1)
 upCard:Toggle("Auto level brainrots", CONFIG.autoUpgradeBrainrot,
@@ -974,6 +1320,10 @@ _G.__JETPACK_DBG = {
 	farmCycle = farmCycle, claimAll = claimAll, claimFreeRewards = claimFreeRewards,
 	crossLine = crossLine,
 	upgradeBrainrots = upgradeBrainrots, rebirthIfWorth = rebirthIfWorth, buy = buy,
+	upgradeCandidates = upgradeCandidates, labelNumber = labelNumber,
+	reconcilePlot = reconcilePlot, sellJunkInventory = sellJunkInventory,
+	keepers = keepers, lockKeepers = lockKeepers, unlockAll = unlockAll,
+	heldLuckyBlocks = heldLuckyBlocks, openLuckyBlocks = openLuckyBlocks,
 	rarityOf = rarityOf, rarityValue = rarityValue,
 }
 
