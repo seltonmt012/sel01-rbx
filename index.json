@@ -118,6 +118,30 @@
       "detect": "local rs = game:GetService('ReplicatedStorage') local r = rs:FindFirstChild('Remote') if not r then return false end local e = r:FindFirstChild('Event') return e ~= nil and e:FindFirstChild('Level') ~= nil and e.Level:FindFirstChild('[C-S]Click') ~= nil and r:FindFirstChild('Function') ~= nil and r.Function:FindFirstChild('FishShow') ~= nil"
     },
     {
+      "alias": "wingsbrainrots",
+      "name": "+1 Wings for Brainrots",
+      "file": "games/wingsbrainrots.lua",
+      "places": [
+        84332574190497
+      ],
+      "status": "ok",
+      "detect": "local rs = game:GetService('ReplicatedStorage') local rem = rs:FindFirstChild('Remotes') local ev = rs:FindFirstChild('Events') return rem ~= nil and ev ~= nil and rem:FindFirstChild('PlaceBestRequested') ~= nil and ev:FindFirstChild('RequestSlotUpgrade') ~= nil and game.Workspace:FindFirstChild('ItemSpawners') ~= nil"
+    },
+    {
+      "alias": "speedevolve",
+      "name": "+1 Speed Evolve",
+      "file": "games/speedevolve.lua",
+      "places": [
+        83569851223739,
+        107654875426558,
+        140128707775918,
+        140544451091543
+      ],
+      "status": "ok",
+      "note": "each world is its own place id; all four run the same script",
+      "detect": "local rs = game:GetService('ReplicatedStorage') local m = rs:FindFirstChild('Modules') local sh = m and m:FindFirstChild('Shared') if not sh then return false end local svc = sh:FindFirstChild('RemoteEventService') return svc ~= nil and svc:FindFirstChild('AddSpeedRemoteEvent') ~= nil and sh:FindFirstChild('EvolutionData') ~= nil"
+    },
+    {
       "alias": "eggfarm",
       "name": "Grow a Chicken Fighter",
       "file": "games/eggfarm.lua",
