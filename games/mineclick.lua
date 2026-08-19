@@ -334,7 +334,10 @@ local function grab(part)
 	local _, id = itemValue(part)
 	STATE.targetName = "loot " .. tostring(id)
 
-	local before = data().Cash or 0
+	-- Confirm against the BAG, not the balance: a pickup fills the backpack and
+	-- the cash only arrives later at the surface, so watching Cash here counted
+	-- every successful grab as a failure.
+	local before = storage()
 	task.wait(CONFIG.settle)
 
 	-- The pickup is an E press, not a touch. Two things made the first versions
@@ -360,7 +363,7 @@ local function grab(part)
 			firetouchinterest(hrp, part, 1)
 		end)
 		task.wait(0.25)
-		if (data().Cash or 0) > before then
+		if storage() > before then
 			STATE.picked = STATE.picked + 1
 			return true
 		end
