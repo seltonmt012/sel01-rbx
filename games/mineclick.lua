@@ -148,6 +148,13 @@ local CONFIG = {
 	-- nothing at all at 1.2s, because somebody else always got there first.
 	settle = 0.35,
 	stageDwell = 6,          -- seconds spent breaking one stage before re-checking
+	-- HitWall is throttled on purpose. Hammering it at ~8/s cleared 450 -> 489
+	-- walls and then the server stopped accepting the remote entirely - on every
+	-- stage, with the pickaxe equipped, the character alive and the client
+	-- reporting stage=15 wall=1 mining=true, while Click kept crediting normally.
+	-- Only a server change brought it back. 0.3s is close to what a human swing
+	-- rate looks like and has not tripped it.
+	hitRate = 0.3,
 	lootWait = 0.6,          -- seconds to wait for a drop before calling a stage empty
 }
 
@@ -284,7 +291,14 @@ end
 -- StagesUnlocked alone is the wrong test: the record read 1..12 while stages 3,
 -- 10 and 12 were still refusing their loot. Defined here because freeLoot needs
 -- it and a local is invisible above its definition.
+-- Ask the SERVER, not the client cache. StageClient.BrokenWalls only fills from
+-- BreakWall events, and those only arrive while the character stands in that
+-- stage's zone - so once the body was parked in a training area to farm the
+-- click multiplier, every stage but the one it had visited looked unfinished and
+-- the script re-mined stage 2 forever while StagesUnlocked already read 14.
 local function stageDone(stageNum)
+	local unlocked = data().StagesUnlocked or {}
+	if unlocked[stageNum] or unlocked[tostring(stageNum)] then return true end
 	local ok, wall = pcall(StageClient.GetNextWall, StageClient, stageNum)
 	return ok and wall == nil
 end
@@ -743,17 +757,21 @@ local function think()
 		local hpConn = UpdateWallHealth.OnClientEvent:Connect(function() damaged = true end)
 		local deadline = os.clock() + CONFIG.stageDwell
 		local finished = false
+		local swing = 0
 		while os.clock() < deadline and CONFIG.auto and GEN == _G.__MINECLICK do
-			local wall = wallsLeft(stageNum)
-			if not wall then
-				-- Stage is done THIS instant. Sitting out the rest of the dwell
-				-- window here is what made it look like the script kept digging
-				-- a finished stage instead of moving on.
+			-- Stage done THIS instant? Sitting out the rest of the dwell window
+			-- is what made it look like the script kept digging a finished stage.
+			if stageDone(stageNum) then
 				finished = true
 				break
 			end
+			-- Rotate through the wall indices instead of trusting the client
+			-- cache: away from the stage zone it never learns which wall fell,
+			-- so a fixed index would hammer a wall that is already gone.
+			swing = swing + 1
+			local wall = wallsLeft(stageNum) or ((swing % 3) + 1)
 			HitWall:FireServer(stageNum, wall)
-			task.wait(0.12)
+			task.wait(CONFIG.hitRate)
 		end
 		hpConn:Disconnect()
 
@@ -777,18 +795,25 @@ local function think()
 			STATE.mode = "mine"
 			STATE.targetName = "stage " .. stageNum .. " (+" .. gained .. " walls)"
 			STATE.blocked = nil
+			STATE.deadSwings = 0
 			-- The drops belong to the stage that was just broken, so empty it
 			-- before moving on. Walking away from them was the whole bug.
 			if CONFIG.autoLoot then collectStage(stageNum) end
 			return
 		end
 
-		-- Nothing moved. That is either a spent stage or a server that will not
-		-- take this stage yet, and hammering it forever is how a farm looks busy
-		-- while earning zero - so say it and go train instead.
+		-- Nothing moved and nothing even took damage. Either the stage is spent or
+		-- the server has stopped accepting HitWall for this session - the latter
+		-- happened after ~490 walls and only a server change fixed it. Count it,
+		-- and once it keeps happening say plainly that a rejoin is needed instead
+		-- of looking busy.
+		STATE.deadSwings = (STATE.deadSwings or 0) + 1
 		STATE.mode = "wait"
 		STATE.targetName = "stage " .. stageNum .. " took no hits"
-		STATE.blocked = "stage " .. stageNum .. " refuses hits - walls spent for this server"
+		if STATE.deadSwings >= 3 then
+			STATE.blocked = "HitWall refused " .. STATE.deadSwings ..
+				"x on stage " .. stageNum .. " - rejoin the server, walls are throttled"
+		end
 	end
 
 	if CONFIG.autoTrain then
