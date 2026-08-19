@@ -271,13 +271,16 @@ local function freeLoot()
 				if part:IsA("BasePart") and part:GetAttribute("IsTaken") == false then
 					local dist = from and (part.Position - from).Magnitude or 0
 					if CONFIG.lootRange <= 0 or dist <= CONFIG.lootRange then
-						out[#out + 1] = { part = part, dist = dist }
+								out[#out + 1] = { part = part, dist = dist, value = (itemValue(part)) }
 					end
 				end
 			end
 		end
 	end
-	table.sort(out, function(a, b) return a.dist < b.dist end)
+	table.sort(out, function(a, b)
+		if a.value ~= b.value then return a.value > b.value end
+		return a.dist < b.dist
+	end)
 	return out
 end
 
@@ -313,10 +316,36 @@ local function sellRun()
 	return true
 end
 
+-- Every drop carries its own price tag on the billboard ("$140K"), and that is
+-- the number to rank on: the same ItemId shows up at different rarities and the
+-- database Revenue is only the base. With five backpack slots the choice between
+-- a 140K Pirate Hat and a 70K Treasure Chest is the entire difference between a
+-- good load and a wasted one.
+local SUFFIX = { K = 1e3, M = 1e6, B = 1e9, T = 1e12, Qa = 1e15, Qi = 1e18 }
+
+local function parseMoney(text)
+	if type(text) ~= "string" then return nil end
+	local num, suffix = text:match("%$?%s*([%d%.]+)%s*(%a*)")
+	num = tonumber(num)
+	if not num then return nil end
+	if suffix and suffix ~= "" then
+		local mult = SUFFIX[suffix] or SUFFIX[suffix:sub(1, 1):upper() .. (suffix:sub(2, 2) or "")]
+		if not mult then return nil end   -- never guess a suffix, see the Q trap
+		num = num * mult
+	end
+	return num
+end
+
 local function itemValue(part)
 	local id = part:GetAttribute("ItemId")
+	for _, label in ipairs(part:GetDescendants()) do
+		if label:IsA("TextLabel") and label.Name == "Revenue" then
+			local value = parseMoney(label.Text)
+			if value then return value, id end
+		end
+	end
 	local entry = id and ItemsList[id]
-	return entry and entry.Revenue or 0, id
+	return (entry and entry.Revenue) or 0, id
 end
 
 -- Touch is what pays. A ProximityPrompt exists on some of them but only once the
@@ -605,10 +634,18 @@ local function stageLoot(stageNum)
 	local from = hrp and hrp.Position
 	for _, part in ipairs(spawns:GetChildren()) do
 		if part:IsA("BasePart") and part:GetAttribute("IsTaken") == false then
-			out[#out + 1] = { part = part, dist = from and (part.Position - from).Magnitude or 0 }
+			out[#out + 1] = {
+				part = part,
+				dist = from and (part.Position - from).Magnitude or 0,
+				value = (itemValue(part)),
+			}
 		end
 	end
-	table.sort(out, function(a, b) return a.dist < b.dist end)
+	-- richest first, nearest as the tiebreak
+	table.sort(out, function(a, b)
+		if a.value ~= b.value then return a.value > b.value end
+		return a.dist < b.dist
+	end)
 	return out
 end
 
@@ -793,6 +830,25 @@ end)
 
 loop(120, nil, claimFree)
 
+-- Watch our own income. A farm that grabs, sells and still shows no cash after a
+-- full minute is broken in a way that looks busy, which is exactly how the
+-- backpack gate hid for so long - so it says so instead of pretending.
+loop(60, nil, function()
+	local now = data().Cash or 0
+	local mark = STATE.incomeMark
+	if mark then
+		local gained = now - mark
+		STATE.incomePerMin = gained
+		if gained <= 0 then
+			STATE.blocked = "no cash in 60s - bag " .. storage() .. "/" ..
+				tostring(data().BackpackSize) .. ", stage " .. tostring(STATE.stage)
+		elseif STATE.blocked and STATE.blocked:find("no cash") then
+			STATE.blocked = nil
+		end
+	end
+	STATE.incomeMark = now
+end)
+
 startPin()
 
 --------------------------------------------------------------------------------
@@ -875,7 +931,8 @@ task.spawn(function()
 			"  pick   " .. tostring(d.EquippedPickaxeId) .. " (" ..
 				short(tonumber((PickaxeList[d.EquippedPickaxeId or ""] or {}).Strength) or 0) .. " str)",
 			"  bag    " .. storage() .. " / " .. tostring(d.BackpackSize) ..
-				"   sold " .. short(STATE.sold or 0),
+				"   sold " .. short(STATE.sold or 0) ..
+				"   " .. short(STATE.incomePerMin or 0) .. "/min",
 			"  walls  " .. STATE.walls .. "   ws +" .. tostring(d.ExtraWalkSpeed),
 			"  target " .. STATE.targetName,
 			"  loot   " .. STATE.picked .. " grabbed",
