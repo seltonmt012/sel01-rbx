@@ -95,6 +95,29 @@ end
 
 local function note(text) STATE.note = text end
 
+-- The config tables store prices AND multipliers as abbreviated STRINGS: "3K",
+-- "15K", "4M". tonumber() answers nil for every one of them, which silently made
+-- the whole ladder above pump 3 invisible - 152,288 cash sat there while the
+-- script kept the 300 pump. The game ships its own parser, so it is read out of
+-- the game instead of guessed; anything it cannot parse returns nil and is
+-- skipped, never treated as a small number.
+local abbConvert
+local function num(v)
+	if type(v) == "number" then return v end
+	if type(v) ~= "string" then return nil end
+	local plain = tonumber(v)
+	if plain then return plain end
+	if abbConvert == nil then
+		local utils = ReplicatedStorage:FindFirstChild("Utils")
+		local module = utils and utils:FindFirstChild("AbbNumber")
+		local ok, loaded = pcall(require, module)
+		abbConvert = (ok and type(loaded) == "table" and loaded.ConvertToNumber) or false
+	end
+	if not abbConvert then return nil end
+	local ok, parsed = pcall(abbConvert, v)
+	return (ok and type(parsed) == "number") and parsed or nil
+end
+
 local function value(folder, key, default)
 	local f = plr:FindFirstChild(folder)
 	local v = f and f:FindFirstChild(key)
@@ -208,7 +231,7 @@ local function refresh()
 	-- so cfg[STATE.pump] silently missed and the panel read x1 forever
 	local cfg = rawget(_G, "__DRAINWATER_PUMPCFG")
 	local row = cfg and (cfg[tostring(STATE.pump)] or cfg[STATE.pump])
-	if row then STATE.pumpMult = tonumber(row.multiplier) or STATE.pumpMult end
+	if row then STATE.pumpMult = num(row.multiplier) or STATE.pumpMult end
 end
 
 --------------------------------------------------------------------------------
@@ -478,8 +501,8 @@ local function ladderBuy(helper, getter, buyEvent, equipEvent, ownedGetter, labe
 
 	local best
 	for id, entry in pairs(all) do
-		local price = tonumber(entry.cashPrice)
-		local mult = tonumber(entry.multiplier) or 0
+		local price = num(entry.cashPrice)
+		local mult = num(entry.multiplier) or 0
 		-- No cashPrice means the tier is sold for Robux only. Filter on the field,
 		-- never on the name.
 		if price and price <= STATE.cash then
@@ -491,7 +514,7 @@ local function ladderBuy(helper, getter, buyEvent, equipEvent, ownedGetter, labe
 
 	local currentMult = 0
 	for id, entry in pairs(all) do
-		if tostring(id) == tostring(equipped) then currentMult = tonumber(entry.multiplier) or 0 end
+		if tostring(id) == tostring(equipped) then currentMult = num(entry.multiplier) or 0 end
 	end
 	-- ids come back as strings from the config and as numbers from the attribute
 	if best.mult <= currentMult then return false end
@@ -541,13 +564,13 @@ local function buyUpgrades()
 	local bought = false
 	for _, name in ipairs(UPGRADE_ORDER) do
 		local row = data[name]
-		if type(row) == "table" and (tonumber(row.level) or 0) < (tonumber(row.maxLevel) or 0) then
+		if type(row) == "table" and (num(row.level) or 0) < (num(row.maxLevel) or 0) then
 			local before = STATE.cash
 			pcall(function() remote:FireServer(name) end)
 			task.wait(0.5)
 			refresh()
 			if STATE.cash < before then
-				note("upgrade " .. name .. " -> " .. tostring((tonumber(row.level) or 0) + 1))
+				note("upgrade " .. name .. " -> " .. tostring((num(row.level) or 0) + 1))
 				bought = true
 			end
 		end
@@ -561,7 +584,7 @@ local function openEggs()
 	if type(all) ~= "table" then return false end
 	local best
 	for id, entry in pairs(all) do
-		local price = tonumber(entry.cashPrice)
+		local price = num(entry.cashPrice)
 		-- a Robux egg has no cashPrice at all; sorting by price would put it first
 		if price and price <= STATE.cash then
 			if not best or price > best.price then best = { id = id, price = price } end
@@ -626,6 +649,10 @@ local function spendPass()
 			local equip = ev("Pet", "EquipBest")
 			if equip then pcall(function() equip:FireServer() end) end
 		end
+		-- the panel's own "place best": it swaps a weaker displayed fish for a
+		-- better one sitting in the tank inventory, and costs nothing when there is
+		-- nothing better (it simply answers false)
+		if CONFIG.display then invoke(fn("FishShow", "[C-S]BestFishUI")) end
 		if CONFIG.rebirth then doRebirth() end
 	end)
 end
@@ -789,7 +816,7 @@ _G.__DRAINWATER_DBG = {
 	drainPhase = drainPhase, spendPass = spendPass,
 	buyPump = buyPump, buyAura = buyAura, buyUpgrades = buyUpgrades,
 	openEggs = openEggs, claimFree = claimFree, doRebirth = doRebirth,
-	configModule = configModule,
+	configModule = configModule, num = num,
 }
 
 print("[drainwater] gen " .. GEN .. " ready - RightShift for the panel")
