@@ -244,6 +244,40 @@ local function maxUnlockedStage()
 	return best
 end
 
+-- Every drop carries its own price tag on the billboard ("$140K"), and that is
+-- the number to rank on: the same ItemId shows up at different rarities and the
+-- database Revenue is only the base. With a handful of backpack slots the choice
+-- between a 140K Pirate Hat and a 70K Treasure Chest is the whole difference
+-- between a good load and a wasted one.
+-- Defined up here because freeLoot ranks with it, and a local is invisible above
+-- its definition - having it below cost a live "attempt to call a nil value".
+local SUFFIX = { K = 1e3, M = 1e6, B = 1e9, T = 1e12, Qa = 1e15, Qi = 1e18 }
+
+local function parseMoney(text)
+	if type(text) ~= "string" then return nil end
+	local num, suffix = text:match("%$?%s*([%d%.]+)%s*(%a*)")
+	num = tonumber(num)
+	if not num then return nil end
+	if suffix and suffix ~= "" then
+		local mult = SUFFIX[suffix]
+		if not mult then return nil end   -- never guess a suffix, see the Q trap
+		num = num * mult
+	end
+	return num
+end
+
+local function itemValue(part)
+	local id = part:GetAttribute("ItemId")
+	for _, label in ipairs(part:GetDescendants()) do
+		if label:IsA("TextLabel") and label.Name == "Revenue" then
+			local value = parseMoney(label.Text)
+			if value then return value, id end
+		end
+	end
+	local entry = id and ItemsList[id]
+	return (entry and entry.Revenue) or 0, id
+end
+
 -- A stage counts as DONE when it has no unbroken wall left, and that is what the
 -- game means by "Complete Stage 12 First!" - the message every pickup inside an
 -- unfinished stage answers with. Reaching a stage is not finishing it, so
@@ -314,38 +348,6 @@ local function sellRun()
 		STATE.note = "sold for " .. short(gained)
 	end
 	return true
-end
-
--- Every drop carries its own price tag on the billboard ("$140K"), and that is
--- the number to rank on: the same ItemId shows up at different rarities and the
--- database Revenue is only the base. With five backpack slots the choice between
--- a 140K Pirate Hat and a 70K Treasure Chest is the entire difference between a
--- good load and a wasted one.
-local SUFFIX = { K = 1e3, M = 1e6, B = 1e9, T = 1e12, Qa = 1e15, Qi = 1e18 }
-
-local function parseMoney(text)
-	if type(text) ~= "string" then return nil end
-	local num, suffix = text:match("%$?%s*([%d%.]+)%s*(%a*)")
-	num = tonumber(num)
-	if not num then return nil end
-	if suffix and suffix ~= "" then
-		local mult = SUFFIX[suffix] or SUFFIX[suffix:sub(1, 1):upper() .. (suffix:sub(2, 2) or "")]
-		if not mult then return nil end   -- never guess a suffix, see the Q trap
-		num = num * mult
-	end
-	return num
-end
-
-local function itemValue(part)
-	local id = part:GetAttribute("ItemId")
-	for _, label in ipairs(part:GetDescendants()) do
-		if label:IsA("TextLabel") and label.Name == "Revenue" then
-			local value = parseMoney(label.Text)
-			if value then return value, id end
-		end
-	end
-	local entry = id and ItemsList[id]
-	return (entry and entry.Revenue) or 0, id
 end
 
 -- Touch is what pays. A ProximityPrompt exists on some of them but only once the
