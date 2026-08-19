@@ -65,6 +65,11 @@ local CONFIG = {
 	offline = true,        -- offline earnings and the tank's pending cash
 	rebirthUntil = 0,      -- 0 = no limit
 	spendEvery = 15,       -- seconds between spending passes
+	diveSeconds = 45,      -- how long one dive may run before the loop breathes
+	stallSeconds = 40,     -- no new stage for this long -> surface and cash in
+	claimShare = 0.25,     -- while diving, only claim fish worth at least this
+	                       -- share of the best one in reach
+	pumpReach = 2.5,       -- reserve for the next pump once it is this close
 	claimRadius = 14,      -- the prompt itself allows 15 studs
 	settle = 1.0,          -- seconds pinned before an action; the server has to
 	                       -- believe the position first
@@ -76,6 +81,7 @@ local STATE = {
 	displayed = 0, slots = 0, backpack = 0, capacity = 0,
 	pump = 1, pumpMult = 1, aura = 0, claimed = 0, sold = 0, placed = 0,
 	rate = 0,              -- drain per second, measured
+	deepest = 1, lastProgress = 0, reserve = 0,
 	busy = false,
 }
 
@@ -323,9 +329,20 @@ local function worstDisplayed(ui)
 	return worst
 end
 
-local function claimNearby(budgetSeconds)
+local function claimNearby(budgetSeconds, minPrice)
 	local list = claimableFish()
 	if #list == 0 then return 0 end
+	-- The backpack holds seven fish and the run resets the moment we surface, so a
+	-- slot spent on a stage-1 fish worth 15 is a stage-8 fish worth 456,000 left
+	-- in the pool. Only the top of what is reachable is worth carrying.
+	if minPrice and minPrice > 0 then
+		local keep = {}
+		for _, fish in ipairs(list) do
+			if fish.price >= minPrice then keep[#keep + 1] = fish end
+		end
+		list = keep
+		if #list == 0 then return 0 end
+	end
 	local _, count, capacity = carried()
 	local taken = 0
 	local t0 = os.clock()
@@ -459,6 +476,8 @@ local function drainPhase(seconds)
 		-- jump from "1.2K left" to "81K left" reads as a negative drain and shows 0
 		if STATE.stage ~= baseStage then
 			baseStage, baseline, baseAt = STATE.stage, left, os.clock()
+			STATE.lastProgress = os.clock()
+			if STATE.stage > STATE.deepest then STATE.deepest = STATE.stage end
 			unpin()
 			return true                      -- a pool just emptied: go claim its fish
 		end
@@ -554,7 +573,34 @@ end
 -- Speed, Backpack and FishDisplay. Backpack and FishDisplay both widen the
 -- pipeline (more fish per trip, more fish paying per minute), so they are worth
 -- more than Speed to a script that teleports anyway.
-local UPGRADE_ORDER = { "FishDisplay", "Backpack", "Speed" }
+-- The pump is the depth lever and depth is worth orders of magnitude: a stage-1
+-- fish is worth 15, a stage-8 one 456,000. So the next pump rung is fenced off
+-- before anything else may spend - but only once it is within reach, or the
+-- reserve would freeze every purchase for hours (the starvation pattern).
+local function pumpReserve()
+	local cfg = rawget(_G, "__DRAINWATER_PUMPCFG")
+	if type(cfg) ~= "table" then return 0 end
+	local cheapest
+	for id, entry in pairs(cfg) do
+		local price = num(entry.cashPrice)
+		local mult = num(entry.multiplier) or 0
+		if price and price > 0 and mult > (STATE.pumpMult or 0) then
+			if not cheapest or price < cheapest then cheapest = price end
+		end
+	end
+	if not cheapest then return 0 end
+	return (cheapest <= STATE.cash * CONFIG.pumpReach) and cheapest or 0
+end
+
+local function spendable()
+	local reserve = pumpReserve()
+	STATE.reserve = reserve
+	return math.max(0, STATE.cash - reserve)
+end
+
+-- Backpack first: every surfacing costs the entire run, so the number of fish one
+-- dive can carry out is the real limit. FishDisplay second, Speed last.
+local UPGRADE_ORDER = { "Backpack", "FishDisplay", "Speed" }
 
 local function buyUpgrades()
 	local data = invoke(fn("Upgrade", "[C-S]GetUpgradeData"))
@@ -564,7 +610,10 @@ local function buyUpgrades()
 	local bought = false
 	for _, name in ipairs(UPGRADE_ORDER) do
 		local row = data[name]
-		if type(row) == "table" and (num(row.level) or 0) < (num(row.maxLevel) or 0) then
+		local price = num(row and (row.price or row.cost))
+		local blocked = price and price > spendable()
+		if type(row) == "table" and not blocked
+			and (num(row.level) or 0) < (num(row.maxLevel) or 0) then
 			local before = STATE.cash
 			pcall(function() remote:FireServer(name) end)
 			task.wait(0.5)
@@ -586,7 +635,7 @@ local function openEggs()
 	for id, entry in pairs(all) do
 		local price = num(entry.cashPrice)
 		-- a Robux egg has no cashPrice at all; sorting by price would put it first
-		if price and price <= STATE.cash then
+		if price and price <= spendable() then
 			if not best or price > best.price then best = { id = id, price = price } end
 		end
 	end
@@ -686,22 +735,44 @@ task.spawn(function()
 				spendPass()
 				lastSpend = os.clock()
 			end
+			-- LEAVING THE STAGE AREA RESETS THE WHOLE RUN. Measured: stage 5 with
+			-- StageRunRevision 56, one trip to the plot, and it came back stage 1
+			-- revision 57 with every StageCompleted_* false again. The old cycle
+			-- surfaced as soon as ONE fish was carried, so it never got past stage
+			-- 5 while the deep pools hold fish worth millions each. So: dive until
+			-- the backpack is FULL or the run genuinely stalls, and only then pay
+			-- the reset.
 			local completed = false
 			if CONFIG.drain then
-				STATE.phase = "drain"
-				completed = drainPhase(20)
+				STATE.phase = "dive"
+				completed = drainPhase(CONFIG.diveSeconds)
 			end
 			if completed and CONFIG.fish then
 				STATE.phase = "fish"
-				withLock("fish", function() claimNearby(8) end)
-			end
-			if CONFIG.fish then
-				STATE.phase = "fish"
 				withLock("fish", function()
-					claimNearby(10)
-					local _, count = carried()
-					if count > 0 then plotTrip() end
+					-- a fraction of the best fish this run has seen, so the bar
+					-- rises with the depth instead of being a fixed number
+					local best = 0
+					for _, fish in ipairs(claimableFish()) do
+						if fish.price > best then best = fish.price end
+					end
+					claimNearby(6, best * CONFIG.claimShare)
 				end)
+			end
+
+			local _, count, capacity = carried()
+			local full = capacity > 0 and count >= capacity
+			local stalled = (os.clock() - STATE.lastProgress) > CONFIG.stallSeconds
+			-- about to surface anyway: fill the remaining slots with whatever is
+			-- still reachable, cheap or not
+			if CONFIG.fish and stalled and not full then
+				withLock("topup", function() claimNearby(8, 0) end)
+				_, count, capacity = carried()
+			end
+			if CONFIG.fish and count > 0 and (full or stalled) then
+				STATE.phase = "plot"
+				withLock("plot", function() plotTrip() end)
+				STATE.lastProgress = os.clock()
 			end
 			if not (CONFIG.drain or CONFIG.fish) then task.wait(1) end
 		else
@@ -780,12 +851,12 @@ task.spawn(function()
 		local lines = {
 			CONFIG.auto and "AUTO RUNNING" or "STOPPED",
 			"  phase     " .. tostring(STATE.phase),
-			"  stage     " .. STATE.stage .. "   " .. short(STATE.remaining) .. " left   " ..
-				short(STATE.rate) .. "/s",
+			"  stage     " .. STATE.stage .. " (deepest " .. STATE.deepest .. ")   " ..
+				short(STATE.remaining) .. " left   " .. short(STATE.rate) .. "/s",
 			"  cash      " .. short(STATE.cash) .. "   water " .. short(STATE.water),
 			"  level     " .. STATE.level .. "   rebirth " .. STATE.rebirth,
 			"  pump      #" .. tostring(STATE.pump) .. " x" .. short(STATE.pumpMult) ..
-				"   aura " .. tostring(STATE.aura),
+				"   saving " .. short(STATE.reserve),
 			"  tank      " .. STATE.displayed .. "/" .. STATE.slots .. " displayed",
 			"  backpack  " .. STATE.backpack .. "/" .. STATE.capacity,
 			"  claimed   " .. STATE.claimed .. "   displayed " .. STATE.placed ..
@@ -817,6 +888,7 @@ _G.__DRAINWATER_DBG = {
 	buyPump = buyPump, buyAura = buyAura, buyUpgrades = buyUpgrades,
 	openEggs = openEggs, claimFree = claimFree, doRebirth = doRebirth,
 	configModule = configModule, num = num,
+	pumpReserve = pumpReserve, spendable = spendable,
 }
 
 print("[drainwater] gen " .. GEN .. " ready - RightShift for the panel")
