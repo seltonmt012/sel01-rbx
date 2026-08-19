@@ -74,6 +74,9 @@ local CONFIG = {
     autoPets     = true,    -- EquipBest, and delete the overflow
     keepPets     = 30,      -- how many pets to keep before culling
     maxRebirthBatch = 25,   -- Tables.Rebirths is indexed by the amount
+    powerHeadroom = 3,      -- stop training once power is this far past the price
+    powerKeep    = 2,       -- rebirth only while the cost fits this often, so
+                            -- damage is left over for the mining phase
     minePhase    = 90,      -- seconds of mining per cycle
     trainPhase   = 90,      -- seconds of training per cycle
     sellGap      = 0.05,    -- one call per ore unit; this is the pacing
@@ -185,11 +188,28 @@ end
 
 local LADDER = pickaxeLadder()
 
+-- `Order` is not unique: order 3 holds the Iron Pickaxe at 500 coins AND the
+-- Shadowstone at 5,000, and the event pickaxes sit on negative orders.  Taking
+-- the first entry above BestPickaxe therefore picked a 100,000 coin axe while
+-- the game's own shop offered the next rung for 2,500.  Pick the CHEAPEST entry
+-- on the lowest order above the one already owned.
 local function nextPickaxe()
     local best = stat("BestPickaxe", 1)
+    local bestOrder
     for _, entry in ipairs(LADDER) do
-        if entry.order > best then return entry end
+        if entry.order > best and (not bestOrder or entry.order < bestOrder) then
+            bestOrder = entry.order
+        end
     end
+    if not bestOrder then return end
+
+    local pick
+    for _, entry in ipairs(LADDER) do
+        if entry.order == bestOrder and (not pick or entry.cost < pick.cost) then
+            pick = entry
+        end
+    end
+    return pick
 end
 
 local function buyPickaxes()
@@ -213,40 +233,47 @@ local function rebirthCost(amount)
     return amount * 500 * (have + 1)
 end
 
+-- Power IS the mining damage, and a rebirth spends it.  Rebirthing until the
+-- bar reads zero is why the character went back into the mine and broke nothing
+-- at all.  So a rebirth only happens out of the surplus: the cost has to fit
+-- powerKeep times over, which leaves that much damage standing afterwards.
 local function doRebirths()
-    for _ = 1, 8 do
-        if power() < rebirthCost(1) then
-            STATE.nextRebirthCost = rebirthCost(1)
-            return
-        end
-        -- The server indexes Tables.Rebirths with the amount, so a bulk rebirth
-        -- larger than that table answers "Invalid index" and does nothing -
-        -- measured with 413,640 power, which computed to 82 at once.
-        local affordable = math.floor(power() / (500 * (rebirths() + 1)))
-        local amount = math.clamp(affordable, 1, CONFIG.maxRebirthBatch)
-        local ok, done, message = invoke("Rebirth", amount)
-        if not (ok and done) and amount > 1 then
-            amount = 1
-            ok, done, message = invoke("Rebirth", amount)
-        end
+    for _ = 1, CONFIG.maxRebirthBatch do
+        local cost = rebirthCost(1)
+        STATE.nextRebirthCost = cost
+        if power() < cost * CONFIG.powerKeep then return end
+        -- Buying several at once is the MaxRebirth GAMEPASS, not a price
+        -- question: at 15 rebirths and 32,760 power, `Rebirth(1)` went through
+        -- while `Rebirth(2)` answered "Can't Afford" - and a batch larger than
+        -- the Rebirths table answers "Invalid index".  So it is always one at a
+        -- time, in a loop, which costs nothing but a few remote calls.
+        local ok, done, message = invoke("Rebirth", 1)
         if not (ok and done) then
             note("rebirth refused: %s", tostring(message))
             return
         end
-        STATE.rebirthsDone = STATE.rebirthsDone + amount
-        note("rebirth x%d (%s power)", amount, abbreviate(rebirthCost(amount)))
+        STATE.rebirthsDone = STATE.rebirthsDone + 1
+        note("rebirth %d (%s power)", rebirths(), abbreviate(rebirthCost(1)))
         task.wait(0.8)
     end
 end
 
 -- Hatching is position gated - "Out Of Reach!" from anywhere else - so the body
 -- goes to the egg, hatches, and the mining phase pulls it back on its own.
+-- Coins are the pickaxe currency and the pickaxe is what makes the mining
+-- faster, so the next rung is fenced off before an egg may touch the balance -
+-- otherwise 10 and 100 coin eggs quietly eat the 100,000 that the next pickaxe
+-- costs, which is exactly what happened over the first half hour.  Gem eggs are
+-- free of that rule; nothing else spends gems.
 local function eggFor(worldNumber)
     local best, bestCost
+    local pick = nextPickaxe()
+    local reserved = (CONFIG.autoPickaxe and pick) and pick.cost or 0
     for name, data in pairs(EggData) do
         if data.WorldNumber == worldNumber and (data.Cost or 0) > 0 then
             local currency = data.Currency
-            local balance = currency == "Coins" and coins() or (currency == "Gems" and gems() or 0)
+            local balance = currency == "Coins" and math.max(0, coins() - reserved)
+                            or (currency == "Gems" and gems() or 0)
             if balance * CONFIG.eggReserve >= data.Cost then
                 if not bestCost or data.Cost > bestCost then best, bestCost = name, data.Cost end
             end
@@ -419,12 +446,20 @@ end)
 -- pickaxes, training pays for rebirths.
 task.spawn(function()
     while alive() do
-        if CONFIG.autoTrain then
+        -- Train only while the next rebirth is still out of reach.  A fixed
+        -- 50/50 split kept training long after the power had run away from the
+        -- rebirth price (measured 413,640 power against a 5,000 price) while
+        -- the coins - which is what the next pickaxe costs - stood still.
+        local needsPower = power() < rebirthCost(1) * CONFIG.powerHeadroom
+        if CONFIG.autoTrain and (needsPower or not CONFIG.autoMine) then
             STATE.phase = "training"
             want("AutoMine", false)
             want("AutoTrain", true)
             local until_ = os.clock() + CONFIG.trainPhase
-            while alive() and CONFIG.autoTrain and os.clock() < until_ do task.wait(1) end
+            while alive() and CONFIG.autoTrain and os.clock() < until_
+                  and power() < rebirthCost(1) * CONFIG.powerHeadroom do
+                task.wait(1)
+            end
         end
 
         if CONFIG.autoMine then

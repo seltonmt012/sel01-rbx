@@ -72,14 +72,24 @@ local CONFIG = {
 	mog = true,             -- travel to the strongest beatable NPC and out-mog it
 	gear = true,            -- best affordable gear in this world, touched from afar
 	portals = true,         -- take the world portal once its Looks wall is passed
-	rebirth = true,         -- Rebirth("Max") - this is what unlocks the trainers
-	gearFirst = true,       -- never rebirth while saving for the next gear tier
+	rebirth = true,         -- Rebirth("Max") the moment the Looks requirement is met
+	eggs = true,            -- buy eggs with the Looks left over above the next rebirth
+	auras = true,           -- roll the best affordable tier, equip the best owned
+	pets = true,            -- keep the strongest pets equipped, up to PetSlots
+	boosts = true,          -- burn any boost sitting in the inventory
+	tokens = true,          -- spend FameTokens: Rebirth, then Aura, Luck, Pet
 	freebies = true,        -- free spin, group reward, offline earnings, leave gift
 
 	trainSeconds = 30,      -- seconds on the trainer before each mogging trip
-	mogSeconds = 45,        -- seconds spent mogging before going back to train
+	mogSeconds = 45,        -- hard cap; mogging stops early once the gear is funded
 	contestSeconds = 10,    -- give up on one contest after this long
 	rebirthUntil = 0,       -- 0 = no limit
+	-- Looks are BOTH the rebirth price and the egg/aura price, so nothing else may
+	-- touch what the next rebirth needs: only the surplus above requirement x this
+	-- is spendable. 1.0 keeps the next rebirth fully funded and still lets an egg
+	-- through; higher values hold more back.
+	rebirthReserve = 1.0,
+	cheapShare = 0.25,      -- ...unless it costs under this share of the next wall
 }
 
 local STATE = {
@@ -91,8 +101,14 @@ local STATE = {
 	trainer = "-", trainerMul = 0,
 	world = 1, zone = "-",
 	npc = "-", npcPays = 0, mogs = 0,
+	rebirthNeed = 0, pets = 0, petsEquipped = 0, petMul = 0, aura = "-", auraMul = 0,
 	busy = false, bodyOwner = nil,
 }
+
+-- defined further down with the spenders; mogPhase needs to know what the next
+-- gear rung costs so it can stop mogging the moment that is funded, and a local
+-- is invisible above its own definition
+local nextGear
 
 --------------------------------------------------------------------------------
 -- helpers
@@ -226,6 +242,19 @@ local function refresh()
 	STATE.trainer = plr:GetAttribute("CurrentTrainer")
 	if STATE.trainer == nil or STATE.trainer == "" then STATE.trainer = "-" end
 	STATE.world = plr:GetAttribute("CurrentWorld") or 1
+	local worn = plr:GetAttribute("EquippedAura")
+	if type(worn) == "string" and worn ~= "" then
+		STATE.aura = worn
+		local cfg = conf("AuraConfig")
+		local info = cfg and cfg.Auras and cfg.Auras[worn]
+		STATE.auraMul = info and tonumber(info.Multiplier) or STATE.auraMul
+	end
+	local equipped = plr:GetAttribute("EquippedPets")
+	if type(equipped) == "string" then
+		local n = 0
+		for _ in equipped:gmatch("[^,]+") do n = n + 1 end
+		STATE.petsEquipped = n
+	end
 
 	local now = os.clock()
 	if lastSample > 0 and now - lastSample >= 1 then
@@ -386,6 +415,14 @@ local function mogPhase()
 	local deadline = os.clock() + CONFIG.mogSeconds
 	while os.clock() < deadline and GEN == _G.__LOOKSCLICK and CONFIG.auto and CONFIG.mog do
 		refresh()
+		-- Wins buy exactly one thing: the next gear rung. Once that is funded there
+		-- is nothing left to mog FOR, and every further second is a second not
+		-- spent making the Looks that pay for the next rebirth.
+		local _, rungCost = nextGear()
+		if rungCost and STATE.wins >= rungCost then
+			note("gear funded - back to looks")
+			return
+		end
 		local model, entry = bestNPC()
 		if not model then
 			note("no beatable NPC in reach - training instead")
@@ -437,7 +474,7 @@ local function gearLadder()
 	return rungs
 end
 
-local function nextGear()
+function nextGear()
 	for _, rung in ipairs(gearLadder()) do
 		if rung.mul > (STATE.gearMul or 0) then return rung.model, rung.cost, rung end
 	end
@@ -483,24 +520,49 @@ local function gearPass()
 	end
 end
 
--- "Max" converts everything affordable in one call, which is also what the panel
--- button does. Rebirths are the only thing that unlocks the stronger trainers.
+-- Rebirth is priced in LOOKS, not Wins - `RebirthConfig.Requirement(n)` is the
+-- next one's price and it is deducted, not wiped, so anything above it survives.
+-- It pays +0.6 on the multiplier every time (36 rebirths measured at x22.5) plus
+-- three FameTokens, and it is what unlocks the stronger trainers, so this fires
+-- the moment it can and everything else spends only the surplus above it.
+local function rebirthNeed()
+	local cfg = conf("RebirthConfig")
+	if not (cfg and cfg.Requirement) then return nil end
+	local ok, need = pcall(cfg.Requirement, STATE.rebirths)
+	return ok and tonumber(need) or nil
+end
+
+local function spendableLooks()
+	local need = rebirthNeed()
+	if not need then return STATE.looks end
+	return math.max(0, STATE.looks - need * CONFIG.rebirthReserve)
+end
+
+-- The reserve alone starves the permanent multipliers: the rebirth wall grows so
+-- fast that the surplus is almost never larger than an egg, and the balance is
+-- reset every few seconds by the rebirth itself. So anything small MEASURED
+-- AGAINST THE WALL passes the guard outright - the "let trivially cheap steps
+-- through" rule, keyed to the wall rather than to the noisy per-second rate,
+-- which collapses to nothing right after every rebirth.
+local function canSpendLooks(cost)
+	if not cost or cost > STATE.looks then return false end
+	if cost <= spendableLooks() then return true end
+	local need = rebirthNeed()
+	return need ~= nil and cost <= need * CONFIG.cheapShare
+end
+
 local function rebirthPass()
 	if CONFIG.rebirthUntil > 0 and STATE.rebirths >= CONFIG.rebirthUntil then return end
-	-- A rebirth wipes the balance, so it waits while an affordable gear upgrade is
-	-- still pending: the cycle buys it on its next pass, the balance drops below
-	-- the tier, and only then does this fire. Without the hold the rebirth loop
-	-- kept eating 2.3M wins a cycle and the farm stayed on the 800-wins Sunscreen.
-	if CONFIG.gearFirst then
-		local _, cost = nextGear()
-		if cost and STATE.wins >= cost then return end
-	end
+	local need = rebirthNeed()
+	STATE.rebirthNeed = need or 0
+	if need and STATE.looks < need then return end
 	local before = STATE.rebirths
 	fire("Rebirth", true, "Max")
-	task.wait(1.5)
+	task.wait(1.2)
 	refresh()
 	if STATE.rebirths > before then
-		note(string.format("rebirth %s -> %s", short(before), short(STATE.rebirths)))
+		note(string.format("rebirth %s -> %s (%s looks)", short(before), short(STATE.rebirths),
+			short(need or 0)))
 	end
 end
 
@@ -530,6 +592,138 @@ local function portalPass()
 	end)
 end
 
+--------------------------------------------------------------------------------
+-- inventory: pets, auras and boosts
+--
+-- InventoryState is a request/response channel - Fire(true) asks, the same channel
+-- answers with { Pets, Auras, Boosts, Eggs, Locked }. Everything is acted on with
+-- InventoryAction(true, <verb>, <id> [, qty]).
+--------------------------------------------------------------------------------
+
+local inventory, inventoryAt = nil, 0
+local inventoryConn
+
+local function askInventory()
+	local ch = channel("InventoryState")
+	if not ch then return nil end
+	if not inventoryConn then
+		inventoryConn = pcall(function()
+			ch:Connect(function(data)
+				if type(data) == "table" then inventory, inventoryAt = data, os.clock() end
+			end)
+		end)
+	end
+	if os.clock() - inventoryAt > 6 then pcall(function() ch:Fire(true) end) end
+	return inventory
+end
+
+local function countOf(bag, id)
+	local entry = bag and bag[id]
+	if type(entry) == "table" then return tonumber(entry.Count) or tonumber(entry.Amount) or 1 end
+	return tonumber(entry) or 0
+end
+
+-- Pets multiply looks; keep the strongest ones equipped up to PetSlots. Equipping
+-- is idempotent enough that re-asserting the best set on a timer is cheap.
+-- The inventory has its own "best" verbs - EquipBestPets / EquipBestAura /
+-- EquipBestGear - so there is no reason to rank and equip by hand.
+local function petPass()
+	local inv = askInventory()
+	local cfg = conf("PetConfig")
+	if inv and cfg and cfg.Pets then
+		local owned, best = 0, 0
+		for id in pairs(inv.Pets or {}) do
+			owned = owned + 1
+			local info = cfg.Pets[id]
+			best = math.max(best, info and tonumber(info.Multiplier) or 0)
+		end
+		STATE.pets = owned
+		STATE.petMul = best
+		if owned == 0 then return end
+	end
+	fire("InventoryAction", true, "EquipBestPets")
+end
+
+-- Eggs are priced in LOOKS, so they come out of the surplus above the next
+-- rebirth and never out of the rebirth itself.
+local function eggPass()
+	local cfg = conf("PetConfig")
+	if not (cfg and cfg.Eggs) then return end
+	local best, bestCost
+	for id, egg in pairs(cfg.Eggs) do
+		local cost = tonumber(egg.Cost)
+		local world = tonumber(egg.World) or 1
+		if cost and world <= (STATE.world or 1) and canSpendLooks(cost) then
+			if not bestCost or cost > bestCost then best, bestCost = id, cost end
+		end
+	end
+	if not best then return end
+	fire("BuyEgg", true, best, 1)
+	task.wait(1.2)
+	-- buying only puts the egg in the inventory; hatching is its own action and
+	-- the pet does not exist until it runs
+	fire("InventoryAction", true, "HatchEgg", best, 1)
+	task.wait(1.5)
+	note(string.format("egg %s (%s looks)", best, short(bestCost)))
+	inventoryAt = 0
+	if CONFIG.pets then petPass() end
+end
+
+-- A roll costs Looks and the result is added to the collection, so the worn aura
+-- can only ever improve - equip the best owned one afterwards.
+local function auraPass()
+	local cfg = conf("AuraConfig")
+	if not (cfg and cfg.Rolls) then return end
+	local bestRoll, bestCost
+	for name, roll in pairs(cfg.Rolls) do
+		local cost = tonumber(roll.Cost)  -- entries without one are Robux/token rolls
+		if cost and canSpendLooks(cost) and (not bestCost or cost > bestCost) then
+			bestRoll, bestCost = name, cost
+		end
+	end
+	if bestRoll then
+		fire("AuraRoll", true, bestRoll, nil)
+		task.wait(1.5)
+	end
+	fire("InventoryAction", true, "EquipBestAura")
+	inventoryAt = 0
+end
+
+local function boostPass()
+	local inv = askInventory()
+	if not inv then return end
+	for id, entry in pairs(inv.Boosts or {}) do
+		local n = countOf(inv.Boosts, id)
+		if n > 0 then
+			fire("InventoryAction", true, "UseBoost", id, 1)
+			note("boost " .. tostring(id))
+			task.wait(0.4)
+		end
+	end
+end
+
+-- FameTokens arrive three per rebirth. Rebirth (500) is the cheapest and feeds
+-- straight back into the thing that produces tokens, so it goes first.
+local TOKEN_ORDER = { "Rebirth", "Aura", "Luck", "Pet" }
+
+local function tokenPass()
+	local cfg = conf("TokenUpgradesConfig")
+	if not cfg then return end
+	for _, id in ipairs(TOKEN_ORDER) do
+		local entry = cfg[id]
+		local price = entry and tonumber(entry.BasePrice)
+		local level = plr:GetAttribute("TokenUpgrade_" .. id) or 0
+		local max = entry and tonumber(entry.MaxBuyable) or -1
+		if price and STATE.tokens >= price and (max < 0 or level < max) then
+			fire("BuyTokenUpgrade", true, id)
+			task.wait(0.6)
+			refresh()
+			note("token upgrade " .. id)
+			return
+		end
+	end
+end
+
 local function freePass()
 	fire("ClaimFreeSpin", true)
 	task.wait(0.4)
@@ -546,13 +740,19 @@ local function freePass()
 	if plr:GetAttribute("LeaveRewardReady") then
 		fire("LeaveRewardClaimed", true)
 	end
-	fire("ClaimRebirthTokens", true)
+	-- deliberately NOT ClaimRebirthTokens: it takes a COUNT and converts that many
+	-- rebirths into three FameTokens each, so it spends the one multiplier that
+	-- matters. The panel's own button does the same thing.
 end
 
 local function spendPass()
 	-- gear runs inside the cycle instead, because buying it may need the body
-	if CONFIG.rebirth then rebirthPass() end
 	if CONFIG.portals then portalPass() end
+	if CONFIG.tokens then tokenPass() end
+	if CONFIG.eggs then eggPass() end
+	if CONFIG.auras then auraPass() end
+	if CONFIG.pets then petPass() end
+	if CONFIG.boosts then boostPass() end
 end
 
 --------------------------------------------------------------------------------
@@ -576,6 +776,9 @@ task.spawn(function()
 end)
 
 loop(0.4, nil, cyclePass)
+-- rebirth on its own fast timer: it is the strongest thing in the game and every
+-- second it waits is a second of looks piling up behind a wall already passed
+loop(2, "rebirth", rebirthPass)
 loop(8, nil, spendPass)
 loop(90, "freebies", freePass)
 
@@ -626,8 +829,21 @@ spend:Toggle("Buy gear", CONFIG.gear, function(v) CONFIG.gear = v end,
 	UI.theme.warn)
 spend:Toggle("Auto rebirth", CONFIG.rebirth, function(v) CONFIG.rebirth = v end,
 	"Rebirth(\"Max\") - the only thing that unlocks stronger trainers", UI.theme.warn)
-spend:Toggle("Gear before rebirth", CONFIG.gearFirst, function(v) CONFIG.gearFirst = v end,
-	"a rebirth wipes the balance; without this the next gear tier is never reached")
+spend:Stepper("Rebirth reserve", function()
+	return string.format("x%.1f", CONFIG.rebirthReserve)
+end, function(dir)
+	CONFIG.rebirthReserve = math.clamp(CONFIG.rebirthReserve + dir * 0.5, 1, 10)
+end, "eggs and auras may only spend looks above the next rebirth times this")
+spend:Toggle("Eggs", CONFIG.eggs, function(v) CONFIG.eggs = v end,
+	"priced in looks, so only the surplus above the next rebirth is used", UI.theme.warn)
+spend:Toggle("Auras", CONFIG.auras, function(v) CONFIG.auras = v end,
+	"rolls the best affordable tier and equips the best one owned", UI.theme.warn)
+spend:Toggle("Pets", CONFIG.pets, function(v) CONFIG.pets = v end,
+	"keeps the strongest pets equipped up to PetSlots")
+spend:Toggle("Boosts", CONFIG.boosts, function(v) CONFIG.boosts = v end,
+	"uses anything sitting in the boost inventory")
+spend:Toggle("Token upgrades", CONFIG.tokens, function(v) CONFIG.tokens = v end,
+	"spends tokens you already hold; it never TRADES rebirths for them", UI.theme.good)
 spend:Stepper("Rebirth until", function()
 	return CONFIG.rebirthUntil == 0 and "no limit" or short(CONFIG.rebirthUntil)
 end, function(dir)
@@ -662,8 +878,11 @@ task.spawn(function()
 			"  trainer   " .. tostring(STATE.trainer) .. "   x" .. tostring(STATE.trainerMul),
 			"  world     " .. tostring(STATE.world) .. "   " .. tostring(STATE.zone),
 			"  npc       " .. tostring(STATE.npc) .. "   pays " .. short(STATE.npcPays),
-			"  mogs      " .. STATE.mogs,
-			"  rebirths  " .. short(STATE.rebirths) .. "   tokens " .. short(STATE.tokens),
+			"  mogs      " .. STATE.mogs .. "   pets " .. STATE.petsEquipped .. "/" .. STATE.pets
+				.. " x" .. short(STATE.petMul),
+			"  aura      " .. tostring(STATE.aura) .. "   x" .. short(STATE.auraMul),
+			"  rebirths  " .. short(STATE.rebirths) .. "   next at " .. short(STATE.rebirthNeed),
+			"  tokens    " .. short(STATE.tokens),
 			"  " .. tostring(STATE.note),
 		}
 		pcall(function() out:set(lines) end)
@@ -687,7 +906,10 @@ _G.__LOOKSCLICK_DBG = {
 	bestTrainer = bestTrainer, trainPhase = trainPhase,
 	bestZone = bestZone, bestNPC = bestNPC, mogOnce = mogOnce, mogPhase = mogPhase,
 	gearPass = gearPass, rebirthPass = rebirthPass, portalPass = portalPass,
-	nextGear = nextGear,
+	nextGear = nextGear, gearLadder = gearLadder,
+	rebirthNeed = rebirthNeed, spendableLooks = spendableLooks, canSpendLooks = canSpendLooks,
+	askInventory = askInventory, petPass = petPass, eggPass = eggPass,
+	auraPass = auraPass, boostPass = boostPass, tokenPass = tokenPass,
 	freePass = freePass, spendPass = spendPass, cyclePass = cyclePass,
 	worldFolder = worldFolder,
 }
