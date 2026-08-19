@@ -7,7 +7,9 @@
       "alias": "lootevo",
       "name": "[+1] Loot Evo",
       "file": "games/lootevo.lua",
-      "places": [96033388567901],
+      "places": [
+        96033388567901
+      ],
       "status": "ok",
       "detect": "local rs = game:GetService('ReplicatedStorage') return rs:FindFirstChild('ClickRequest', true) ~= nil and rs:FindFirstChild('RebirthRequest', true) ~= nil"
     },
@@ -15,7 +17,9 @@
       "alias": "sellores",
       "name": "Sell Ores",
       "file": "games/sellores.lua",
-      "places": [122572082932179],
+      "places": [
+        122572082932179
+      ],
       "status": "ok",
       "detect": "local rs = game:GetService('ReplicatedStorage') return rs:FindFirstChild('BaseBuildPurchaseTunnel', true) ~= nil"
     },
@@ -23,7 +27,9 @@
       "alias": "drillblocks",
       "name": "Drill Blocks for Brainrots",
       "file": "games/drillblocks.lua",
-      "places": [78177131121429],
+      "places": [
+        78177131121429
+      ],
       "status": "ok",
       "detect": "local rs = game:GetService('ReplicatedStorage') return rs:FindFirstChild('IncrementStrength', true) ~= nil and rs:FindFirstChild('ItemsConfigurations', true) ~= nil"
     },
@@ -31,7 +37,9 @@
       "alias": "drillfarm",
       "name": "Make a Drill Farm",
       "file": "games/drillfarm.lua",
-      "places": [79315121100812],
+      "places": [
+        79315121100812
+      ],
       "status": "ok",
       "detect": "local rs = game:GetService('ReplicatedStorage') return rs:FindFirstChild('SpinDrillService', true) ~= nil"
     },
@@ -39,7 +47,10 @@
       "alias": "cleanleaves",
       "name": "Clean all the leaves!",
       "file": "games/cleanleaves.lua",
-      "places": [92637789841354, 100068273119174],
+      "places": [
+        92637789841354,
+        100068273119174
+      ],
       "status": "ok",
       "note": "lobby and map are separate places; every map place is caught by detect",
       "detect": "local plr = game:GetService('Players').LocalPlayer local ps = plr and plr:FindFirstChild('PlayerScripts') if ps and ps:FindFirstChild('LeafSim') then return true end local rem = game:GetService('ReplicatedStorage'):FindFirstChild('Remotes') if rem and rem:FindFirstChild('EmptyBackpack') then return true end return rem ~= nil and rem:FindFirstChild('UpgradeBuy') ~= nil and game.Workspace:FindFirstChild('Teams') ~= nil"
@@ -48,7 +59,9 @@
       "alias": "skillpoints",
       "name": "+1 Skill Point Legends",
       "file": "games/skillpoints.lua",
-      "places": [135668295983945],
+      "places": [
+        135668295983945
+      ],
       "status": "ok",
       "detect": "local src = game:GetService('ReplicatedStorage'):FindFirstChild('Source') return src ~= nil and src:FindFirstChild('Packets') ~= nil and src:FindFirstChild('Utils') ~= nil"
     },
@@ -56,7 +69,10 @@
       "alias": "speedmonkey",
       "name": "+1 Speed Monkey Escape",
       "file": "games/speedmonkey.lua",
-      "places": [114697347887839, 97502234572571],
+      "places": [
+        114697347887839,
+        97502234572571
+      ],
       "status": "ok",
       "note": "second place id is the dev's TestPlaceID out of Config.Game",
       "detect": "local rs = game:GetService('ReplicatedStorage') local cfg = rs:FindFirstChild('Config') return cfg ~= nil and cfg:FindFirstChild('Treadmills') ~= nil and cfg:FindFirstChild('Upgrades') ~= nil and rs:FindFirstChild('Remotes') ~= nil and rs.Remotes:FindFirstChild('PromptTreadmill') ~= nil"
@@ -65,7 +81,9 @@
       "alias": "digclean",
       "name": "Dig & Clean",
       "file": "games/digclean.lua",
-      "places": [83038462357724],
+      "places": [
+        83038462357724
+      ],
       "status": "ok",
       "detect": "local rs = game:GetService('ReplicatedStorage') local ts = rs:FindFirstChild('TS') local c = ts and ts:FindFirstChild('constants') return c ~= nil and c:FindFirstChild('DiggingConfig', true) ~= nil and c:FindFirstChild('SprayBottles', true) ~= nil"
     },
@@ -73,7 +91,9 @@
       "alias": "muscleevo",
       "name": "+1 Muscle Evolution",
       "file": "games/muscleevo.lua",
-      "places": [133007106457547],
+      "places": [
+        133007106457547
+      ],
       "status": "ok",
       "detect": "local rs = game:GetService('ReplicatedStorage') local sh = rs:FindFirstChild('Shared') local cfg = sh and sh:FindFirstChild('Configs') return cfg ~= nil and cfg:FindFirstChild('StrengthLevels') ~= nil and cfg:FindFirstChild('WinButtons') ~= nil"
     },
@@ -81,9 +101,21 @@
       "alias": "powerclick",
       "name": "+1 Power Per Click",
       "file": "games/powerclick.lua",
-      "places": [74889851913797],
+      "places": [
+        74889851913797
+      ],
       "status": "ok",
       "detect": "local rs = game:GetService('ReplicatedStorage') return rs:FindFirstChild('ClickTrainEvent') ~= nil and rs:FindFirstChild('WallConfig') ~= nil and rs:FindFirstChild('CaveHitEvent') ~= nil"
+    },
+    {
+      "alias": "drainwater",
+      "name": "+1 Drain Water Per Click",
+      "file": "games/drainwater.lua",
+      "places": [
+        103883942725157
+      ],
+      "status": "ok",
+      "detect": "local rs = game:GetService('ReplicatedStorage') local r = rs:FindFirstChild('Remote') if not r then return false end local e = r:FindFirstChild('Event') return e ~= nil and e:FindFirstChild('Level') ~= nil and e.Level:FindFirstChild('[C-S]Click') ~= nil and r:FindFirstChild('Function') ~= nil and r.Function:FindFirstChild('FishShow') ~= nil"
     },
     {
       "alias": "eggfarm",
