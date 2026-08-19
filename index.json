@@ -183,6 +183,16 @@
       "detect": "local rs = game:GetService('ReplicatedStorage') local cfg = rs:FindFirstChild('Configuration') local rem = rs:FindFirstChild('Remotes') local ev = rem and rem:FindFirstChild('Events') return cfg ~= nil and cfg:FindFirstChild('MinStrength') ~= nil and cfg:FindFirstChild('WallConfig') ~= nil and ev ~= nil and ev:FindFirstChild('ClickRemote') ~= nil"
     },
     {
+      "alias": "powerblast",
+      "name": "Power Blast Lucky Blocks!",
+      "file": "games/powerblast.lua",
+      "places": [
+        119822977170203
+      ],
+      "status": "ok",
+      "detect": "local rs = game:GetService('ReplicatedStorage') local rem = rs:FindFirstChild('Remotes') return rem ~= nil and rem:FindFirstChild('RequestBlastStart') ~= nil and rem:FindFirstChild('RequestBlastRelease') ~= nil and rem:FindFirstChild('RequestEquipBestBrainrots') ~= nil and rs:FindFirstChild('PowerBlastCore') ~= nil"
+    },
+    {
       "alias": "eggfarm",
       "name": "Grow a Chicken Fighter",
       "file": "games/eggfarm.lua",
