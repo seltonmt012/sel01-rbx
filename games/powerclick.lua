@@ -60,6 +60,7 @@ local CONFIG = {
 	hitGap = 0.03,         -- seconds between wall hits
 	rebirthUntil = 0,      -- 0 = no limit
 	spendEvery = 20,       -- seconds between spending passes
+	swordReach = 3,        -- reserve the next sword rung once it is this close
 }
 
 local STATE = {
@@ -455,6 +456,15 @@ end
 -- spending
 --------------------------------------------------------------------------------
 
+-- Loot Evo's trap was that a sword is held by the BALANCE and spending takes it
+-- back. Tested here and it does NOT apply: the balance was spent from 354 down to
+-- 37 while the equipped sword cost 100, and the 30-power sword stayed; standing on
+-- its stand again with 37 wins did not take it either. Swords are bought once.
+--
+-- The floor below is therefore insurance, not a proven rule - it costs nothing
+-- because the target reserve is almost always the larger of the two. What IS
+-- proven is the target: saving for the next sword instead of dribbling the balance
+-- away on cheap upgrade rows. Reserves are never summed, the largest wins.
 -- The three that compound: damage decides how deep the walls fall, clickPower how
 -- fast strength arrives, and wins multiplies every single cashout. attackSpeed is
 -- next because the hit rate is what turns strength into depth.
@@ -492,31 +502,50 @@ local function swordFloor()
 	return floor
 end
 
--- The next sword up, reserved only once it is actually within reach. A reserve
--- that is always on never lets anything be bought; one that is never on lets the
--- cheap rows drain the balance to nothing.
+-- Swords are first priority now, so the next rung is fenced off before anything
+-- else may spend - but only once it is actually within reach. Reserving a rung
+-- that is twenty times the balance would freeze every other purchase forever,
+-- which is the starvation pattern this project has hit six times before.
 local function swordTarget(wins)
-	local cheapest
 	local folder = worldFolder(STATE.world or 1, "ShopStands")
 	if not folder then return 0 end
+	local cheapest
 	for _, m in ipairs(folder:GetChildren()) do
 		local cost = tonumber(m:GetAttribute("SwordCost"))
 		local power = tonumber(m:GetAttribute("SwordPower"))
-		if cost and power and not m:GetAttribute("GamepassId") and power > (STATE.sword or 1) then
+		if cost and cost > 0 and power and not m:GetAttribute("GamepassId")
+			and power > (STATE.sword or 1) then
 			if not cheapest or cost < cheapest then cheapest = cost end
 		end
 	end
 	if not cheapest then return 0 end
-	return (cheapest <= wins * 2) and cheapest or 0
+	return (cheapest <= wins * CONFIG.swordReach) and cheapest or 0
 end
 
 -- One guard, asked by every spender. Not the sum: the largest.
 local function spendable(wins)
 	wins = wins or value("Wins", 0)
-	local reserve = math.max(swordFloor(), swordTarget(wins))
+	-- swordFloor is NOT in here. Keeping the equipped sword's price fenced off
+	-- looked like cheap insurance and instead froze every purchase in the game:
+	-- the equipped sword cost 8,000 against a 1,337 balance, so nothing was ever
+	-- spendable. Swords were measured to be permanent, so only the next rung is
+	-- reserved - that is the one purchase the balance actually has to reach.
+	local reserve = swordTarget(wins)
 	STATE.reserve = reserve
 	return math.max(0, wins - reserve)
 end
+
+-- The three that compound: damage decides how deep the walls fall, clickPower how
+-- fast strength arrives, and wins multiplies every single cashout. attackSpeed is
+-- next because the hit rate is what turns strength into depth.
+--
+-- Rank, not order. The first version stopped after ONE purchase and always ran
+-- damage first, so damage sat at 1.60x for 200 wins while the WINS upgrade was
+-- still 1.00x and cost 1 - the cheapest compounding buy in the game, skipped every
+-- pass. Now every affordable row is bought, cheapest of the wanted ones first.
+-- walkSpeed is deliberately absent: the script pins and teleports, so movement
+-- speed buys nothing at all, and it was quietly eating the balance at cost 1.
+local UPGRADE_RANK = { damage = 1, clickPower = 1, wins = 1, attackSpeed = 2 }
 
 local function buyUpgrades()
 	local fn = remote("UpgradeFunction")
@@ -572,30 +601,84 @@ local function swordStands()
 	return stands
 end
 
-local function buyBestSword()
-	local best
+-- The ladder is climbed RUNG BY RUNG. You cannot walk onto the 4,000 stand while
+-- holding the 400 one even with the money in hand - the stands in between have to
+-- be bought first, so the real price of a distant sword is the SUM of every rung
+-- up to it. That is what makes a naive "best affordable" jump quietly stall.
+local function swordLadder()
+	local ladder = {}
 	for _, stand in ipairs(swordStands()) do
-		-- A gamepass stand shows SwordCost 0, which would otherwise read as free.
-		if not stand.pass and stand.power > STATE.sword and stand.cost <= STATE.wins then
-			if not best or stand.power > best.power then best = stand end
+		-- a gamepass stand reports SwordCost 0, which would otherwise read as free
+		if not stand.pass and stand.cost and stand.cost > 0 then
+			ladder[#ladder + 1] = stand
 		end
 	end
-	if not best then return false end
+	table.sort(ladder, function(a, b) return a.power < b.power end)
+	return ladder
+end
 
-	local ped = best.model:FindFirstChild("ShopPedestal", true)
+local function nextRung()
+	for _, stand in ipairs(swordLadder()) do
+		if stand.power > (STATE.sword or 1) then return stand end
+	end
+	return nil
+end
+
+-- What it costs to get from here to that rung, every step included.
+local function costToReach(target)
+	local total = 0
+	for _, stand in ipairs(swordLadder()) do
+		if stand.power > (STATE.sword or 1) and stand.power <= target.power then
+			total = total + stand.cost
+		end
+	end
+	return total
+end
+
+local function standOn(stand)
+	local ped = stand.model:FindFirstChild("ShopPedestal", true)
 	if not ped then return false end
 	local pos = ped:IsA("BasePart") and ped.Position or ped:GetPivot().Position
 	local before = STATE.sword
 	local unpin = pin(function() return pos + Vector3.new(0, 3, 0) end)
-	task.wait(4)                          -- the stand hands it over while you stand there
+	task.wait(3.5)                        -- the stand hands it over while you stand there
 	unpin()
 	refresh()
-	if STATE.sword > before then
-		STATE.swordName = best.model.Name
-		note("sword " .. best.model.Name .. "   power " .. short(STATE.sword))
-		return true
+	return STATE.sword > before
+end
+
+-- Purely for the footer line: what the next rung is and what the whole climb to
+-- the best rung in sight really costs, rungs in between included.
+local function swordPlan()
+	local rung = nextRung()
+	if not rung then return "sword maxed" end
+	local best = rung
+	for _, stand in ipairs(swordLadder()) do
+		if stand.power > (STATE.sword or 1) and costToReach(stand) <= math.max(1, STATE.wins) then
+			best = stand
+		end
 	end
-	return false
+	if best ~= rung then
+		return string.format("next %s %s   reachable up to %s (%s all rungs)",
+			rung.model.Name, short(rung.cost), best.model.Name, short(costToReach(best)))
+	end
+	return string.format("next %s for %s", rung.model.Name, short(rung.cost))
+end
+
+local function buyBestSword()
+	local climbed = false
+	for _ = 1, 6 do                        -- a few rungs per pass, never a jump
+		local rung = nextRung()
+		if not rung then break end
+		refresh()
+		if rung.cost > STATE.wins then break end
+		if not standOn(rung) then break end
+		climbed = true
+		STATE.swordName = rung.model.Name
+		note("sword " .. rung.model.Name .. "   power " .. short(STATE.sword) ..
+			"   for " .. short(rung.cost))
+	end
+	return climbed
 end
 
 local function doRebirth()
@@ -974,6 +1057,8 @@ _G.__POWERCLICK_DBG = {
 	buyUpgrades = buyUpgrades, swordStands = swordStands, buyBestSword = buyBestSword,
 	doRebirth = doRebirth, spendPass = spendPass, freePass = freePass,
 	swordFloor = swordFloor, swordTarget = swordTarget, spendable = spendable,
+	swordLadder = swordLadder, nextRung = nextRung, costToReach = costToReach,
+	swordPlan = swordPlan,
 	petState = petState, hatchBestEgg = hatchBestEgg, equipBestPets = equipBestPets,
 	mergePets = mergePets, claimSpins = claimSpins, claimDaily = claimDaily,
 	usePotions = usePotions, currentWorld = currentWorld, wallConfigFor = wallConfigFor,
