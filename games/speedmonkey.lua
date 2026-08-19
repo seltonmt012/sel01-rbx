@@ -138,18 +138,52 @@ end
 -- The win plate is a Model called NormalWin with a Button part. On World2 it sits
 -- one level deeper, inside Stage9.FinalDestination, so this searches descendants.
 -- VipWin is the gamepass twin and is never returned.
-local function winPlate(w, stage)
-	local worldFolder = Workspace.Map:FindFirstChild("World" .. w)
-	local stages = worldFolder and worldFolder:FindFirstChild("Stages")
-	local stageFolder = stages and stages:FindFirstChild("Stage" .. stage)
-	if not stageFolder then return nil end
-	for _, d in ipairs(stageFolder:GetDescendants()) do
+local function plateIn(container)
+	for _, d in ipairs(container:GetDescendants()) do
 		if d.Name == "NormalWin" then
 			local button = d:FindFirstChild("Button")
 			if button and button:IsA("BasePart") then return button end
 		end
 	end
 	return nil
+end
+
+-- WHERE the plate is parented is not reliable, and that is the whole bug behind
+-- "the monkey stands NEXT to the finish on the higher worlds". Measured on World3:
+-- the last plate - the one right beside the portal that reads "World 4, 24 Rebirths
+-- Required" - has its Button at (-8077, 279, 2741) and is filed under
+-- Stages.Stage7, while the checkpoint beside it is Checkpoint9 at (-8087, 288,
+-- 2775). So Stage9 holds no NormalWin at all, the lookup returned nil, the code
+-- fell back to the checkpoint and parked the body 36 studs off the plate - close
+-- enough to look right on screen and paying exactly nothing.
+-- World4 files its plate in Stage9 as expected, so both layouts have to work:
+-- the stage folder first, and when it is empty the nearest plate to where the
+-- stage ends (a stage's plate sits at its END, i.e. next to the following
+-- checkpoint - the last stage has none, so its own checkpoint is the anchor).
+local PLATE_SEARCH_RADIUS = 250
+
+local function winPlate(w, stage)
+	local worldFolder = Workspace.Map:FindFirstChild("World" .. w)
+	local stages = worldFolder and worldFolder:FindFirstChild("Stages")
+	if not stages then return nil end
+	local stageFolder = stages:FindFirstChild("Stage" .. stage)
+	local button = stageFolder and plateIn(stageFolder)
+	if button then return button end
+	local anchor = checkpoint(w, stage + 1) or checkpoint(w, stage)
+	if not anchor then return nil end
+	local best, bestDist
+	for _, d in ipairs(stages:GetDescendants()) do
+		if d.Name == "NormalWin" then
+			local b = d:FindFirstChild("Button")
+			if b and b:IsA("BasePart") then
+				local dist = (b.Position - anchor).Magnitude
+				if dist <= PLATE_SEARCH_RADIUS and (not bestDist or dist < bestDist) then
+					best, bestDist = b, dist
+				end
+			end
+		end
+	end
+	return best
 end
 
 local function highestStage(w)
