@@ -73,6 +73,7 @@ local CONFIG = {
     autoRewards  = true,    -- daily reward, lucky block, the description code
     autoPets     = true,    -- EquipBest, and delete the overflow
     keepPets     = 30,      -- how many pets to keep before culling
+    maxRebirthBatch = 25,   -- Tables.Rebirths is indexed by the amount
     minePhase    = 90,      -- seconds of mining per cycle
     trainPhase   = 90,      -- seconds of training per cycle
     sellGap      = 0.05,    -- one call per ore unit; this is the pacing
@@ -218,8 +219,16 @@ local function doRebirths()
             STATE.nextRebirthCost = rebirthCost(1)
             return
         end
-        local amount = math.max(1, math.floor(power() / (500 * (rebirths() + 1))))
+        -- The server indexes Tables.Rebirths with the amount, so a bulk rebirth
+        -- larger than that table answers "Invalid index" and does nothing -
+        -- measured with 413,640 power, which computed to 82 at once.
+        local affordable = math.floor(power() / (500 * (rebirths() + 1)))
+        local amount = math.clamp(affordable, 1, CONFIG.maxRebirthBatch)
         local ok, done, message = invoke("Rebirth", amount)
+        if not (ok and done) and amount > 1 then
+            amount = 1
+            ok, done, message = invoke("Rebirth", amount)
+        end
         if not (ok and done) then
             note("rebirth refused: %s", tostring(message))
             return
