@@ -61,11 +61,14 @@ local CONFIG = {
 	upgrades = true,       -- Speed, Backpack, FishDisplay
 	eggs = true,           -- cash eggs only, Robux eggs are filtered by flag
 	pets = true,           -- press EquipBest after every hatch
+	merge = true,          -- "Merge for Better": three of a kind into one better
 	rebirth = true,
 	offline = true,        -- offline earnings and the tank's pending cash
 	rebirthUntil = 0,      -- 0 = no limit
 	spendEvery = 15,       -- seconds between spending passes
 	diveSeconds = 45,      -- how long one dive may run before the loop breathes
+	harvestAfter = 18,     -- a stage taking longer than this is worth interrupting
+	                       -- to go pick the fish out of the stages already cleared
 	stallSeconds = 40,     -- no new stage for this long -> surface and cash in
 	claimShare = 0.25,     -- while diving, only claim fish worth at least this
 	                       -- share of the best one in reach
@@ -278,17 +281,35 @@ local function worldFish()
 	return folder
 end
 
+-- Which stages the server actually counts as cleared. The game refuses a pickup
+-- with "Clear this stage before picking up fish", and an Enabled prompt is NOT
+-- that signal - a half-drained pool still shows its prompts. Firing at them just
+-- teleports the character from fish to fish getting refused, which is what the
+-- random hopping was.
+local function clearedStages()
+	local done = {}
+	for _, row in ipairs(stageRows()) do
+		if row.completed then done[tostring(row.stageId)] = true end
+	end
+	for id = 1, 15 do
+		if plr:GetAttribute("StageCompleted_" .. id) then done[tostring(id)] = true end
+	end
+	return done
+end
+
 local function claimableFish()
 	local out = {}
 	local folder = worldFish()
 	if not folder then return out end
+	local cleared = clearedStages()
 	for _, model in ipairs(folder:GetChildren()) do
 		if model:GetAttribute("Claimed") ~= true then
 			local prompt = model:FindFirstChildWhichIsA("ProximityPrompt", true)
 			-- Enabled is the only honest signal: a fish from a pool you have not
 			-- drained keeps its prompt disabled, and firing it from far away does
 			-- nothing at all (tested at 713 studs).
-			if prompt and prompt.Enabled then
+			local stageId = tostring(model:GetAttribute("StageId"))
+			if prompt and prompt.Enabled and cleared[stageId] then
 				local parent = prompt.Parent
 				local pos = parent:IsA("BasePart") and parent.Position
 					or (parent:IsA("Model") and parent:GetPivot().Position)
@@ -359,15 +380,24 @@ local function claimNearby(budgetSeconds, minPrice)
 	for _, fish in ipairs(list) do
 		if count + taken >= math.max(1, capacity) then break end
 		if os.clock() - t0 > (budgetSeconds or 8) then break end
+		local _, had = carried()
 		local unpin = pin(function() return fish.pos + Vector3.new(0, 3, 0) end)
 		task.wait(CONFIG.settle)
 		pcall(function() fireproximityprompt(fish.prompt) end)
-		task.wait(0.35)
+		task.wait(0.45)
 		unpin()
-		taken = taken + 1
-		STATE.claimed = STATE.claimed + 1
-		note("claimed " .. tostring(fish.rarity) .. " " .. short(fish.price) ..
-			(fish.mutation and fish.mutation ~= "Normal" and ("  " .. fish.mutation) or ""))
+		local _, now = carried()
+		if now > had then
+			taken = taken + 1
+			STATE.claimed = STATE.claimed + 1
+			note("claimed " .. tostring(fish.rarity) .. " " .. short(fish.price) ..
+				(fish.mutation and fish.mutation ~= "Normal" and ("  " .. fish.mutation) or ""))
+		else
+			-- refused: the stage is not cleared after all. Stop hopping around,
+			-- the whole batch will be refused for the same reason.
+			note("pickup refused - stage not cleared yet")
+			break
+		end
 	end
 	return taken
 end
@@ -489,7 +519,7 @@ local function drainPhase(seconds)
 			STATE.lastProgress = os.clock()
 			if STATE.stage > STATE.deepest then STATE.deepest = STATE.stage end
 			unpin()
-			return true                      -- a pool just emptied: go claim its fish
+			return "cleared"                 -- a pool just emptied: go claim its fish
 		end
 		local dt = os.clock() - baseAt
 		if left and baseline and dt > 0.5 then
@@ -498,7 +528,16 @@ local function drainPhase(seconds)
 		note(string.format("stage %d   %s left   %s/s   pump x%s",
 			STATE.stage, short(STATE.remaining), short(STATE.rate), short(STATE.pumpMult)))
 		local _, count, capacity = carried()
-		if count >= math.max(1, capacity) then break end
+		if count >= math.max(1, capacity) then unpin() return "full" end
+
+		-- A deep stage can take minutes (5T of water), and standing there while
+		-- cleared pools hold fish worth millions is the worst trade in the game.
+		-- Walking between pools does NOT reset the run - only leaving for the plot
+		-- does - so the harvest is free.
+		if os.clock() - baseAt > CONFIG.harvestAfter and #claimableFish() > 0 then
+			unpin()
+			return "harvest"
+		end
 	end
 	unpin()
 	return false
@@ -664,12 +703,64 @@ local function openEggs()
 	if STATE.cash < before then
 		note("egg " .. tostring(best.id) .. " opened for " .. short(best.price))
 		if CONFIG.pets then
+			if CONFIG.merge then mergePets() end
 			local equip = ev("Pet", "EquipBest")
 			if equip then pcall(function() equip:FireServer() end) end
 		end
 		return true
 	end
 	return false
+end
+
+-- "Merge for Better" in the pet window is Event.Pet.CraftPet, and it takes the
+-- pet ID alone. Verified: firing it on a group of nine identical pets took the
+-- total from 44 to 42 and that group from 9 to 6 - three are consumed, one better
+-- one comes back. Only the count moving proves it, the event answers nothing.
+local function mergePets()
+	local getData = fn("Pet", "GetPlayerPetData")
+	local craft = ev("Pet", "CraftPet")
+	if not (getData and craft) then return false end
+
+	local merged = 0
+	for _ = 1, 8 do                        -- bounded: each pass consumes three pets
+		local data = invoke(getData)
+		if type(data) ~= "table" then break end
+		local groups, total = {}, 0
+		for _, list in ipairs({ data.UnEquipPet or {}, data.EquipPet or {} }) do
+			for _, pet in pairs(list) do
+				-- never feed a locked pet into the grinder
+				if not pet.isLock then
+					local key = tostring(pet.ID) .. "*" .. tostring(pet.Star)
+					groups[key] = groups[key] or { id = pet.ID, count = 0, name = pet.Name }
+					groups[key].count = groups[key].count + 1
+				end
+				total = total + 1
+			end
+		end
+		local pick
+		for _, group in pairs(groups) do
+			if group.count >= 3 and (not pick or group.count > pick.count) then pick = group end
+		end
+		if not pick then break end
+
+		pcall(function() craft:FireServer(pick.id) end)
+		task.wait(0.8)
+		local after = invoke(getData)
+		local newTotal = 0
+		if type(after) == "table" then
+			for _, list in ipairs({ after.UnEquipPet or {}, after.EquipPet or {} }) do
+				for _ in pairs(list) do newTotal = newTotal + 1 end
+			end
+		end
+		if newTotal >= total then break end -- refused: stop instead of spamming
+		merged = merged + 1
+		note("merged 3x " .. tostring(pick.name) .. " into a better one")
+	end
+	if merged > 0 then
+		local equip = ev("Pet", "EquipBest")
+		if equip then pcall(function() equip:FireServer() end) end
+	end
+	return merged > 0
 end
 
 local function claimFree()
@@ -710,6 +801,7 @@ local function spendPass()
 		if CONFIG.auras then buyAura() end
 		if CONFIG.eggs then openEggs() end
 		if CONFIG.pets then
+			if CONFIG.merge then mergePets() end
 			local equip = ev("Pet", "EquipBest")
 			if equip then pcall(function() equip:FireServer() end) end
 		end
@@ -757,12 +849,17 @@ task.spawn(function()
 			-- 5 while the deep pools hold fish worth millions each. So: dive until
 			-- the backpack is FULL or the run genuinely stalls, and only then pay
 			-- the reset.
-			local completed = false
+			local reason = false
 			if CONFIG.drain then
 				STATE.phase = "dive"
-				completed = drainPhase(CONFIG.diveSeconds)
+				reason = drainPhase(CONFIG.diveSeconds)
 			end
-			if completed and CONFIG.fish then
+			if reason == "harvest" and CONFIG.fish then
+				-- the current stage is slow: empty the cleared ones instead of waiting
+				STATE.phase = "harvest"
+				withLock("harvest", function() claimNearby(12, 0) end)
+			end
+			if reason == "cleared" and CONFIG.fish then
 				STATE.phase = "fish"
 				withLock("fish", function()
 					-- a fraction of the best fish this run has seen, so the bar
@@ -848,6 +945,8 @@ money:Toggle("Buy upgrades", CONFIG.upgrades, function(v) CONFIG.upgrades = v en
 money:Toggle("Buy auras", CONFIG.auras, function(v) CONFIG.auras = v end, nil, UI.theme.warn)
 money:Toggle("Open eggs", CONFIG.eggs, function(v) CONFIG.eggs = v end,
 	"cash eggs only; a Robux egg has no cash price and is skipped", UI.theme.warn)
+money:Toggle("Merge pets", CONFIG.merge, function(v) CONFIG.merge = v end,
+	"three of a kind into one better one, locked pets are left alone")
 money:Toggle("Free rewards", CONFIG.offline, function(v) CONFIG.offline = v end,
 	"offline earnings and the tank's pending cash", UI.theme.good)
 money:Button("Unstuck", function()
@@ -897,11 +996,12 @@ _G.__DRAINWATER_DBG = {
 	refresh = refresh, short = short, pin = pin, invoke = invoke,
 	poolOf = poolOf, poolStand = poolStand, stageRows = stageRows, remainingOf = remainingOf,
 	claimableFish = claimableFish, claimNearby = claimNearby, carried = carried,
+	clearedStages = clearedStages,
 	tankState = tankState, worstDisplayed = worstDisplayed,
 	plotTrip = plotTrip, plotButtons = plotButtons,
 	drainPhase = drainPhase, spendPass = spendPass,
 	buyPump = buyPump, buyAura = buyAura, buyUpgrades = buyUpgrades,
-	openEggs = openEggs, claimFree = claimFree, doRebirth = doRebirth,
+	openEggs = openEggs, claimFree = claimFree, doRebirth = doRebirth, mergePets = mergePets,
 	configModule = configModule, num = num,
 	pumpReserve = pumpReserve, spendable = spendable,
 }
