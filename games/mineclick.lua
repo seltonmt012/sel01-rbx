@@ -553,13 +553,17 @@ local function buyAura()
 	if wear then EquipAura:FireServer(wear) end
 end
 
+-- The backpack is bought with UpgradeSlot("Cash") and runs 3 -> 20 slots at
+-- `200000 * 2.85^(size-3)` (verified: 3 -> 4 charged exactly 200,000). Every
+-- extra slot is one more piece per surface run, so it is worth more than an aura
+-- and is allowed past the pickaxe reserve while it is still cheap.
 local function buyUpgrades()
 	if not CONFIG.autoUpgrade then return end
 	local d = data()
 	local size = d.BackpackSize or 3
 	if size < (UpgradesHelper.MaxBackpackSize or 20) then
 		local cost = UpgradesHelper:GetBackpackUpgradeCost(size)
-		if canSpend(cost) then
+		if canSpend(cost) or cost <= (d.Cash or 0) * 0.25 then
 			UpgradeSlot:FireServer("Cash")
 			STATE.note = "backpack " .. size .. " -> " .. (size + 1) .. " for " .. short(cost)
 			task.wait(0.5)
@@ -649,9 +653,11 @@ local function stageLoot(stageNum)
 	return out
 end
 
--- Clear a stage's loot until it stays empty for a full sweep. The user watched
--- the first version break a stage and walk away from its drops, which is where
--- the whole cash income was going.
+-- Clear a stage's loot until it stays empty for a full sweep, ALWAYS taking the
+-- richest piece still lying there. The list is re-read after every grab because
+-- the other players are taking things at the same time and because a fresh drop
+-- can outclass whatever was planned - with five slots, order is the difference
+-- between a 140K load and a 700 one.
 local function collectStage(stageNum)
 	local empty = 0
 	while empty < 2 and CONFIG.auto and GEN == _G.__MINECLICK do
@@ -666,11 +672,11 @@ local function collectStage(stageNum)
 		else
 			empty = 0
 			STATE.mode = "loot"
-			for _, entry in ipairs(loot) do
-				if not CONFIG.auto or GEN ~= _G.__MINECLICK then return end
-				if entry.part.Parent and entry.part:GetAttribute("IsTaken") == false then
-					grab(entry.part)
-				end
+			local best = loot[1]
+			STATE.targetName = "stage " .. stageNum .. " best: " ..
+				tostring(best.part:GetAttribute("ItemId")) .. " " .. short(best.value or 0)
+			if best.part.Parent and best.part:GetAttribute("IsTaken") == false then
+				grab(best.part)
 			end
 		end
 	end
@@ -720,12 +726,28 @@ local function think()
 		local damaged = false
 		local hpConn = UpdateWallHealth.OnClientEvent:Connect(function() damaged = true end)
 		local deadline = os.clock() + CONFIG.stageDwell
+		local finished = false
 		while os.clock() < deadline and CONFIG.auto and GEN == _G.__MINECLICK do
-			local wall = wallsLeft(stageNum) or 1
+			local wall = wallsLeft(stageNum)
+			if not wall then
+				-- Stage is done THIS instant. Sitting out the rest of the dwell
+				-- window here is what made it look like the script kept digging
+				-- a finished stage instead of moving on.
+				finished = true
+				break
+			end
 			HitWall:FireServer(stageNum, wall)
 			task.wait(0.12)
 		end
 		hpConn:Disconnect()
+
+		if finished then
+			STATE.mode = "mine"
+			STATE.targetName = "stage " .. stageNum .. " cleared"
+			STATE.blocked = nil
+			if CONFIG.autoLoot then collectStage(stageNum) end
+			return
+		end
 		local gained = (data().WallsBroken or 0) - before
 		if damaged and gained <= 0 then
 			STATE.mode = "mine"
