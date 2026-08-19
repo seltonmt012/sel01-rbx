@@ -70,8 +70,9 @@ local CONFIG = {
 	harvestAfter = 18,     -- a stage taking longer than this is worth interrupting
 	                       -- to go pick the fish out of the stages already cleared
 	stallSeconds = 40,     -- no new stage for this long -> surface and cash in
-	claimShare = 0.25,     -- while diving, only claim fish worth at least this
+	claimShare = 0.35,     -- while diving, only claim fish worth at least this
 	                       -- share of the best one in reach
+	topupShare = 0.1,      -- and even the last-minute top-up keeps a floor
 	pumpReach = 2.5,       -- reserve for the next pump once it is this close
 	claimRadius = 14,      -- the prompt itself allows 15 studs
 	settle = 1.0,          -- seconds pinned before an action; the server has to
@@ -314,17 +315,22 @@ local function claimableFish()
 				local pos = parent:IsA("BasePart") and parent.Position
 					or (parent:IsA("Model") and parent:GetPivot().Position)
 				if pos then
+					local mutation = model:GetAttribute("Mutation")
+					local mutMult = num(model:GetAttribute("MutationMultiplier")) or 1
 					out[#out + 1] = {
 						model = model, prompt = prompt, pos = pos,
-						price = tonumber(model:GetAttribute("Price")) or 0,
+						price = num(model:GetAttribute("Price")) or 0,
 						rarity = model:GetAttribute("Rarity"),
-						mutation = model:GetAttribute("Mutation"),
+						mutation = mutation, mutMult = mutMult,
 					}
 				end
 			end
 		end
 	end
-	table.sort(out, function(a, b) return a.price > b.price end)
+	table.sort(out, function(a, b)
+		if a.price ~= b.price then return a.price > b.price end
+		return (a.mutMult or 1) > (b.mutMult or 1)   -- effect fish win a tie
+	end)
 	return out
 end
 
@@ -703,7 +709,7 @@ local function openEggs()
 	if STATE.cash < before then
 		note("egg " .. tostring(best.id) .. " opened for " .. short(best.price))
 		if CONFIG.pets then
-			if CONFIG.merge then mergePets() end
+			-- merging runs in the spend pass, below, where it is defined
 			local equip = ev("Pet", "EquipBest")
 			if equip then pcall(function() equip:FireServer() end) end
 		end
@@ -857,28 +863,35 @@ task.spawn(function()
 			if reason == "harvest" and CONFIG.fish then
 				-- the current stage is slow: empty the cleared ones instead of waiting
 				STATE.phase = "harvest"
-				withLock("harvest", function() claimNearby(12, 0) end)
-			end
-			if reason == "cleared" and CONFIG.fish then
-				STATE.phase = "fish"
-				withLock("fish", function()
-					-- a fraction of the best fish this run has seen, so the bar
-					-- rises with the depth instead of being a fixed number
+				withLock("harvest", function()
 					local best = 0
 					for _, fish in ipairs(claimableFish()) do
 						if fish.price > best then best = fish.price end
 					end
-					claimNearby(6, best * CONFIG.claimShare)
+					claimNearby(12, best * CONFIG.claimShare)
 				end)
 			end
-
+			-- Deliberately NOT claiming after every cleared stage. At the start of a
+			-- run the only fish in reach are the stage 1-3 ones worth a few hundred,
+			-- and each slot they take is a stage-10 fish worth ten million left in
+			-- the pool. Fish stay claimable for the whole run, so the harvest waits
+			-- until the dive actually stalls - by then the deep pools are open.
 			local _, count, capacity = carried()
 			local full = capacity > 0 and count >= capacity
 			local stalled = (os.clock() - STATE.lastProgress) > CONFIG.stallSeconds
 			-- about to surface anyway: fill the remaining slots with whatever is
 			-- still reachable, cheap or not
 			if CONFIG.fish and stalled and not full then
-				withLock("topup", function() claimNearby(8, 0) end)
+				-- About to surface, but still not scraping the bottom: the pools
+				-- refill after a pickup, so an empty slot is worth more than a 603
+				-- pufferfish taken while a 160K jellyfish is two stages down.
+				withLock("topup", function()
+					local best = 0
+					for _, fish in ipairs(claimableFish()) do
+						if fish.price > best then best = fish.price end
+					end
+					claimNearby(8, best * CONFIG.topupShare)
+				end)
 				_, count, capacity = carried()
 			end
 			if CONFIG.fish and count > 0 and (full or stalled) then
