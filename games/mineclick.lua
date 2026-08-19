@@ -42,13 +42,28 @@
 --     resolves the next unbroken wall and runs its own punching loop. Standing
 --     in the hitbox broke all three walls of stage 1 in one 10s window
 --     (BreakWall(1,1), (1,2), (1,3)), so the script only has to stand there.
---   * **Loot never enters the inventory - it pays cash on the spot.** That is
---     what cost the longest detour here: `Data.Inventory` stayed empty through
---     every wall, every tutorial step and every SellAllLoot, while the actual
---     earner is the loot lying at `Stages["Stage n"].Spawnpoints.<GUID>`. Those
---     parts carry `ItemId`, `StageId` and `IsTaken`; touching one with
---     `IsTaken == false` credits its Revenue immediately. Measured: 17 pickups
---     in 16s moved Cash 200,000,100 -> 200,001,978.
+--   * **The loot cycle has three gates and missing any one of them looks exactly
+--     like a broken script.** The loot itself lies at
+--     `Stages["Stage n"].Spawnpoints.<GUID>` with `ItemId` / `StageId` /
+--     `IsTaken` attributes:
+--       1. It is picked up with an E press, not a touch. The ProximityPrompt is
+--          a DESCENDANT of the spawn part (under the item model) and only exists
+--          once the client has built it, so it has to be searched recursively
+--          and waited for.
+--       2. The stage has to be FINISHED. An unfinished one answers every pickup
+--          with "Complete Stage 12 First!" - and reaching a stage is not
+--          finishing it: StagesUnlocked read 1..12 while stages 3, 10 and 12
+--          still refused their loot. Hence stages are cleared lowest-first.
+--       3. The backpack has to have room. At 5/5 every prompt answers "Backpack
+--          is full! (Goto Surface)" and pays nothing - the state that had this
+--          script teleporting onto loot all day for zero cash.
+--     The payout is not per pickup either: `GotoSurface:FireServer()` empties the
+--     bag (Storage 5 -> 0) and `SellAllLoot:FireServer()` pays for the load.
+--     Measured: one full bag paid 93,840, and a 22s cycle of break -> collect ->
+--     surface -> sell paid 399,750.
+--   * `player.data.Storage` is how full the bag is, `Data.BackpackSize` the cap.
+--     `Data.Inventory` stays empty the whole time and is NOT the inventory -
+--     watching it is what hid the backpack gate for so long.
 --   * The loot is a RACE. 223 spawn points exist and with 14 players on the
 --     server only 0-9 are free at any moment - they refill on a cycle, they are
 --     not created fresh (zero new instances in 20s). A teleporting bot wins that
@@ -91,6 +106,10 @@ local PurchaseAura = Server:WaitForChild("PurchaseAura")
 local EquipAura    = Server:WaitForChild("EquipAura")
 local GroupReward  = Server:WaitForChild("GroupReward")
 local TeleportStage= Server:WaitForChild("TeleportToStage")
+local GotoSurface  = Server:WaitForChild("GotoSurface")
+
+local ClientRemotes    = Remotes:WaitForChild("Client")
+local UpdateWallHealth = ClientRemotes:WaitForChild("UpdateWallHealth")
 
 local Client       = ReplicatedStorage:WaitForChild("Client")
 local DataClient   = require(Client:WaitForChild("DataClient"))
@@ -225,6 +244,17 @@ local function maxUnlockedStage()
 	return best
 end
 
+-- A stage counts as DONE when it has no unbroken wall left, and that is what the
+-- game means by "Complete Stage 12 First!" - the message every pickup inside an
+-- unfinished stage answers with. Reaching a stage is not finishing it, so
+-- StagesUnlocked alone is the wrong test: the record read 1..12 while stages 3,
+-- 10 and 12 were still refusing their loot. Defined here because freeLoot needs
+-- it and a local is invisible above its definition.
+local function stageDone(stageNum)
+	local ok, wall = pcall(StageClient.GetNextWall, StageClient, stageNum)
+	return ok and wall == nil
+end
+
 local function freeLoot()
 	local out = {}
 	local hrp = root()
@@ -352,16 +382,6 @@ end
 -- back {1, 2}. TeleportToStage itself neither charges nor unlocks anything, so
 -- the body simply parks in the next hitbox. Only when that stage is out of walls
 -- does the target move on.
--- A stage counts as DONE when it has no unbroken wall left, and that is what the
--- game means by "Complete Stage 12 First!" - the message every pickup in an
--- unfinished stage answers with. Reaching a stage is not finishing it, so
--- StagesUnlocked alone is the wrong test: the record read 1..12 while stages 3,
--- 10 and 12 were still refusing their loot.
-local function stageDone(stageNum)
-	local ok, wall = pcall(StageClient.GetNextWall, StageClient, stageNum)
-	return ok and wall == nil
-end
-
 -- Work the LOWEST unfinished stage, not the deepest reachable one. Going deep
 -- first is what left a trail of half-cleared stages whose loot could never be
 -- taken, while the body hammered a wall far below that its pickaxe cannot chew.
