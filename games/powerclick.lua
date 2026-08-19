@@ -59,8 +59,10 @@ local CONFIG = {
 	stallSeconds = 8,      -- no wall progress for this long -> cash the run in
 	hitGap = 0.03,         -- seconds between wall hits
 	rebirthUntil = 0,      -- 0 = no limit
-	spendEvery = 20,       -- seconds between spending passes
-	swordReach = 3,        -- reserve the next sword rung once it is this close
+	spendEvery = 10,       -- seconds between spending passes
+	swordReach = 1.25,     -- reserve the next rung only once it is nearly affordable
+	cheapShare = 0.05,     -- anything under this share of the balance ignores the
+	                       -- reserve entirely, so cheap compounding rows never stall
 }
 
 local STATE = {
@@ -519,6 +521,10 @@ local function swordTarget(wins)
 		end
 	end
 	if not cheapest then return 0 end
+	-- Engaging at 3x looked prudent and was the bug the user caught: with 28,675
+	-- wins and a 40,000 rung the reserve swallowed the entire balance while the
+	-- cheapest upgrade cost 85, so the bot farmed for minutes and bought nothing.
+	-- The reserve only makes sense once the rung is nearly in hand.
 	return (cheapest <= wins * CONFIG.swordReach) and cheapest or 0
 end
 
@@ -533,6 +539,14 @@ local function spendable(wins)
 	local reserve = swordTarget(wins)
 	STATE.reserve = reserve
 	return math.max(0, wins - reserve)
+end
+
+-- Trivially cheap steps bypass the guard. Blocking an 85-win upgrade that pays for
+-- itself in one cave run, in order to save for a 40,000 sword, is backwards.
+local function canSpend(cost, wins)
+	wins = wins or value("Wins", 0)
+	if cost <= wins * CONFIG.cheapShare then return cost <= wins end
+	return cost <= spendable(wins)
 end
 
 -- The three that compound: damage decides how deep the walls fall, clickPower how
@@ -566,7 +580,7 @@ local function buyUpgrades()
 			local cost = tonumber(row.cost)
 			-- The reply carries robuxPrice on every row; "Buy" plus the id is the
 			-- wins path, so nothing here can reach a purchase prompt.
-			if rank and not row.maxed and cost and cost <= budget then
+			if rank and not row.maxed and cost and canSpend(cost, wins) then
 				if not pick or rank < pick.rank or (rank == pick.rank and cost < pick.cost) then
 					pick = { id = row.id, cost = cost, rank = rank, name = row.name, level = row.level }
 				end
@@ -742,7 +756,7 @@ local function hatchBestEgg()
 		-- the shared guard first, then the user's stricter rule on top: never buy a
 		-- non-weapon until the balance is a multiple of its price
 		if not egg.robux and cost and cost > 0
-			and cost <= spendable(wins) and cost * CONFIG.eggReserve <= wins then
+			and canSpend(cost, wins) and cost * CONFIG.eggReserve <= wins then
 			if not pick or cost > pick.cost then pick, pickIndex = { cost = cost, name = egg.name }, i end
 		end
 	end
@@ -885,6 +899,10 @@ end
 local function freePass()
 	withUI("free", function()
 		refresh()
+		-- checked every pass now, not once per cycle: CanRebirth sat true for
+		-- minutes while the run was still in the cave. Never during a run though,
+		-- because a rebirth resets the strength that run is built on.
+		if CONFIG.rebirth and STATE.phase ~= "cave" then doRebirth() end
 		if CONFIG.freebies then
 			claimSpins()
 			claimDaily()
