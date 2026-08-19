@@ -443,6 +443,10 @@ end
 -- Highest multiplier the rebirth count allows, gamepass areas excluded. Their
 -- folders exist in the map either way, so the GamepassId is the only honest
 -- filter - a x100 area we cannot use would otherwise win every comparison.
+-- `info.Folder` is the MODEL ITSELF, not its name. Treating it as a string made
+-- FindFirstChild miss every single area, bestTrainingArea returned nil, and the
+-- script trained at x1 for hours while Gold x4 stood open - which is exactly
+-- what "strength stopped climbing" looks like from the outside.
 local function bestTrainingArea()
 	local areas = Workspace:FindFirstChild("Map")
 	areas = areas and areas:FindFirstChild("Training Areas")
@@ -450,7 +454,10 @@ local function bestTrainingArea()
 	local best, bestMult, bestName = nil, -1, nil
 	for id, info in pairs(TrainingList) do
 		if not info.GamepassId and (data().Rebirths or 0) >= (info.MinimumRebirths or 0) then
-			local folder = areas:FindFirstChild(info.Folder or id)
+			local folder = info.Folder
+			if typeof(folder) ~= "Instance" then
+				folder = areas:FindFirstChild(tostring(folder or id))
+			end
 			local mult = tonumber(info.Multiplier) or 0
 			if folder and mult > bestMult then
 				local ok, pivot = pcall(function() return folder:GetPivot().Position end)
@@ -713,7 +720,14 @@ local function think()
 	local hitbox, stageNum = workStage()
 	if CONFIG.autoMine and hitbox then
 		STATE.stage = stageNum
-		STATE.target = hitbox.Position
+
+		-- Stand in the training area WHILE mining. HitWall is fired by hand and
+		-- works from any distance, so the body is free - and where it stands
+		-- decides the click multiplier: measured 30.6M strength/s outside
+		-- against 118.1M/s inside Gold, the same 4x the list promises. Only
+		-- picking loot up actually needs to be somewhere.
+		local trainPos = CONFIG.autoTrain and (select(1, bestTrainingArea())) or nil
+		STATE.target = trainPos or hitbox.Position
 
 		-- Park in the hitbox AND fire HitWall directly: the client's own zone
 		-- loop only swings while it has a wall resolved, and it stops as soon as
@@ -743,7 +757,8 @@ local function think()
 
 		if finished then
 			STATE.mode = "mine"
-			STATE.targetName = "stage " .. stageNum .. " cleared"
+			STATE.targetName = "stage " .. stageNum .. " cleared" ..
+				(trainPos and " (trained meanwhile)" or "")
 			STATE.blocked = nil
 			if CONFIG.autoLoot then collectStage(stageNum) end
 			return
