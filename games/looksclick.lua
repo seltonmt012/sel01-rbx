@@ -447,52 +447,39 @@ end
 -- Gear is a best-only ladder and the shop model's ButtonTop is a TouchInterest
 -- that answers from 108 studs, so this never moves the character.
 local function gearPass()
-	local cfg = conf("GearConfig") or {}
-	local shop = worldFolder()
-	shop = shop and shop:FindFirstChild("GearShop")
-	if not shop then return end
 	local _, hrp = char()
 	if not hrp then return end
-	local best, bestEntry
-	for _, model in ipairs(shop:GetChildren()) do
-		local entry = cfg[model.Name]
-		local cost = entry and tonumber(entry.Cost)
-		local mul = entry and tonumber(entry.Multiplier)
-		-- entries without a numeric Cost are the Robux ones (God Crown)
-		if cost and mul and not entry.Premium and cost <= STATE.wins
-			and mul > (STATE.gearMul or 0) then
-			if not bestEntry or mul > tonumber(bestEntry.Multiplier) then
-				best, bestEntry = model, entry
-			end
+	-- climb as many rungs as the balance carries in one visit
+	for _ = 1, 12 do
+		refresh()
+		local model, cost, rung = nextGear()
+		if not (model and cost and cost <= STATE.wins) then return end
+		local button
+		for _, d in ipairs(model:GetDescendants()) do
+			if d:IsA("BasePart") and d.Name == "ButtonTop" then button = d break end
 		end
-	end
-	if not best then return end
-	local button
-	for _, d in ipairs(best:GetDescendants()) do
-		if d:IsA("BasePart") and d.Name == "ButtonTop" then button = d break end
-	end
-	if not button then return end
-	local before = plr:GetAttribute("BestGearMultiplier") or 0
-	-- the touch answers from about a hundred studs, but the trainer and the shop
-	-- are further apart than that, so park on the button when it is out of range
-	local stop
-	if (hrp.Position - button.Position).Magnitude > 80 then
-		local target = CFrame.new(button.Position + Vector3.new(0, 3, 0))
-		stop = pin(function() return target end)
-		task.wait(0.6)
-	end
-	pcall(function()
-		firetouchinterest(hrp, button, 0)
-		task.wait(0.15)
-		firetouchinterest(hrp, button, 1)
-	end)
-	task.wait(1)
-	if stop then stop() end
-	local after = plr:GetAttribute("BestGearMultiplier") or before
-	if after > before then
-		STATE.gear = bestEntry.Name or best.Name
+		if not button then return end
+		local before = plr:GetAttribute("BestGearMultiplier") or 0
+		-- the touch answers from about a hundred studs, but the trainer and the
+		-- shop are a thousand apart, so park on the button when it is out of range
+		local stop
+		if (hrp.Position - button.Position).Magnitude > 80 then
+			local target = CFrame.new(button.Position + Vector3.new(0, 3, 0))
+			stop = pin(function() return target end)
+			task.wait(0.8)
+		end
+		pcall(function()
+			firetouchinterest(hrp, button, 0)
+			task.wait(0.2)
+			firetouchinterest(hrp, button, 1)
+		end)
+		task.wait(1)
+		if stop then stop() end
+		local after = plr:GetAttribute("BestGearMultiplier") or before
+		if after <= before then return end
+		STATE.gear = (rung.entry.Name) or model.Name
 		STATE.gearMul = after
-		note(string.format("gear %s x%s (%s wins)", STATE.gear, short(after), short(tonumber(bestEntry.Cost))))
+		note(string.format("gear %s x%s (%s wins)", STATE.gear, short(after), short(cost)))
 	end
 end
 
