@@ -11,9 +11,26 @@
 -- charm shop all live there as real ValueBase objects that the server writes.
 --
 -- Measured, all of it, with the automation off:
---   * NormalWin.Button carries a TouchInterest. Pinning the HumanoidRootBase on
---     it pays every ~1.1s. World1 Stage1 = +1, Stage3 = +20, Stage9 = +200K.
---     3 -> 83 wins in 5s on Stage3; 200,083 -> 1,200,083 in 6s on Stage9.
+--   * NormalWin.Button carries a TouchInterest. Pinning the HumanoidRootPart on
+--     it pays. World1 Stage1 = +1, Stage3 = +20, Stage9 = +200K, and the payout
+--     is that figure times the win multiplier (measured x2 here, so +400,000).
+--   * THE PLATE NOW HAS A ~13 SECOND PER-PLAYER COOLDOWN, re-measured 2026-08-20.
+--     It used to pay every ~1.1s and that number is dead. Four independent runs
+--     with the automation off gave gaps of 13.23 / 13.07 / 12.77 / 13.09s, so the
+--     cadence is 13.0s +-0.3 and nothing shortens it:
+--       - movement makes no difference (hum:Move on and off both gave 13.1s),
+--       - separating the parts every 4 frames makes no difference,
+--       - leaving to Checkpoint8 and coming back makes no difference,
+--       - firetouchinterest credits exactly NOTHING (the server validates the
+--         touch), so it cannot be driven faster than the body can be there,
+--       - the pin height does not matter: +0 and +4 studs both pay at 13.1s.
+--     So World1 Stage9 is 400,000 / 13.0s = ~30.8K wins/s, against the ~180K/s
+--     this file used to measure. The lever is no longer the cadence, it is the
+--     plate's VALUE - World2 Stage9 pays 1e12 per touch, five million times more.
+--   * WORLD1 HAS EXACTLY ONE WIN PLATE, in Stages.Stage9, and that is a change
+--     too. Config.Main.StageWins still lists a value for all nine stages, but a
+--     scan after streaming every checkpoint in found one NormalWin in the whole
+--     world. Do not aim at Stage1-8, there is nothing there to touch.
 --   * The plate is NOT gated by level or by wins. It IS gated by world:
 --     World2's +1T plate credited exactly 0 while Data.World was 1.
 --   * XP is +1 * upgradeMulti every 0.25s while the humanoid is moving.
@@ -24,8 +41,14 @@
 --   * SelectUpgrade(n) works from anywhere, spends nothing, and the unlock is
 --     permanent (Data.UnlockedUpgrades gains the entry). Wins are a threshold.
 --   * Rebirth() resets Level and Xp to 0 and keeps wins, upgrades and selection.
---   * BuyCharm("World<n>", slot) charges the charm's wins price (verified by the
---     balance moving 40) and EquipBestCharms() needs no arguments.
+--   * BuyCharm takes ONE argument, the shop SLOT (1-3), not a world name - the
+--     game's own shop panel fires BuyCharm:FireServer(slot). It charges the
+--     charm's wins price, verified by the balance moving.
+--   * EquipBestCharms WANTS THE TYPE: "Speed" or "Wins". Fired bare it does
+--     nothing whatsoever - measured 2026-08-20, eleven owned charms and not one
+--     slot moved. See equipCharms().
+--   * CollectShard(1..9) is FREE and NOT position gated - all nine Sunken Shards
+--     were banked from the World2 spawn, ~2,500 studs away. One time only.
 --
 -- Never touched, all Robux: the Golden/Diamond/Galaxy/Void/Celestial treadmills,
 -- every Aura and every Trail (the whole lists are DevProducts), Speed Multi,
@@ -65,8 +88,10 @@ local CONFIG = {
 	autoFree = true,       -- free reward / offline earnings / streak
 	autoPotion = true,     -- drink Speed potions now, hold Wins potions for the next world
 	potionHold = 0.5,      -- hold a Wins potion once this share of the next world's rebirths is banked
+	autoShards = true,     -- the nine Sunken Shards, once, from anywhere
 	stage = 0,             -- 0 = highest stage of the current world
 	charmReserve = 2,      -- keep balance >= reserve x the next upgrade threshold
+	charmFocus = "auto",   -- "auto" | "Speed" | "Wins", see equipCharms()
 }
 
 local STATE = {
@@ -79,10 +104,14 @@ local STATE = {
 	level = 0,
 	rebirths = 0,
 	winsRate = 0,
+	rateRef = nil,         -- wins at the start of the current rate window
+	rateAt = nil,          -- os.clock of that sample
 	lastWins = 0,
 	lastWinsAt = 0,
 	uiOwner = nil,
 	charmsBought = 0,
+	charmFocus = "-",      -- what equipCharms() last asked the server for
+	shards = 0,            -- Sunken Shards banked (max 9, permanent)
 	entering = false,      -- true while the body is being walked into a new world
 	blocked = nil,         -- set when the server refused something, kept visible
 	stalls = 0,            -- how often the watchdog had to rebuild the target
@@ -216,10 +245,12 @@ local function startPin()
 		if not CONFIG.auto then return end
 		local _, hrp, hum = char()
 		if CONFIG.farmWins and hrp and STATE.target then
-			-- Do NOT zero the velocity here. Measured: holding the body perfectly
-			-- still on the plate paid ONE touch in 22 seconds, because Touched only
-			-- fires again once the parts separate and meet again. Letting hum:Move
-			-- keep pushing gives that, and the rate goes back to a touch per ~1.1s.
+			-- Do NOT zero the velocity here. The original reason was that Touched
+			-- only fires again once the parts separate, and letting hum:Move keep
+			-- pushing gave that. Re-measured 2026-08-20 the movement no longer
+			-- changes anything - the plate is on a flat ~13s server cooldown and
+			-- paid at 13.1s with hum:Move and at 13.1s without it - but zeroing the
+			-- velocity is still wrong, and hum:Move is what the XP award needs.
 			hrp.CFrame = CFrame.new(STATE.target)
 		end
 		if CONFIG.gainXp and hum then
@@ -463,6 +494,33 @@ end
 -- ignored - it flipped no Bought flag and charged nothing, which read exactly like
 -- a shop that had run out. A bought charm is auto-equipped, so Data.Charms holding
 -- zero entries does not mean the purchase failed; read Data.EquippedCharms too.
+-- EquipBestCharms WANTS THE CHARM TYPE. Fired bare - which is what this file did
+-- until 2026-08-20 - the server does nothing at all: measured, EquippedCharms sat
+-- on Wind Feather / Jungle Gem / Banana Peel across the whole call and did not
+-- move a slot, while eleven better charms were owned and unequipped. The game's
+-- own panel has two buttons and they send the string:
+--   EquipBestCharms:FireServer("Speed")  ->  Lava Lightning Bolt / Rocket Ember x2
+--   EquipBestCharms:FireServer("Wins")   ->  Magma Crystal x2 / Hot Coal
+-- Three slots, shared between both types, so it is one or the other, never both.
+--
+-- Which one is right depends on what is actually the bottleneck. Speed is XP is
+-- levels is rebirths is the NEXT WORLD, and a world is worth millions of times
+-- more per touch than any multiplier (World1 Stage9 pays 400K, World2 Stage9 pays
+-- 3.5T). So while a higher world is still out of reach on rebirths, Speed wins by
+-- a distance. Once the last world is reached there is nothing left to unlock and
+-- the slots go to Wins, which is what buys the trail and aura ladders.
+local function equipCharms()
+	local want = CONFIG.charmFocus
+	if want ~= "Speed" and want ~= "Wins" then
+		local w = world()
+		local nextWorld = math.min(w + 1, 5)
+		local need = CfgMain.WorldRebirthsRequired["World" .. nextWorld]
+		want = (nextWorld > w and need and rebirths() < need) and "Speed" or "Wins"
+	end
+	STATE.charmFocus = want
+	Remotes.EquipBestCharms:FireServer(want)
+end
+
 local function buyCharms()
 	if not CONFIG.autoCharms then return end
 	local w = world()
@@ -483,7 +541,36 @@ local function buyCharms()
 			end
 		end
 	end
-	Remotes.EquipBestCharms:FireServer()
+	equipCharms()
+end
+
+-- The nine Sunken Shards are a one-time, permanent, free collectible, and
+-- CollectShard is NOT position gated: measured 2026-08-20, all nine were banked
+-- while the body stood at the World2 spawn, roughly 2,500 studs from the nearest
+-- one, and Data.CollectedShards went from empty to 1..9. The models stay in the
+-- workspace afterwards - the client normally destroys them on touch and we never
+-- touch them - so the workspace is NOT the progress signal. Data.CollectedShards
+-- is. Without that distinction this loop would re-fire nine times forever.
+local function collectShards()
+	if not CONFIG.autoShards then return end
+	local folder = Workspace:FindFirstChild("SunkenShards")
+	local done = plr.Data:FindFirstChild("CollectedShards")
+	if not folder or not done then return end
+	STATE.shards = #done:GetChildren()
+	if STATE.shards >= 9 then return end
+	local got = 0
+	for n = 1, 9 do
+		if not done:FindFirstChild(tostring(n)) then
+			Remotes.CollectShard:FireServer(n)
+			got = got + 1
+			task.wait(0.4)
+		end
+	end
+	task.wait(1)
+	STATE.shards = #done:GetChildren()
+	if got > 0 then
+		STATE.note = "shards " .. STATE.shards .. "/9"
+	end
 end
 
 -- Potions were sitting unused for a whole session: five of them in Data.Potions
@@ -579,6 +666,9 @@ end
 -- the wins balance standing still, never a counter this script keeps itself.
 local STALL_SECONDS = 90
 
+-- Wider than the plate's ~13s cooldown, or the header rate reads 0/s forever.
+local RATE_WINDOW = 30
+
 local function watchdog(now)
 	if not CONFIG.auto then
 		STATE.stallAt = now
@@ -636,9 +726,17 @@ loop(1, nil, function()
 	STATE.level = level()
 	STATE.rebirths = rebirths()
 	local now = os.clock()
-	if STATE.lastWinsAt > 0 and now > STATE.lastWinsAt then
-		local rate = (STATE.wins - STATE.lastWins) / (now - STATE.lastWinsAt)
-		if rate >= 0 then STATE.winsRate = rate end
+	-- The rate has to be measured over a window WIDER than the plate's cooldown.
+	-- This loop ticks once a second and the plate pays once every ~13, so a
+	-- tick-to-tick rate reads 0/s on twelve ticks out of thirteen and the header
+	-- said "0/s" while the balance was climbing perfectly well. A 30s window
+	-- covers at least two payouts and reads the truth.
+	if STATE.rateAt == nil or now - STATE.rateAt >= RATE_WINDOW then
+		if STATE.rateAt and now > STATE.rateAt then
+			local rate = (STATE.wins - (STATE.rateRef or STATE.wins)) / (now - STATE.rateAt)
+			if rate >= 0 then STATE.winsRate = rate end
+		end
+		STATE.rateRef, STATE.rateAt = STATE.wins, now
 	end
 	STATE.lastWins, STATE.lastWinsAt = STATE.wins, now
 	retarget()
@@ -653,6 +751,7 @@ loop(15, nil, function()
 	buyTrail()
 	buyAura()
 	buyCharms()
+	collectShards()
 	usePotions()
 	claimFree()
 end)
@@ -679,7 +778,7 @@ main:Toggle("AUTO", CONFIG.auto, function(v)
 	STATE.note = v and "running" or "stopped"
 end, "holds the body on the win plate and keeps it moving", UI.theme.good)
 main:Toggle("Farm wins", CONFIG.farmWins, function(v) CONFIG.farmWins = v end,
-	"pin on NormalWin.Button, pays every ~1.1s")
+	"pin on NormalWin.Button, ~13s server cooldown per touch")
 main:Toggle("Gain XP", CONFIG.gainXp, function(v) CONFIG.gainXp = v end,
 	"hum:Move each frame, +1 x upgrade multi per 0.25s")
 main:Stepper("Stage", function()
@@ -703,6 +802,11 @@ spend:Toggle("Auto aura", CONFIG.autoAura, function(v) CONFIG.autoAura = v end,
 	"Amber x1.5 @5K ... Void x7.5, stacks with the trail", UI.theme.warn)
 spend:Toggle("Auto charms", CONFIG.autoCharms, function(v) CONFIG.autoCharms = v end,
 	"3 rolled slots per world, restock every 300s", UI.theme.warn)
+spend:Dropdown("Charm slots", { "auto", "Speed", "Wins" }, CONFIG.charmFocus, function(v)
+	CONFIG.charmFocus = v
+	task.spawn(equipCharms)
+end)
+spend:Label("auto = Speed until the next world is reachable, then Wins")
 spend:Stepper("Upgrade reserve", function() return CONFIG.charmReserve .. "x" end,
 	function(dir) CONFIG.charmReserve = math.clamp(CONFIG.charmReserve + dir, 0, 10) end,
 	"never spend below this multiple of the next upgrade threshold")
@@ -712,12 +816,14 @@ extra:Toggle("Claim free rewards", CONFIG.autoFree, function(v) CONFIG.autoFree 
 	"offline earnings, playtime reward, streak")
 extra:Toggle("Drink potions", CONFIG.autoPotion, function(v) CONFIG.autoPotion = v end,
 	"speed now, wins held back until the last world is reached", UI.theme.warn)
+extra:Toggle("Collect shards", CONFIG.autoShards, function(v) CONFIG.autoShards = v end,
+	"the nine Sunken Shards, free, once, from anywhere - no walking")
 extra:Button("Redeem codes", function() task.spawn(redeemCodes) end)
 extra:Label("codes need the group - all six answer not_in_group")
 extra:Button("Unstuck", unstuck, UI.theme.bad)
 extra:Label("no Robux path exists in this panel")
 
-local out = farm:Card("STATUS", 0):Readout(12, function(text)
+local out = farm:Card("STATUS", 0):Readout(14, function(text)
 	if text:find("blocked") then return UI.theme.bad end
 	if text:find("^AUTO") then return UI.theme.good end
 	return nil
@@ -743,7 +849,8 @@ task.spawn(function()
 			"  aura     " .. (plr.Data.EquippedAura.Value ~= "" and
 				(plr.Data.EquippedAura.Value .. " x" ..
 				 tostring((CfgAuras[plr.Data.EquippedAura.Value] or {}).Multi)) or "none"),
-			"  charms   " .. STATE.charmsBought .. " bought this session",
+			"  charms   " .. STATE.charmsBought .. " bought, slots on " .. STATE.charmFocus,
+			"  shards   " .. STATE.shards .. "/9",
 			"  watchdog " .. STATE.stalls .. " stalls, last growth " ..
 				string.format("%.0fs ago", math.max(0, os.clock() - (STATE.stallAt or 0))),
 			"  " .. tostring(STATE.note),
@@ -771,6 +878,7 @@ _G.__MONKEY_DBG = {
 	usePotions = usePotions, upgradeGain = upgradeGain, desiredWorld = desiredWorld,
 	unlockedUpgrade = unlockedUpgrade, nextUpgradeThreshold = nextUpgradeThreshold,
 	redeemCodes = redeemCodes, unstuck = unstuck, watchdog = watchdog,
+	equipCharms = equipCharms, collectShards = collectShards,
 	wins = wins, xp = xp, level = level, rebirths = rebirths, world = world,
 	winPlate = winPlate, checkpoint = checkpoint, bestUpgrade = bestUpgrade,
 }
