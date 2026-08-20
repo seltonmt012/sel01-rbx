@@ -1107,6 +1107,7 @@ local function rebirthIfWorth()
 	-- upgrade. The real path is the panel: open it from the left menu, then fire
 	-- ButtonRebirth. **Never ButtonSkip** next to it, that is the Robux "Skip
 	-- Rebirth / Keep Boost" product.
+	local fired = false   -- wurde der Knopf wirklich gedrueckt?
 	local gui = plr:FindFirstChild("PlayerGui")
 	local main = gui and gui:FindFirstChild("MainGui")
 	local window = main and main:FindFirstChild("Rebirth")
@@ -1128,7 +1129,10 @@ local function rebirthIfWorth()
 		end
 		if button then
 			local ok, conns = pcall(getconnections, button.Activated)
-			if ok then for _, c in ipairs(conns) do pcall(function() c:Fire() end) end end
+			if ok then
+				for _, c in ipairs(conns) do pcall(function() c:Fire() end) end
+				fired = #conns > 0
+			end
 		end
 		task.wait(1.5)
 		-- Close it again; the interface should never be left open.
@@ -1147,7 +1151,15 @@ local function rebirthIfWorth()
 			short(d2.statistics and num(d2.statistics.genPerSecond) or 0)))
 		return true
 	end
-	note("rebirth refused")
+	-- "refused" is a claim about the SERVER, so only say it when the button was
+	-- actually pressed. If the panel or the button was not found, nothing was
+	-- ever sent - reporting that as a refusal sends the reader looking for a
+	-- missing requirement instead of a missing GUI node.
+	if not fired then
+		note("rebirth: the panel button was not found - nothing was sent")
+	else
+		note("rebirth refused by the server")
+	end
 	return false
 end
 

@@ -476,14 +476,21 @@ local function zoneList()
     return out
 end
 
+-- `Completed` is the flag, NOT GoalCollected >= GoalTotal. Every zone runs
+-- WavesTotal waves and the goal pair counts the CURRENT wave only, so it resets
+-- to 0/total the moment the next one spawns - watched live, the map total fell
+-- 11747 -> 11039 while no zone lost its completion. `everyZoneDone` further down
+-- was corrected for exactly this and this twin was missed, so a genuinely
+-- finished zone read as unfinished every time a new wave spawned: with
+-- zoneAware on, a dependent zone (Rooftop needs Porch/Garage/Shed/Frontyard)
+-- stayed locked although its prerequisites were satisfied, and the zone table in
+-- the panel flickered finished zones back to open.
 local function zoneDone(name)
     local folder = Workspace:FindFirstChild("Map")
     folder = folder and folder:FindFirstChild("Leave_Locations")
     local z = folder and folder:FindFirstChild(name)
     if not z then return false end
-    local total = tonumber(z:GetAttribute("GoalTotal")) or 0
-    local got   = tonumber(z:GetAttribute("GoalCollected")) or 0
-    return total > 0 and got >= total
+    return z:GetAttribute("Completed") == true
 end
 
 local function zoneOpen(name)
