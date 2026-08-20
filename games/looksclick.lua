@@ -84,6 +84,10 @@ local CONFIG = {
 	mogSeconds = 45,        -- hard cap; mogging stops early once the gear is funded
 	contestSeconds = 10,    -- give up on one contest after this long
 	rebirthUntil = 0,       -- 0 = no limit
+	rebirthGap = 0.3,       -- the server lands 2-4 a second; faster is dropped
+	-- while a rebirth still lands inside this many seconds, stay on the trainer and
+	-- keep rebirthing; once one takes longer, bank the looks and go mog instead
+	fastRebirthSeconds = 2,
 	-- Looks are BOTH the rebirth price and the egg/aura price, so nothing else may
 	-- touch what the next rebirth needs: only the surplus above requirement x this
 	-- is spendable. 1.0 keeps the next rebirth fully funded and still lets an egg
@@ -105,7 +109,8 @@ local STATE = {
 	world = 1, zone = "-",
 	npc = "-", npcPays = 0, mogs = 0,
 	rebirthNeed = 0, pets = 0, petsEquipped = 0, petMul = 0, aura = "-", auraMul = 0,
-	worldNeed = 0, mogNeed = 0, holding = false, mogHoldStart = nil,
+	worldNeed = 0, mogNeed = 0, holding = false, mogHoldStart = nil, pushWorld = false,
+	rebirthPace = 0, lastRebirthAt = nil,
 	busy = false, bodyOwner = nil,
 }
 
@@ -331,10 +336,23 @@ local function bestTrainer()
 	return best, bestMul
 end
 
+-- The game plan, in one predicate: stay on the trainer and rebirth as fast as the
+-- server allows for as long as a rebirth still lands inside a second or two. Once
+-- one starts taking longer than that, the looks are worth more as a mog - so stop
+-- rebirthing, let the balance build to what the NPC wants, and go fight.
+local function rebirthsAreCheap()
+	if STATE.rebirthPace <= 0 then return true end
+	return STATE.rebirthPace <= CONFIG.fastRebirthSeconds
+end
+
 local function trainPhase()
 	-- once the bank is full there is nothing to train FOR; go and spend it
 	if STATE.holding == "mog" and STATE.mogNeed > 0 and STATE.looks >= STATE.mogNeed then
 		return
+	end
+	-- and while the rebirths are still landing cheaply, the trainer IS the plan
+	if not rebirthsAreCheap() and STATE.holding ~= "mog" then
+		STATE.phase = "rebirths slowed - heading out to mog"
 	end
 	local model, mul = bestTrainer()
 	if not model then return end
@@ -597,10 +615,22 @@ local function gearPass()
 end
 
 -- Rebirth is priced in LOOKS, not Wins - `RebirthConfig.Requirement(n)` is the
--- next one's price and it is deducted, not wiped, so anything above it survives.
--- It pays +0.6 on the multiplier every time (36 rebirths measured at x22.5) plus
--- three FameTokens, and it is what unlocks the stronger trainers, so this fires
--- the moment it can and everything else spends only the surplus above it.
+-- next one's price - and it pays +0.6 on the multiplier every time plus the
+-- trainer unlocks, so it is the strongest thing in the game.
+--
+-- Two measured facts decide the whole policy:
+--
+--  * IT WIPES THE LOOKS BALANCE, it does not deduct. 4.24 Qa against a 5.18B wall
+--    - eight hundred thousand times the price - bought exactly ONE rebirth and
+--    left zero. So every look held above the wall is thrown away, and the "Max"
+--    argument does not bulk-buy: firing it with 100 still granted one.
+--  * THE SERVER CAPS IT AT ROUGHLY 2-4 A SECOND. A 0.5s gap landed 10 of 10
+--    calls, 0.2s landed 15 of 24, 0.05s landed 19 of 78. Past ~3/s the extra
+--    calls are simply dropped.
+--
+-- Together: fire it on a fast timer and never bank past the wall - unless the
+-- looks are being held for something a rebirth would destroy, which is what the
+-- world wall and the mog threshold below are.
 local function rebirthNeed()
 	local cfg = conf("RebirthConfig")
 	if not (cfg and cfg.Requirement) then return nil end
@@ -631,19 +661,9 @@ end
 
 local function rebirthPass()
 	if CONFIG.rebirthUntil > 0 and STATE.rebirths >= CONFIG.rebirthUntil then return end
-	if pushingForWorld and pushingForWorld() then
-		STATE.holding = "world"
-		return
-	end
-	-- Hold for a mog too: wins buy the gear rung, gear is what a click is worth,
-	-- and in world 2 the cheapest NPC wants 6B looks against a 4.5B rebirth wall.
-	-- The hold has to last until the gear is actually PAID, not just until the
-	-- looks are banked - releasing on the looks alone let the rebirth fire in the
-	-- same second the bank filled, over and over, and no win was ever earned.
-	-- A wall-clock cap keeps it from stalling forever if mogging cannot proceed.
-	-- ...and once the wins are actually THERE, wait for the rung to be bought:
-	-- a rebirth zeroes the balance, and it fired in the same second the third mog
-	-- landed, wiping 600M wins one cycle-step before the shop trip.
+	-- A rebirth zeroes the WINS, so wait while a rung is affordable but unbought:
+	-- it fired in the same second the third mog landed and wiped 600M wins one
+	-- cycle-step before the shop trip.
 	do
 		local _, rungCost = nextGear()
 		if rungCost and STATE.wins >= rungCost then
@@ -651,31 +671,75 @@ local function rebirthPass()
 			return
 		end
 	end
-	if CONFIG.mog and CONFIG.mogBank then
-		local _, rungCost = nextGear()
-		local need = cheapestNPCNeed and cheapestNPCNeed()
-		if rungCost and need and STATE.wins < rungCost then
-			STATE.mogNeed = need
-			if not STATE.mogHoldStart then STATE.mogHoldStart = os.clock() end
-			if os.clock() - STATE.mogHoldStart < CONFIG.mogBankSeconds then
-				STATE.holding = "mog"
-				return
-			end
-		else
-			STATE.mogHoldStart = nil
-		end
-	end
-	STATE.holding = false
+
 	local need = rebirthNeed()
 	STATE.rebirthNeed = need or 0
+
+	-- Everything else is one question: would rebirthing leave too few LOOKS for
+	-- whatever they are being saved for? Only then is it worth holding.
+	--
+	-- Asking "are the wins there yet" instead cost the whole point of the loop:
+	-- with 203 TRILLION looks banked against a 5B wall - forty thousand rebirths'
+	-- worth - it sat on hold and did not rebirth ONCE in twenty seconds, purely
+	-- because the wins were 161B against a 165B rung. A rebirth costs the wall and
+	-- nothing else, so it is free whenever the surplus still covers what is next.
+	-- Never rebirth mid-contest: the mog is what the looks were banked FOR.
+	if plr:GetAttribute("InContest") then
+		STATE.holding = "contest"
+		return
+	end
+
+	-- While pushing for a world the hold is UNCONDITIONAL until the portal has
+	-- actually been taken. Releasing it the moment the bank was full is what let a
+	-- rebirth eat 60.35 Qa one tick after it crossed the 60 Qa wall.
+	if pushingForWorld and pushingForWorld() then
+		STATE.holding = "world"
+		return
+	end
+
+	local keep, reason = 0, nil
+	if CONFIG.mog and CONFIG.mogBank then
+		local _, rungCost = nextGear()
+		local npcNeed = cheapestNPCNeed and cheapestNPCNeed()
+		-- bank for a mog once the rebirths have stopped being cheap, or when there
+		-- is no NPC in reach at all
+		local slowed = STATE.rebirthPace > 0 and STATE.rebirthPace > CONFIG.fastRebirthSeconds
+		if rungCost and npcNeed and STATE.wins < rungCost
+			and (slowed or STATE.looks < npcNeed) then
+			STATE.mogNeed = npcNeed
+			keep, reason = npcNeed, "mog"
+		end
+	end
+	if keep > 0 and need and (STATE.looks - need) < keep then
+		if not STATE.mogHoldStart then STATE.mogHoldStart = os.clock() end
+		-- a wall-clock cap so a stuck mog can never freeze the rebirths for good
+		if reason == "world" or os.clock() - STATE.mogHoldStart < CONFIG.mogBankSeconds then
+			STATE.holding = reason
+			return
+		end
+	else
+		STATE.mogHoldStart = nil
+	end
+	STATE.holding = false
+
 	if need and STATE.looks < need then return end
 	local before = STATE.rebirths
 	fire("Rebirth", true, "Max")
-	task.wait(1.2)
+	task.wait(0.15)
 	refresh()
 	if STATE.rebirths > before then
-		note(string.format("rebirth %s -> %s (%s looks)", short(before), short(STATE.rebirths),
-			short(need or 0)))
+		-- How long one rebirth is taking right now is the signal for the whole game
+		-- plan: while they land about once a second the trainer is the best place to
+		-- be, and once they start taking longer the looks are better spent on a mog.
+		local now = os.clock()
+		if STATE.lastRebirthAt then
+			local gap = now - STATE.lastRebirthAt
+			STATE.rebirthPace = STATE.rebirthPace > 0
+				and (STATE.rebirthPace * 0.7 + gap * 0.3) or gap
+		end
+		STATE.lastRebirthAt = now
+		note(string.format("rebirth %s -> %s (%s looks, %.1fs pace)", short(before),
+			short(STATE.rebirths), short(need or 0), STATE.rebirthPace))
 	end
 end
 
@@ -694,12 +758,35 @@ end
 -- Rebirth spends looks every few seconds, so a world wall would never be reached
 -- while it keeps firing. Once the wall is within a few minutes of income the
 -- rebirths pause and the looks are banked for the crossing instead.
+-- The measured looks-per-second is useless for this decision: the rebirth wipes
+-- the balance several times a second, so the sample collapses to zero and the
+-- push kept switching itself off. Estimate from the click value instead - the
+-- server credits ~3.75 clicks a second and the trainer adds about two more per
+-- second at its multiplier - and once the push starts, KEEP it until the world is
+-- actually entered. A world is worth roughly a thousand rebirths at this point:
+-- +0.6 on a multiplier already past 240 is a quarter of a percent, while world 3
+-- is another full step of gear, NPCs and trainers.
+local function estimateRate()
+	local perClick = tonumber(STATE.perClick) or 1
+	local trainer = tonumber(STATE.trainerMul) or 0
+	return perClick * (3.75 + 2 * math.max(0, trainer))
+end
+
 function pushingForWorld()
-	if not CONFIG.portals then return false end
+	if not CONFIG.portals then
+		STATE.pushWorld = false
+		return false
+	end
 	local need = worldNeed()
 	STATE.worldNeed = need or 0
-	if not need or STATE.looks >= need then return need ~= nil end
-	return need <= STATE.looks + (STATE.looksRate or 0) * CONFIG.worldPushSeconds
+	if not need then
+		STATE.pushWorld = false
+		return false
+	end
+	if STATE.looks >= need then return true end
+	if STATE.pushWorld then return true end
+	STATE.pushWorld = need <= STATE.looks + estimateRate() * CONFIG.worldPushSeconds
+	return STATE.pushWorld
 end
 
 local function portalPass()
@@ -719,6 +806,7 @@ local function portalPass()
 	stop()
 	refresh()
 	if STATE.world ~= nextWorld then return end
+	STATE.pushWorld = false
 	-- the portal only flips the attribute; the body stays at the old hub and the
 	-- new world's shop, zones and trainers are all streamed out until we go there
 	local spawn = worldFolder()
@@ -933,10 +1021,13 @@ task.spawn(function()
 end)
 
 loop(0.4, nil, cyclePass)
--- rebirth on its own fast timer: it is the strongest thing in the game and every
--- second it waits is a second of looks piling up behind a wall already passed
-loop(2, "rebirth", rebirthPass)
-loop(8, nil, spendPass)
+-- Rebirth on its own fast timer. It wipes the balance rather than deducting, so
+-- every tick it waits is looks thrown away, and the server caps it at 2-4 a
+-- second anyway - 0.3s sits just inside that ceiling.
+loop(CONFIG.rebirthGap, "rebirth", rebirthPass)
+-- the surplus above the wall is destroyed by the next rebirth a fraction of a
+-- second later, so the permanent multipliers have to get their chance at it often
+loop(2, nil, spendPass)
 loop(90, "freebies", freePass)
 
 --------------------------------------------------------------------------------
@@ -1034,9 +1125,19 @@ task.spawn(function()
 			"  gear      " .. tostring(STATE.gear),
 			"  trainer   " .. tostring(STATE.trainer) .. "   x" .. tostring(STATE.trainerMul),
 			"  world     " .. tostring(STATE.world) .. "   " .. tostring(STATE.zone),
-			"  banking   " .. (STATE.holding and (tostring(STATE.holding) .. " -> "
-				.. short(STATE.holding == "world" and STATE.worldNeed or STATE.mogNeed)) or "no"),
-			"  next world at " .. short(STATE.worldNeed or 0),
+			"  rebirth   " .. string.format("%.1fs pace", STATE.rebirthPace)
+				.. "   wall " .. short(STATE.rebirthNeed),
+			"  holding   " .. (STATE.holding == "world"
+					and ("world " .. tostring((STATE.world or 1) + 1) .. " -> " .. short(STATE.worldNeed))
+				or STATE.holding == "mog" and ("mog -> " .. short(STATE.mogNeed))
+				or STATE.holding == "gear" and "gear (wins banked)"
+				or "no - rebirthing"),
+			"  next gear " .. (function()
+				local rung = nextRung and nextRung()
+				if not rung then return "maxed" end
+				return (rung.entry.Name or rung.id) .. " W" .. rung.world
+					.. "  " .. short(rung.cost) .. " wins"
+			end)(),
 			"  npc       " .. tostring(STATE.npc) .. "   pays " .. short(STATE.npcPays),
 			"  mogs      " .. STATE.mogs .. "   pets " .. STATE.petsEquipped .. "/" .. STATE.pets
 				.. " x" .. short(STATE.petMul),
@@ -1067,7 +1168,7 @@ _G.__LOOKSCLICK_DBG = {
 	bestZone = bestZone, bestNPC = bestNPC, mogOnce = mogOnce, mogPhase = mogPhase,
 	cheapestNPCNeed = cheapestNPCNeed,
 	gearPass = gearPass, rebirthPass = rebirthPass, portalPass = portalPass,
-	nextGear = nextGear, gearLadder = gearLadder,
+	nextGear = nextGear, nextRung = nextRung, gearLadder = gearLadder,
 	worldNeed = worldNeed, pushingForWorld = pushingForWorld,
 	rebirthNeed = rebirthNeed, spendableLooks = spendableLooks, canSpendLooks = canSpendLooks,
 	askInventory = askInventory, petPass = petPass, eggPass = eggPass,
