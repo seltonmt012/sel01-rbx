@@ -124,7 +124,23 @@ UI.icon = {
 	sword = "◆", coin = "●", flask = "◊", map = "◈",
 	pickaxe = "⛏", bag = "■", clock = "○", flame = "◆",
 	star = "★", wave = "≈", grid = "▦", spark = "★",
-	home = "●", loop = "→", up = "▲", info = "○",
+	home = "▲", loop = "→", up = "↑", info = "○",
+}
+
+-- ...and the real thing. The glyphs above are only the fallback now: a stroked
+-- PNG set is rendered by tools/brand-render.py out of tools/brand/icons.html and
+-- mirrored into the workspace, where getcustomasset() can reach it. A house that
+-- looks like a house beats a filled circle standing in for one.
+--
+-- The map is keyed by the GLYPH because that is what scripts pass around
+-- (page:Card / win:Page take UI.icon.bolt, a string). Several keys share a
+-- glyph, so they share a file - deliberate, and better than a mismatch.
+UI.iconFile = {
+	["▲"] = "home", ["⚡"] = "bolt", ["○"] = "clock", ["▦"] = "chart",
+	["●"] = "coin", ["★"] = "star", ["⚙"] = "gear", ["→"] = "loop",
+	["▤"] = "list", ["■"] = "bag", ["◇"] = "shield", ["◆"] = "sword",
+	["⛏"] = "pickaxe", ["◊"] = "flask", ["◈"] = "map", ["◉"] = "shield",
+	["◎"] = "shield",
 }
 
 -- Real images, not glyphs ------------------------------------------------------
@@ -179,6 +195,7 @@ function UI.imageFromUrl(url, name)
 end
 
 UI.LOGO = "selux-mark.png"
+
 
 local EASE = {
 	quick = TweenInfo.new(0.12, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
@@ -266,6 +283,29 @@ local function hairline(parent, inset, color)
 	local h = frame(parent, UDim2.new(1, -(inset or 0) * 2, 0, 1),
 		UDim2.fromOffset(inset or 0, 0), color or UI.theme.line)
 	return h
+end
+
+-- Draw an icon into `parent`: an ImageLabel if the PNG is there, a TextLabel
+-- with the glyph if it is not. Returns the instance plus a tint(colour) function,
+-- so the caller does not have to care which of the two it got - the rail tints
+-- the active page and the card bands tint themselves the same way.
+local function iconNode(parent, glyph, size, colour)
+	local file = UI.iconFile[glyph]
+	local id = file and UI.image("icons/selux-" .. file .. ".png") or nil
+	if id then
+		local img = Instance.new("ImageLabel")
+		img.BackgroundTransparency = 1
+		img.Image = id
+		img.ImageColor3 = colour or UI.theme.dimmer
+		img.ScaleType = Enum.ScaleType.Fit
+		img.Size = UDim2.fromOffset(size, size)
+		img.Parent = parent
+		return img, function(c) img.ImageColor3 = c end
+	end
+	local l = label(parent, glyph or "", size, UI.font.body, colour or UI.theme.dimmer)
+	l.Size = UDim2.fromOffset(size + 4, size + 4)
+	l.TextXAlignment = Enum.TextXAlignment.Center
+	return l, function(c) l.TextColor3 = c end
 end
 
 -- The mockup's `rise` keyframe: fade in and lift 14px. Used on every block so a
@@ -438,14 +478,20 @@ function UI.Window(options)
 
 	local headSub = label(head, options.subtitle or "", 11, UI.font.body, UI.theme.faint)
 	headSub.Position = UDim2.fromOffset(190, 0)
-	headSub.Size = UDim2.fromOffset(190, 38)
+	headSub.Size = UDim2.fromOffset(120, 38)
 	headSub.ZIndex = 3
 	window.headSub = headSub
 
 	-- search sits in the middle of the header, like the mockup
-	local searchWrap = frame(head, UDim2.fromOffset(150, 22), UDim2.new(0.5, -60, 0, 8),
-		UI.theme.input, 1)
+	-- Drawn as a real field. It used to be fully transparent with no outline, so
+	-- the placeholder floated in the header and there was no telling where the
+	-- box began or ended.
+	local searchWrap = frame(head, UDim2.fromOffset(172, 24), UDim2.new(1, -322, 0, 7),
+		UI.theme.input, 0)
 	searchWrap.ZIndex = 3
+	corner(searchWrap, 7)
+	local searchEdge = stroke(searchWrap, UI.theme.band, 0)
+	pad(searchWrap, 10, 10, 0, 0)
 	-- No magnifier glyph: Roblox draws ⌕ as a tofu box. The placeholder says
 	-- "Suche" and that is enough - a box that means nothing is worse than no icon.
 	local search = Instance.new("TextBox")
@@ -462,6 +508,12 @@ function UI.Window(options)
 	search.ClearTextOnFocus = false
 	search.ZIndex = 4
 	search.Parent = searchWrap
+	search.Focused:Connect(function()
+		tween(searchEdge, EASE.quick, { Color = UI.theme.accent })
+	end)
+	search.FocusLost:Connect(function()
+		tween(searchEdge, EASE.quick, { Color = UI.theme.band })
+	end)
 
 	local activeCount = label(head, "0 aktiv", 11, UI.font.body, UI.theme.accentSoft)
 	activeCount.Position = UDim2.new(1, -122, 0, 0)
@@ -608,13 +660,17 @@ function UI.Window(options)
 	end)
 	discord.MouseButton1Click:Connect(function()
 		press(discord)
-		-- setclipboard is the only thing an executor can reliably do here: Roblox
-		-- cannot open a browser from a LocalScript.
-		local ok = pcall(function()
-			(setclipboard or toclipboard or set_clipboard)("https://" .. UI.DISCORD)
+		local url = "https://" .. UI.DISCORD
+		-- GuiService:OpenBrowserWindow really does open the system browser from a
+		-- LocalScript - verified present in this client. It is not on every
+		-- platform though, so the clipboard is still written either way: worst
+		-- case the link is one paste away instead of lost.
+		pcall(function() (setclipboard or toclipboard or set_clipboard)(url) end)
+		local opened = pcall(function()
+			game:GetService("GuiService"):OpenBrowserWindow(url)
 		end)
-		dTitle.Text = ok and "LINK KOPIERT" or ("https://" .. UI.DISCORD)
-		task.delay(2, function() dTitle.Text = "DISCORD BEITRETEN" end)
+		dTitle.Text = opened and "IM BROWSER GEOEFFNET" or "LINK KOPIERT"
+		task.delay(2.5, function() dTitle.Text = "DISCORD BEITRETEN" end)
 	end)
 
 	----------------------------------------------------------------- footer
@@ -634,9 +690,23 @@ function UI.Window(options)
 	window.chipSeq = 0
 	window.collapsed = false
 
+	-- Collapsing has to HIDE the lower furniture, not just shrink the window. The
+	-- Discord bar and the footer are anchored to the bottom of the content frame,
+	-- so shrinking alone slid both of them straight over the header and the strip
+	-- - the collapsed panel was a blue block with the title behind it.
 	headButton("–", -46, function()
 		window.collapsed = not window.collapsed
 		local target = window.collapsed and 90 or height
+		if window.collapsed then
+			body.Visible = false
+			discord.Visible = false
+			foot.Visible = false
+		else
+			-- back BEFORE the tween, so the panel does not open onto a blank area
+			body.Visible = true
+			discord.Visible = true
+			foot.Visible = true
+		end
 		tween(root, EASE.slow, { Size = UDim2.fromOffset(width, target) })
 	end)
 	headButton("×", -24, function() window:Destroy() end)
@@ -733,7 +803,7 @@ function UI.Window(options)
 			local active = p == page
 			tween(p.railButton, EASE.quick, {
 				BackgroundTransparency = active and 0.92 or 1 })
-			p.railIcon.TextColor3 = active and UI.theme.accentAlt or UI.theme.dimmer
+			p.tintIcon(active and UI.theme.accentAlt or UI.theme.dimmer)
 			p.railMark.BackgroundTransparency = active and 0 or 1
 		end
 		-- Pages fade and lift; they never slide sideways. Sideways motion on a
@@ -750,33 +820,57 @@ function UI.Window(options)
 	--------------------------------------------------------------- Page
 	function window:Page(name, iconGlyph)
 		local page = { name = name, cards = {}, window = self }
-		page.holder = frame(body, UDim2.fromScale(1, 1), nil, UI.theme.window, 1)
+
+		-- A SCROLLING page, not a fixed one. v3 first tried to make everything fit
+		-- by shrinking the grid to whatever the full-width card left over - and
+		-- with a 14-line read-out that left the two columns ~160px, so the cards
+		-- were clipped mid-row and the read-out looked like it was lying on top of
+		-- the options. Nothing may ever be squeezed or covered: the content takes
+		-- the height it needs and the page scrolls if that is more than fits.
+		page.holder = Instance.new("ScrollingFrame")
+		page.holder.Size = UDim2.fromScale(1, 1)
+		page.holder.BackgroundTransparency = 1
+		page.holder.BorderSizePixel = 0
 		page.holder.Visible = false
 		page.holder.ZIndex = 1
+		page.holder.ScrollBarThickness = 3
+		page.holder.ScrollBarImageColor3 = UI.theme.accent
+		page.holder.ScrollBarImageTransparency = 0.4
+		page.holder.CanvasSize = UDim2.new()
+		page.holder.AutomaticCanvasSize = Enum.AutomaticSize.Y
+		page.holder.ScrollingDirection = Enum.ScrollingDirection.Y
+		page.holder.ElasticBehavior = Enum.ElasticBehavior.Never
+		page.holder.Parent = body
 
 		-- The grid and the full-width strip are STACKED, never both anchored at
 		-- y=12. v3 shipped them at the same offset for one build and the wide
 		-- card (Card(name, 0), which every script uses for its read-out) drew
 		-- straight on top of the two columns. A vertical list layout makes the
 		-- order structural instead of arithmetic.
-		local stack = frame(page.holder, UDim2.fromScale(1, 1), nil, UI.theme.window, 1)
+		local stack = frame(page.holder, UDim2.new(1, 0, 0, 0), nil, UI.theme.window, 1)
+		stack.AutomaticSize = Enum.AutomaticSize.Y
 		stack.ZIndex = 1
-		pad(stack, 15, 15, 12, 12)
+		pad(stack, 15, 18, 12, 12)
 		listLayout(stack, 12)
 		page.stack = stack
 
 		-- two hand-built columns, never a UIGridLayout: a grid pins every cell to
 		-- one size, which fights AutomaticSize and clipped every card in v1.
-		local grid = frame(stack, UDim2.new(1, 0, 1, 0), nil, UI.theme.window, 1)
+		-- Grid and columns size themselves to their content. Nothing is given a
+		-- height it has to squeeze into, so a card can never be clipped and the
+		-- full-width card below can never land on top of one.
+		local grid = frame(stack, UDim2.new(1, 0, 0, 0), nil, UI.theme.window, 1)
+		grid.AutomaticSize = Enum.AutomaticSize.Y
 		grid.LayoutOrder = 1
 		grid.ZIndex = 1
 		page.grid = grid
 
-		local colWidth = UDim2.new(0.5, -6, 1, 0)
+		local colWidth = UDim2.new(0.5, -6, 0, 0)
 		page.columns = {}
 		for i = 1, 2 do
 			local col = frame(grid, colWidth, UDim2.new(0.5 * (i - 1), (i - 1) * 6, 0, 0),
 				UI.theme.window, 1)
+			col.AutomaticSize = Enum.AutomaticSize.Y
 			col.ZIndex = 1
 			listLayout(col, 12)
 			page.columns[i] = col
@@ -798,35 +892,53 @@ function UI.Window(options)
 		--
 		-- It has to run in a task.defer. The cards were only just made visible,
 		-- so AbsoluteSize is still last frame's and the sum comes out short.
+		-- Only ever GROWS a card, never shrinks one. When the page is shorter than
+		-- the viewport the shorter column's last card takes up the slack so the
+		-- grid reaches the bottom edge like the mockup; when the page is longer,
+		-- this does nothing at all and the page simply scrolls. The earlier
+		-- version forced a height on the grid, which is what clipped the cards.
+		--
+		-- It has to run in a task.defer: the cards were only just made visible, so
+		-- AbsoluteSize is still last frame's and every sum comes out short.
 		function page:Fill()
 			task.defer(function()
-				-- The wide strip auto-sizes, so the grid has to give back exactly
-				-- what it takes or the page runs off the bottom edge.
-				local wideH = self.wide.AbsoluteSize.Y
-				local free = self.stack.AbsoluteSize.Y - wideH - (wideH > 0 and 12 or 0)
-				self.grid.Size = UDim2.new(1, 0, 0, math.max(0, free))
-				task.wait()
-				for _, col in ipairs(self.columns) do
+				if not self.holder.Parent then return end
+				local viewport = body.AbsoluteSize.Y
+				local content = self.stack.AbsoluteSize.Y
+				local heights = {}
+				for i, col in ipairs(self.columns) do
 					local used, last = 0, nil
 					for _, child in ipairs(col:GetChildren()) do
-						if child:IsA("Frame") then
+						if child:IsA("Frame") and child.Name ~= "__fill" then
 							used = used + child.AbsoluteSize.Y + 12
 							if not last or child.LayoutOrder >= last.LayoutOrder then
 								last = child
 							end
 						end
 					end
-					if not last then continue end
-					local spacer = last:FindFirstChild("__fill")
-					local slack = col.AbsoluteSize.Y - (used - 12) + (spacer and spacer.Size.Y.Offset or 0)
-					if not spacer then
-						spacer = frame(last:FindFirstChildOfClass("Frame"),
-							UDim2.new(1, 0, 0, 0), nil, UI.theme.card, 1)
-						spacer.Name = "__fill"
-						spacer.LayoutOrder = 99
-						spacer.ZIndex = 2
+					heights[i] = { used = math.max(0, used - 12), last = last }
+				end
+				local tallest = math.max(heights[1].used, heights[2].used)
+				-- if the whole page already overflows, no filling - just scroll
+				local slackPage = viewport - content
+				for _, h in ipairs(heights) do
+					if h.last then
+						local inner3 = h.last:FindFirstChildOfClass("Frame")
+						local spacer = inner3 and inner3:FindFirstChild("__fill")
+						local want = (tallest - h.used) + math.max(0, slackPage)
+						if want > 2 and inner3 then
+							if not spacer then
+								spacer = frame(inner3, UDim2.new(1, 0, 0, 0), nil,
+									UI.theme.card, 1)
+								spacer.Name = "__fill"
+								spacer.LayoutOrder = 99
+								spacer.ZIndex = 2
+							end
+							spacer.Size = UDim2.new(1, 0, 0, want)
+						elseif spacer then
+							spacer:Destroy()
+						end
 					end
-					spacer.Size = UDim2.new(1, 0, 0, math.max(0, slack))
 				end
 			end)
 		end
@@ -843,10 +955,10 @@ function UI.Window(options)
 		btn.ZIndex = 3
 		btn.Parent = railList
 		corner(btn, 9)
-		local icon = label(btn, iconGlyph or UI.icon.grid, 14, UI.font.body, UI.theme.dimmer)
-		icon.Size = UDim2.fromScale(1, 1)
-		icon.TextXAlignment = Enum.TextXAlignment.Center
+		local icon, tintIcon = iconNode(btn, iconGlyph or UI.icon.grid, 16, UI.theme.dimmer)
+		icon.Position = UDim2.new(0.5, -8, 0.5, -8)
 		icon.ZIndex = 4
+		page.tintIcon = tintIcon
 		-- the active marker is an inset bar on the left, box-shadow:inset 2px 0 0
 		local mark = frame(btn, UDim2.fromOffset(2, 18), UDim2.fromOffset(-8, 6), UI.theme.accent, 1)
 		mark.ZIndex = 4
@@ -888,9 +1000,8 @@ function UI.Window(options)
 			local band = frame(inner, UDim2.new(1, 0, 0, 30), nil, Color3.new(1, 1, 1), 0.965)
 			band.LayoutOrder = 0
 			band.ZIndex = 3
-			local bandIcon = label(band, UI.icon.grid, 11, UI.font.body, UI.theme.dim)
-			bandIcon.Position = UDim2.fromOffset(11, 0)
-			bandIcon.Size = UDim2.fromOffset(14, 30)
+			local bandIcon, tintBand = iconNode(band, UI.icon.grid, 13, UI.theme.dim)
+			bandIcon.Position = UDim2.fromOffset(11, 9)
 			bandIcon.ZIndex = 4
 			-- GothamBold, not the mono font. The mockup sets these in IBM Plex Mono
 			-- and Roblox's stand-in for that is Enum.Font.Code, which at 10px
@@ -920,13 +1031,22 @@ function UI.Window(options)
 			function card:Accent()
 				band.BackgroundColor3 = UI.theme.accent
 				band.BackgroundTransparency = 0.9
-				bandIcon.TextColor3 = UI.theme.accentAlt
+				tintBand(UI.theme.accentAlt)
 				bandText.TextColor3 = UI.theme.accentSoft
 				countLabel.TextColor3 = UI.theme.dim
 				return self
 			end
 
-			function card:Icon(glyph) bandIcon.Text = glyph return self end
+			function card:Icon(glyph)
+				local colour = bandIcon:IsA("ImageLabel") and bandIcon.ImageColor3
+					or bandIcon.TextColor3
+				bandIcon:Destroy()
+				bandIcon, tintBand = iconNode(band, glyph, 13, colour)
+				bandIcon.Position = UDim2.fromOffset(11, 9)
+				bandIcon.ZIndex = 4
+				card.bandIcon = bandIcon
+				return self
+			end
 
 			-- A row: title + hint on the left, control anchored to the TITLE LINE.
 			-- With a two-line hint under it a vertically centred control drifts
@@ -1449,7 +1569,11 @@ function UI.Window(options)
 				pageHits = pageHits + cardHits
 			end
 			-- dim the rail entry of a page with no hits at all
-			page.railIcon.TextTransparency = (query ~= "" and pageHits == 0) and 0.7 or 0
+			page.railIcon.ImageTransparency = page.railIcon:IsA("ImageLabel")
+				and ((query ~= "" and pageHits == 0) and 0.7 or 0) or nil
+			if page.railIcon:IsA("TextLabel") then
+				page.railIcon.TextTransparency = (query ~= "" and pageHits == 0) and 0.7 or 0
+			end
 		end
 	end)
 
