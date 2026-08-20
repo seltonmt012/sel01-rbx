@@ -211,6 +211,209 @@ end
 
 UI.LOGO = "selux-mark.png"
 
+--------------------------------------------------------------------------------
+-- language
+--------------------------------------------------------------------------------
+-- Three languages, one dictionary, and NOT ONE LINE changed in any game script.
+--
+-- The trick is that every piece of text a panel shows already funnels through
+-- two places: label() when it is created and setText() when it changes. Both
+-- stamp the ORIGINAL string onto the instance as an attribute and display
+-- UI.t(original). Switching language therefore does not need to know where a
+-- string came from - it walks the ScreenGui, reads the attribute back and
+-- re-renders. A script that passes "Auto rebirth" keeps passing "Auto rebirth"
+-- forever; only the dictionary decides what the player reads.
+--
+-- Anything with no dictionary entry falls through unchanged, so a missing
+-- translation is a mixed panel, never a blank one.
+UI.LANGS = { "de", "en", "ru" }
+UI.LANG_NAME = { de = "Deutsch", en = "English", ru = "Russkij" }
+UI.RAW = "https://raw.githubusercontent.com/" .. UI.REPO .. "/main/"
+
+local LANG_FILE = "selux-lang.txt"
+local TEXT_ATTR = "SxText"
+local HINT_ATTR = "SxHint"
+
+-- The player's own Roblox language is the best default there is: a Russian
+-- client gets Russian without touching anything. A saved choice always wins.
+local function detectLang()
+	local ok, id = pcall(function()
+		return game:GetService("LocalizationService").RobloxLocaleId
+	end)
+	if ok and type(id) == "string" then
+		local two = string.lower(string.sub(id, 1, 2))
+		for _, l in ipairs(UI.LANGS) do
+			if l == two then return l end
+		end
+	end
+	return "en"
+end
+
+UI.lang = _G.__SEL_LANG
+if not UI.lang and isfile and isfile(LANG_FILE) then
+	local ok, saved = pcall(readfile, LANG_FILE)
+	if ok and type(saved) == "string" then
+		saved = string.lower((string.gsub(saved, "%s", "")))
+		for _, l in ipairs(UI.LANGS) do
+			if l == saved then UI.lang = saved end
+		end
+	end
+end
+UI.lang = UI.lang or detectLang()
+_G.__SEL_LANG = UI.lang
+
+-- One dictionary file per language, not one file with three fields per key: a
+-- client only ever renders one language, and Cyrillic costs two bytes a
+-- character, so the combined table was 121 KB against 44 for German alone.
+--
+-- Order: whatever is already loaded in this session, then the workspace copy
+-- (bridge.py sync puts it there while developing), then the repo. Cached to disk
+-- after the first download, so it costs one request ever.
+_G.__SEL_I18N = _G.__SEL_I18N or {}
+local dicts = _G.__SEL_I18N
+
+local function dictionary(lang)
+	lang = lang or UI.lang
+	if dicts[lang] ~= nil then return dicts[lang] or nil end
+	local name = "i18n-" .. lang .. ".lua"
+	local body
+	if isfile and isfile(name) then
+		local ok, disk = pcall(readfile, name)
+		if ok then body = disk end
+	end
+	if not body then
+		local ok, web = pcall(function() return game:HttpGet(UI.RAW .. "lib/" .. name) end)
+		if ok and type(web) == "string" and #web > 64 then
+			body = web
+			pcall(function() writefile(name, web) end)
+		end
+	end
+	if body then
+		local chunk = loadstring and loadstring(body, "=" .. name)
+		local ok, loaded = pcall(chunk or function() end)
+		if ok and type(loaded) == "table" then dicts[lang] = loaded end
+	end
+	-- false, not nil: a language with no file must not be looked up again on
+	-- every single label. There are hundreds per panel.
+	if dicts[lang] == nil then dicts[lang] = false end
+	return dicts[lang] or nil
+end
+
+-- Translate. Leading and trailing spacing is preserved separately because a lot
+-- of the status lines are built by concatenation and carry padding that is part
+-- of the layout, not part of the sentence.
+function UI.t(text)
+	if type(text) ~= "string" or text == "" then return text end
+	local d = dictionary()
+	if not d then return text end
+	local hit = d[text]
+	if hit then return hit end
+	local lead, core, tail = string.match(text, "^(%s*)(.-)(%s*)$")
+	if core and core ~= text and core ~= "" then
+		hit = d[core]
+		if hit then return lead .. hit .. tail end
+	end
+	return text
+end
+
+-- Translate a template and fill it in one step. Sentences that carry a number
+-- have to stay ONE dictionary key - split into fragments and concatenated, the
+-- word order is frozen in German and no other language can be written properly.
+function UI.tf(template, ...)
+	local ok, out = pcall(string.format, UI.t(template), ...)
+	return ok and out or template
+end
+
+-- Every .Text assignment in this file goes through here. Setting .Text directly
+-- works but the string is then invisible to a language switch, so the label
+-- freezes in whatever language it was born in.
+local function setText(instance, text)
+	text = (text == nil) and "" or tostring(text)
+	pcall(function()
+		instance:SetAttribute(TEXT_ATTR, text)
+		instance:SetAttribute("SxFmt", nil)
+	end)
+	instance.Text = UI.t(text)
+end
+UI.setText = setText
+
+-- Text that is part sentence, part number ("3 aktiv", "2 / 5 an"). Storing the
+-- finished string would make it untranslatable, because "3 aktiv" is not a
+-- dictionary key and never will be. So the TEMPLATE is what gets stamped on the
+-- instance and the arguments ride along beside it; a language switch formats it
+-- again in the new language.
+local function setFmt(instance, template, ...)
+	local args = { ... }
+	for i = 1, #args do args[i] = tostring(args[i]) end
+	pcall(function()
+		instance:SetAttribute(TEXT_ATTR, nil)
+		instance:SetAttribute("SxFmt", template)
+		instance:SetAttribute("SxArgs", table.concat(args, "\1"))
+	end)
+	instance.Text = string.format(UI.t(template), table.unpack(args))
+end
+UI.setFmt = setFmt
+
+local function applyFmt(instance)
+	local template = instance:GetAttribute("SxFmt")
+	if not template then return end
+	local args = {}
+	for piece in string.gmatch((instance:GetAttribute("SxArgs") or "") .. "\1", "([^\1]*)\1") do
+		args[#args + 1] = piece
+	end
+	instance.Text = string.format(UI.t(template), table.unpack(args))
+end
+
+local function setPlaceholder(instance, text)
+	text = (text == nil) and "" or tostring(text)
+	pcall(function() instance:SetAttribute(HINT_ATTR, text) end)
+	instance.PlaceholderText = UI.t(text)
+end
+
+-- Live windows, weak-keyed so a destroyed panel does not keep its ScreenGui
+-- alive just because the language switch might want it later.
+local liveWindows = setmetatable({}, { __mode = "k" })
+
+local function retranslate(root)
+	if not root or not root.Parent then return end
+	for _, d in ipairs(root:GetDescendants()) do
+		local t = d:GetAttribute(TEXT_ATTR)
+		if t ~= nil then pcall(function() d.Text = UI.t(t) end) end
+		if d:GetAttribute("SxFmt") ~= nil then pcall(applyFmt, d) end
+		local h = d:GetAttribute(HINT_ATTR)
+		if h ~= nil then pcall(function() d.PlaceholderText = UI.t(h) end) end
+	end
+end
+
+function UI.setLang(code)
+	local valid = false
+	for _, l in ipairs(UI.LANGS) do
+		if l == code then valid = true end
+	end
+	if not valid or code == UI.lang then return false end
+	UI.lang = code
+	_G.__SEL_LANG = code
+	pcall(function() writefile(LANG_FILE, code) end)
+	for window in pairs(liveWindows) do
+		retranslate(window.gui)
+		if window.onLang then pcall(window.onLang, code) end
+	end
+	return true
+end
+
+-- The flag itself: the repo copy for everybody, the workspace copy while
+-- developing, and the two letters when neither is reachable. A panel must never
+-- lose its language switch because an image did not load.
+local flagCache = {}
+function UI.flag(code)
+	if flagCache[code] ~= nil then return flagCache[code] or nil end
+	local id = UI.image("icons/selux-flag-" .. code .. ".png")
+	if not id then id = UI.imageFromUrl(UI.RAW .. "flags/" .. code .. ".png",
+		"selux-cache/flag-" .. code .. ".png") end
+	flagCache[code] = id or false
+	return id
+end
+
 
 local EASE = {
 	quick = TweenInfo.new(0.12, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
@@ -280,7 +483,7 @@ end
 local function label(parent, text, size, font, color, alpha)
 	local l = Instance.new("TextLabel")
 	l.BackgroundTransparency = 1
-	l.Text = text or ""
+	setText(l, text)
 	l.TextSize = size or 12
 	l.Font = font or UI.font.body
 	l.TextColor3 = color or UI.theme.textSoft
@@ -512,7 +715,7 @@ function UI.Window(options)
 	-- Drawn as a real field. It used to be fully transparent with no outline, so
 	-- the placeholder floated in the header and there was no telling where the
 	-- box began or ended.
-	local searchWrap = frame(head, UDim2.fromOffset(172, 24), UDim2.new(1, -322, 0, 7),
+	local searchWrap = frame(head, UDim2.fromOffset(172, 24), UDim2.new(1, -368, 0, 7),
 		UI.theme.input, 0)
 	searchWrap.ZIndex = 3
 	corner(searchWrap, 7)
@@ -525,7 +728,7 @@ function UI.Window(options)
 	search.Position = UDim2.fromOffset(0, 0)
 	search.Size = UDim2.new(1, 0, 1, 0)
 	search.Text = ""
-	search.PlaceholderText = "Suche"
+	setPlaceholder(search, "Suche")
 	search.TextSize = 12
 	search.Font = UI.font.body
 	search.TextColor3 = UI.theme.textSoft
@@ -542,7 +745,7 @@ function UI.Window(options)
 	end)
 
 	local activeCount = label(head, "0 aktiv", 11, UI.font.body, UI.theme.accentSoft)
-	activeCount.Position = UDim2.new(1, -122, 0, 0)
+	activeCount.Position = UDim2.new(1, -186, 0, 0)
 	activeCount.Size = UDim2.fromOffset(60, 38)
 	activeCount.TextXAlignment = Enum.TextXAlignment.Right
 	activeCount.ZIndex = 3
@@ -572,6 +775,88 @@ function UI.Window(options)
 		b.MouseButton1Click:Connect(onClick)
 		return b
 	end
+
+	----------------------------------------------------------------- language
+	-- Three flags in the header, left of the window buttons. Deliberately not a
+	-- dropdown: one click has to be enough, and a menu would need a label, which
+	-- would itself need translating before anyone can read it.
+	local flagStrip = frame(head, UDim2.fromOffset(66, 38), UDim2.new(1, -118, 0, 0),
+		UI.theme.header, 1)
+	flagStrip.ZIndex = 3
+	local flagChips = {}
+
+	-- The chip is either an ImageLabel or a TextLabel, and TweenService throws on
+	-- a property the instance does not have - so each chip carries its own fade
+	-- rather than the loop guessing which one it got.
+	local function paintFlags()
+		for code, chip in pairs(flagChips) do
+			local on = (code == UI.lang)
+			chip.fade(on and 0 or 0.55)
+			tween(chip.edge, EASE.quick, {
+				Color = on and UI.theme.accent or UI.theme.band,
+				Transparency = on and 0 or 0.4,
+			})
+		end
+	end
+
+	for i, code in ipairs(UI.LANGS) do
+		local chip = Instance.new("TextButton")
+		chip.Size = UDim2.fromOffset(19, 14)
+		chip.Position = UDim2.fromOffset((i - 1) * 23, 12)
+		chip.BackgroundColor3 = UI.theme.input
+		chip.BackgroundTransparency = 0.35
+		chip.BorderSizePixel = 0
+		chip.Text = ""
+		chip.AutoButtonColor = false
+		chip.ZIndex = 3
+		chip.Parent = flagStrip
+		corner(chip, 3)
+		local edge = stroke(chip, UI.theme.band, 0.4)
+
+		-- The image if it is reachable, the two letters if it is not. A panel
+		-- must never lose its language switch because a PNG did not download.
+		local fade
+		local flagId = UI.flag(code)
+		if flagId then
+			local art = Instance.new("ImageLabel")
+			art.BackgroundTransparency = 1
+			art.Image = flagId
+			art.ScaleType = Enum.ScaleType.Crop
+			art.Size = UDim2.fromScale(1, 1)
+			art.ZIndex = 4
+			art.Parent = chip
+			corner(art, 3)
+			fade = function(a) tween(art, EASE.quick, { ImageTransparency = a }) end
+		else
+			-- The two letters are NOT translated: "DE" has to stay "DE" in every
+			-- language or the switch stops being a switch.
+			local art = Instance.new("TextLabel")
+			art.BackgroundTransparency = 1
+			art.Text = string.upper(code)
+			art.TextSize = 9
+			art.Font = UI.font.heading
+			art.TextColor3 = UI.theme.textSoft
+			art.Size = UDim2.fromScale(1, 1)
+			art.ZIndex = 4
+			art.Parent = chip
+			fade = function(a) tween(art, EASE.quick, { TextTransparency = a }) end
+		end
+		flagChips[code] = { chip = chip, fade = fade, edge = edge }
+
+		chip.MouseEnter:Connect(function()
+			if code ~= UI.lang then fade(0.15) end
+		end)
+		chip.MouseLeave:Connect(paintFlags)
+		chip.MouseButton1Click:Connect(function()
+			if UI.setLang(code) then paintFlags() end
+		end)
+	end
+	paintFlags()
+	window.paintFlags = paintFlags
+	-- A switch in one panel has to move every panel that is open, so the window
+	-- registers itself and UI.setLang calls back into it.
+	window.onLang = paintFlags
+	liveWindows[window] = true
 
 	----------------------------------------------------------------- status strip
 	local strip = frame(content, UDim2.new(1, 0, 0, 52), UDim2.fromOffset(0, 38), UI.theme.accent, 0.95)
@@ -695,8 +980,8 @@ function UI.Window(options)
 		local opened = pcall(function()
 			game:GetService("GuiService"):OpenBrowserWindow(url)
 		end)
-		dTitle.Text = opened and "IM BROWSER GEOEFFNET" or "LINK KOPIERT"
-		task.delay(2.5, function() dTitle.Text = "DISCORD BEITRETEN" end)
+		setText(dTitle, opened and "IM BROWSER GEOEFFNET" or "LINK KOPIERT")
+		task.delay(2.5, function() setText(dTitle, "DISCORD BEITRETEN") end)
 	end)
 
 	----------------------------------------------------------------- footer
@@ -762,8 +1047,8 @@ function UI.Window(options)
 		tween(stripKnob, EASE.snap, {
 			Position = UDim2.fromOffset(masterState and 18 or 3, 3),
 			BackgroundColor3 = masterState and UI.theme.window or UI.theme.fainter })
-		if caption then stripTitle.Text = caption end
-		if sub then stripSub.Text = sub end
+		if caption then setText(stripTitle, caption) end
+		if sub then setText(stripSub, sub) end
 	end
 
 	function window:OnMaster(fn) masterCb = fn end
@@ -777,8 +1062,8 @@ function UI.Window(options)
 	-- SetStatus keeps its v1 meaning - the live line of numbers - but it now
 	-- writes the status strip's sub line, which is where the eye goes.
 	function window:SetStatus(text)
-		stripSub.Text = text or ""
-		headSub.Text = options.subtitle or ""
+		setText(stripSub, text)
+		setText(headSub, options.subtitle)
 	end
 
 	function window:SetStat(index, value, caption)
@@ -786,10 +1071,10 @@ function UI.Window(options)
 		if not s then return end
 		statHolder.Visible = true
 		s.value.Text = tostring(value)
-		if caption then s.caption.Text = caption end
+		if caption then setText(s.caption, caption) end
 	end
 
-	function window:SetNote(text) stripTitle.Text = text or "" end
+	function window:SetNote(text) setText(stripTitle, text) end
 
 	function window:Destroy()
 		if pulseConn then pulseConn:Disconnect() pulseConn = nil end
@@ -803,7 +1088,7 @@ function UI.Window(options)
 			total = total + 1
 			if entry.on then on = on + 1 end
 		end
-		activeCount.Text = on .. " aktiv"
+		setFmt(activeCount, "%s aktiv", on)
 		for _, page in ipairs(self.pages) do
 			for _, card in ipairs(page.cards) do
 				if card.countLabel then
@@ -812,7 +1097,8 @@ function UI.Window(options)
 						t = t + 1
 						if e.on then c = c + 1 end
 					end
-					card.countLabel.Text = t > 0 and (c .. " / " .. t .. " an") or ""
+					if t > 0 then setFmt(card.countLabel, "%s / %s an", c, t)
+					else setText(card.countLabel, "") end
 				end
 			end
 		end
@@ -824,7 +1110,7 @@ function UI.Window(options)
 		if window.current then window.current.holder.Visible = false end
 		window.current = page
 		page.holder.Visible = true
-		pageName.Text = page.name
+		setText(pageName, page.name)
 		for _, p in ipairs(window.pages) do
 			local active = p == page
 			tween(p.railButton, EASE.quick, {
@@ -1291,7 +1577,7 @@ function UI.Window(options)
 					b.Position = UDim2.new(1, x, 0, -3)
 					b.BackgroundColor3 = UI.theme.input
 					b.BorderSizePixel = 0
-					b.Text = text
+					setText(b, text)
 					b.TextSize = 12
 					b.Font = UI.font.heading
 					b.TextColor3 = UI.theme.muted
@@ -1325,7 +1611,7 @@ function UI.Window(options)
 				local function refresh()
 					local ok, text = pcall(getText)
 					text = ok and tostring(text) or "-"
-					chipText.Text = text
+					setText(chipText, text)
 					-- TextService:GetTextSize, never TextBounds: a label that has not
 					-- rendered yet reports zero on the first frame, and the chip
 					-- would collapse to its minimum on every rebuild.
@@ -1410,7 +1696,7 @@ function UI.Window(options)
 					item.BackgroundColor3 = UI.theme.input
 					item.BackgroundTransparency = 1
 					item.BorderSizePixel = 0
-					item.Text = "  " .. tostring(choice)
+					setText(item, "  " .. tostring(choice))
 					item.TextSize = 11
 					item.Font = UI.font.mono
 					item.TextColor3 = UI.theme.muted
@@ -1429,7 +1715,7 @@ function UI.Window(options)
 					end)
 					item.MouseButton1Click:Connect(function()
 						value = choice
-						boxText.Text = tostring(choice)
+						setText(boxText, tostring(choice))
 						menu.Visible = false
 						if callback then task.spawn(callback, choice) end
 					end)
@@ -1452,7 +1738,7 @@ function UI.Window(options)
 
 				return { set = function(a, b)
 					local v = arg(a, b)
-					if v ~= nil then value = v boxText.Text = tostring(v) end
+					if v ~= nil then value = v setText(boxText, tostring(v)) end
 				end }
 			end
 
@@ -1467,7 +1753,7 @@ function UI.Window(options)
 				b.Size = UDim2.new(1, 0, 0, 32)
 				b.BackgroundColor3 = colour or UI.theme.accent
 				b.BorderSizePixel = 0
-				b.Text = string.upper(caption2 or "")
+				setText(b, string.upper(caption2 or ""))
 				b.TextSize = 11
 				b.Font = UI.font.heading
 				b.TextColor3 = (colour and colour ~= UI.theme.accent)
@@ -1503,7 +1789,7 @@ function UI.Window(options)
 				l.TextYAlignment = Enum.TextYAlignment.Top
 				l.ZIndex = 5
 				return {
-					set = function(a, b) l.Text = arg(a, b) or "" end,
+					set = function(a, b) setText(l, arg(a, b)) end,
 					label = l,
 				}
 			end
@@ -1543,7 +1829,7 @@ function UI.Window(options)
 						local list = arg(a, b)
 						for i, l in ipairs(rowLabels) do
 							local text = list and list[i] or ""
-							l.Text = text
+							setText(l, text)
 							-- ALL-CAPS lines render as accent headings, same as v1/v2.
 							local isHead = text ~= "" and text == string.upper(text)
 								and not text:match("^%s")
@@ -1611,7 +1897,7 @@ function UI.Window(options)
 				liveTitle.set(window.stripTitle.Text)
 				liveSub.set(window.stripSub.Text)
 				local mins = math.floor((os.clock() - started) / 60)
-				liveMeta.set(string.format("Sitzung %d min  ·  %d Seiten  ·  Selux v%s",
+				liveMeta.set(UI.tf("Sitzung %d min  ·  %d Seiten  ·  Selux v%s",
 					mins, #window.pages, UI.VERSION))
 				task.wait(5)
 			end
@@ -1620,8 +1906,7 @@ function UI.Window(options)
 		-- Report card. Sits on Home, under the live panel, so a user who thinks
 		-- something is broken finds it without being told where to look.
 		local report = page:Card("PROBLEM MELDEN", 2):Icon(UI.icon.shield)
-		local reportHint = report:Label("Script kaputt oder Spiel geupdatet? Ein Klick reicht - "
-			.. "wenn du willst, schreib kurz dazu was nicht geht.")
+		local reportHint = report:Label("Script kaputt oder Spiel geupdatet? Ein Klick reicht - wenn du willst, schreib kurz dazu was nicht geht.")
 
 		-- Optional free text. Deliberately an inline field and not a popup: a
 		-- modal would make the common case (just press it) two clicks, and a
@@ -1640,7 +1925,7 @@ function UI.Window(options)
 		msgInput.BackgroundTransparency = 1
 		msgInput.Size = UDim2.fromScale(1, 1)
 		msgInput.Text = ""
-		msgInput.PlaceholderText = "Was genau geht nicht? (optional)"
+		setPlaceholder(msgInput, "Was genau geht nicht? (optional)")
 		msgInput.TextSize = 11
 		msgInput.Font = UI.font.body
 		msgInput.TextColor3 = UI.theme.textSoft
@@ -1698,9 +1983,7 @@ function UI.Window(options)
 
 			if not haveSomethingToSay() then
 				local left = math.ceil(READY_AFTER - (os.clock() - openedAt))
-				reportHint.set("Das Panel laeuft erst " .. (READY_AFTER - left) ..
-					"s. Lass es kurz laufen (noch " .. left .. "s) - oder schreib "
-					.. "oben rein, was nicht geht, dann geht es sofort.")
+				reportHint.set(UI.tf("Das Panel laeuft erst %ds. Lass es kurz laufen (noch %ds) - oder schreib oben rein, was nicht geht, dann geht es sofort.", READY_AFTER - left, left))
 				return
 			end
 
@@ -1708,14 +1991,13 @@ function UI.Window(options)
 			-- already shown intent, so they skip it.
 			if not armed and msgInput.Text == "" then
 				armed = true
-				reportBtn.Text = "WIRKLICH MELDEN?"
+				setText(reportBtn, "WIRKLICH MELDEN?")
 				reportBtn.BackgroundColor3 = UI.theme.bad
-				reportHint.set("Nochmal druecken zum Senden. Besser: schreib kurz "
-					.. "rein, was nicht geht - dann kann ich es auch beheben.")
+				reportHint.set("Nochmal druecken zum Senden. Besser: schreib kurz rein, was nicht geht - dann kann ich es auch beheben.")
 				task.delay(8, function()
 					if not sent and armed then
 						armed = false
-						reportBtn.Text = "MELDEN"
+						setText(reportBtn, "MELDEN")
 						reportBtn.BackgroundColor3 = UI.theme.warn
 					end
 				end)
@@ -1739,34 +2021,27 @@ function UI.Window(options)
 			sent = true
 			if how == "limit" then
 				-- Not delivered. Say so, and give the user the way round it.
-				reportBtn.Text = "LIMIT ERREICHT"
+				setText(reportBtn, "LIMIT ERREICHT")
 				reportBtn.BackgroundColor3 = UI.theme.warn
 				pcall(function()
 					(setclipboard or toclipboard or set_clipboard)(r.text)
 				end)
-				reportHint.set("Von dieser Verbindung kamen zuletzt zu viele Meldungen, "
-					.. "diese wurde NICHT zugestellt. Sie liegt in der Zwischenablage - "
-					.. "fueg sie im Discord unter #support ein, oder probier es in einer "
-					.. "Stunde nochmal.")
+				reportHint.set("Von dieser Verbindung kamen zuletzt zu viele Meldungen, diese wurde NICHT zugestellt. Sie liegt in der Zwischenablage - fueg sie im Discord unter #support ein, oder probier es gleich nochmal.")
 			elseif how == "doppelt" then
-				reportBtn.Text = "SCHON GEMELDET  #" .. r.id
+				setFmt(reportBtn, "SCHON GEMELDET  #%s", r.id)
 				reportBtn.BackgroundColor3 = UI.theme.warn
-				reportHint.set("Dieses Problem wurde fuer dieses Spiel gerade schon "
-					.. "gemeldet - es ist angekommen, aber nicht doppelt.")
+				reportHint.set("Dieses Problem wurde fuer dieses Spiel gerade schon gemeldet - es ist angekommen, aber nicht doppelt.")
 			elseif how == "clipboard" then
-				reportBtn.Text = "KOPIERT  #" .. r.id
+				setFmt(reportBtn, "KOPIERT  #%s", r.id)
 				reportBtn.BackgroundColor3 = UI.theme.good
-				reportHint.set("In die Zwischenablage kopiert - bitte im Discord "
-					.. "unter #support einfuegen. Nummer #" .. r.id)
+				reportHint.set(UI.tf("In die Zwischenablage kopiert - bitte im Discord unter #support einfuegen. Nummer #%s", r.id))
 			else
-				reportBtn.Text = "GEMELDET - DANKE  #" .. r.id
+				setFmt(reportBtn, "GEMELDET - DANKE  #%s", r.id)
 				reportBtn.BackgroundColor3 = UI.theme.good
-				reportHint.set("Angekommen. Nummer #" .. r.id
-					.. " - die kannst du im Support-Forum nennen.")
+				reportHint.set(UI.tf("Angekommen. Nummer #%s - die kannst du im Support-Forum nennen.", r.id))
 			end
 		end, UI.theme.warn)
-		report:Label("Mitgeschickt werden Spiel, Script-Version, der letzte Status "
-			.. "und die aktiven Optionen. Kein Roblox-Name, keine UserId.")
+		report:Label("Mitgeschickt werden Spiel, Script-Version, der letzte Status und die aktiven Optionen. Kein Roblox-Name, keine UserId.")
 
 		local function paint(list, err)
 			for _, child in ipairs(body2:GetChildren()) do
@@ -1908,10 +2183,10 @@ local function ago(iso)
 	-- machine's own offset instead of assuming a timezone.
 	local offset = os.time() - os.time(os.date("!*t", os.time()))
 	local delta = os.time() - (when + offset)
-	if delta < 90 then return "gerade eben" end
-	if delta < 5400 then return math.floor(delta / 60) .. " Min" end
-	if delta < 172800 then return math.floor(delta / 3600) .. " Std" end
-	return math.floor(delta / 86400) .. " Tage"
+	if delta < 90 then return UI.t("gerade eben") end
+	if delta < 5400 then return UI.tf("%d Min", math.floor(delta / 60)) end
+	if delta < 172800 then return UI.tf("%d Std", math.floor(delta / 3600)) end
+	return UI.tf("%d Tage", math.floor(delta / 86400))
 end
 
 -- A one-click "this is broken" report ------------------------------------------
