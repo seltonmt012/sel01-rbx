@@ -152,6 +152,32 @@ function UI.image(file)
 	return imageCache[file] or nil
 end
 
+-- Icons straight off a URL. ImageLabel.Image does NOT take a web address - it
+-- only ever accepts an rbxassetid - so the trick is to download the bytes, drop
+-- them in the workspace and hand THAT to getcustomasset. Once fetched the file
+-- stays, so it costs one request ever, and a dead link or an executor without
+-- writefile simply returns nil.
+--
+--   local id = UI.imageFromUrl("https://raw.githubusercontent.com/.../swords.png")
+--   if id then someImageLabel.Image = id end
+--
+-- The practical use: put a PNG in the sel01-rbx repo next to the scripts, and
+-- every panel can draw it without anybody uploading anything to Roblox.
+function UI.imageFromUrl(url, name)
+	name = name or ("selux-cache/" .. (string.match(url, "([%w%-_%.]+)%.png$") or
+		tostring(#url)) .. ".png")
+	if isfile and isfile(name) then return UI.image(name) end
+	if not writefile then return nil end
+	local ok, body = pcall(function() return game:HttpGet(url) end)
+	if not ok or not body or #body < 8 then return nil end
+	-- Confirm it really is a PNG before caching it: an HTML error page written to
+	-- disk as .png would be cached forever and draw nothing.
+	if string.sub(body, 2, 4) ~= "PNG" then return nil end
+	local wrote = pcall(writefile, name, body)
+	if not wrote then return nil end
+	return UI.image(name)
+end
+
 UI.LOGO = "selux-mark.png"
 
 local EASE = {
@@ -396,7 +422,7 @@ function UI.Window(options)
 	head.ZIndex = 2
 	hairline(head, 0, UI.theme.edge).Position = UDim2.new(0, 0, 1, -1)
 
-	local brand = label(head, UI.BRAND, 11, UI.font.heading, UI.theme.textSoft)
+	local brand = label(head, UI.BRAND, 13, UI.font.heading, UI.theme.textSoft)
 	brand.Position = UDim2.fromOffset(14, 0)
 	brand.Size = UDim2.fromOffset(48, 38)
 	brand.ZIndex = 3
@@ -404,13 +430,13 @@ function UI.Window(options)
 	local brandDiv = frame(head, UDim2.fromOffset(1, 13), UDim2.fromOffset(66, 13), UI.theme.band)
 	brandDiv.ZIndex = 3
 
-	local pageName = label(head, options.title or "Panel", 11, UI.font.body, UI.theme.muted)
+	local pageName = label(head, options.title or "Panel", 13, UI.font.body, UI.theme.muted)
 	pageName.Position = UDim2.fromOffset(76, 0)
 	pageName.Size = UDim2.fromOffset(110, 38)
 	pageName.ZIndex = 3
 	window.pageName = pageName
 
-	local headSub = label(head, options.subtitle or "", 10, UI.font.mono, UI.theme.faint)
+	local headSub = label(head, options.subtitle or "", 11, UI.font.body, UI.theme.faint)
 	headSub.Position = UDim2.fromOffset(190, 0)
 	headSub.Size = UDim2.fromOffset(190, 38)
 	headSub.ZIndex = 3
@@ -428,7 +454,7 @@ function UI.Window(options)
 	search.Size = UDim2.new(1, 0, 1, 0)
 	search.Text = ""
 	search.PlaceholderText = "Suche"
-	search.TextSize = 11
+	search.TextSize = 12
 	search.Font = UI.font.body
 	search.TextColor3 = UI.theme.textSoft
 	search.PlaceholderColor3 = UI.theme.faint
@@ -437,7 +463,7 @@ function UI.Window(options)
 	search.ZIndex = 4
 	search.Parent = searchWrap
 
-	local activeCount = label(head, "0 aktiv", 10, UI.font.mono, UI.theme.accentSoft)
+	local activeCount = label(head, "0 aktiv", 11, UI.font.body, UI.theme.accentSoft)
 	activeCount.Position = UDim2.new(1, -122, 0, 0)
 	activeCount.Size = UDim2.fromOffset(60, 38)
 	activeCount.TextXAlignment = Enum.TextXAlignment.Right
@@ -489,13 +515,13 @@ function UI.Window(options)
 	stripHit.ZIndex = 5
 	stripHit.Parent = stripToggle
 
-	local stripTitle = label(strip, "Bereit", 12, UI.font.heading, UI.theme.text)
+	local stripTitle = label(strip, "Bereit", 14, UI.font.heading, UI.theme.text)
 	stripTitle.Position = UDim2.fromOffset(63, 12)
 	stripTitle.Size = UDim2.fromOffset(240, 14)
 	stripTitle.ZIndex = 3
 	window.stripTitle = stripTitle
 
-	local stripSub = label(strip, options.subtitle or "", 9, UI.font.mono, UI.theme.dimmer)
+	local stripSub = label(strip, options.subtitle or "", 11, UI.font.mono, UI.theme.dimmer)
 	stripSub.Position = UDim2.fromOffset(63, 28)
 	stripSub.Size = UDim2.fromOffset(300, 12)
 	stripSub.ZIndex = 3
@@ -513,12 +539,12 @@ function UI.Window(options)
 		local col = frame(statHolder, UDim2.fromOffset(70, 34), nil, UI.theme.window, 1)
 		col.LayoutOrder = i
 		col.ZIndex = 3
-		local value = label(col, "-", 13, UI.font.mono,
+		local value = label(col, "-", 15, UI.font.mono,
 			i == 2 and UI.theme.accentSoft or UI.theme.text)
 		value.Size = UDim2.new(1, 0, 0, 14)
 		value.TextXAlignment = Enum.TextXAlignment.Right
 		value.ZIndex = 4
-		local capt = label(col, "", 9, UI.font.body, UI.theme.dimmer)
+		local capt = label(col, "", 10, UI.font.body, UI.theme.dimmer)
 		capt.Position = UDim2.fromOffset(0, 18)
 		capt.Size = UDim2.new(1, 0, 0, 12)
 		capt.TextXAlignment = Enum.TextXAlignment.Right
@@ -559,7 +585,7 @@ function UI.Window(options)
 	dTitle.Size = UDim2.fromOffset(300, 14)
 	dTitle.ZIndex = 3
 
-	local dSub = label(discord, "Codes, Updates & Support", 9, UI.font.mono,
+	local dSub = label(discord, "Codes, Updates & Support", 10, UI.font.body,
 		Color3.new(1, 1, 1), 0.25)
 	dSub.Position = UDim2.fromOffset(52, 28)
 	dSub.Size = UDim2.fromOffset(300, 12)
@@ -594,7 +620,7 @@ function UI.Window(options)
 	----------------------------------------------------------------- footer
 	local foot = frame(content, UDim2.new(1, 0, 0, 22), UDim2.new(0, 0, 1, -22), UI.theme.window)
 	foot.ZIndex = 2
-	local footText = label(foot, UI.DISCORD .. "  ·  Selux v" .. UI.VERSION, 9,
+	local footText = label(foot, UI.DISCORD .. "  ·  Selux v" .. UI.VERSION, 10,
 		UI.font.mono, UI.theme.fainter)
 	footText.Size = UDim2.fromScale(1, 1)
 	footText.TextXAlignment = Enum.TextXAlignment.Center
@@ -616,8 +642,24 @@ function UI.Window(options)
 	headButton("×", -24, function() window:Destroy() end)
 
 	--------------------------------------------------------------- master toggle
+	--
+	-- SetMaster / SetStat are v3-only, so the nineteen scripts written against v1
+	-- never call them. Left visible they render as a dead grey switch and three
+	-- "-" columns next to a panel that is plainly running, which reads as broken
+	-- UI. So both start HIDDEN and appear the first time a script actually uses
+	-- them; the title slides left to take the space back.
+	stripToggle.Visible = false
+	stripTitle.Position = UDim2.fromOffset(15, 12)
+	stripSub.Position = UDim2.fromOffset(15, 30)
+	statHolder.Visible = false
+
 	local masterState, masterCb = false, nil
 	function window:SetMaster(on, caption, sub)
+		if not stripToggle.Visible then
+			stripToggle.Visible = true
+			stripTitle.Position = UDim2.fromOffset(63, 12)
+			stripSub.Position = UDim2.fromOffset(63, 30)
+		end
 		masterState = on and true or false
 		tween(stripToggle, EASE.soft, {
 			BackgroundColor3 = masterState and UI.theme.accent or UI.theme.band })
@@ -646,6 +688,7 @@ function UI.Window(options)
 	function window:SetStat(index, value, caption)
 		local s = stats[index]
 		if not s then return end
+		statHolder.Visible = true
 		s.value.Text = tostring(value)
 		if caption then s.caption.Text = caption end
 	end
@@ -711,10 +754,21 @@ function UI.Window(options)
 		page.holder.Visible = false
 		page.holder.ZIndex = 1
 
+		-- The grid and the full-width strip are STACKED, never both anchored at
+		-- y=12. v3 shipped them at the same offset for one build and the wide
+		-- card (Card(name, 0), which every script uses for its read-out) drew
+		-- straight on top of the two columns. A vertical list layout makes the
+		-- order structural instead of arithmetic.
+		local stack = frame(page.holder, UDim2.fromScale(1, 1), nil, UI.theme.window, 1)
+		stack.ZIndex = 1
+		pad(stack, 15, 15, 12, 12)
+		listLayout(stack, 12)
+		page.stack = stack
+
 		-- two hand-built columns, never a UIGridLayout: a grid pins every cell to
 		-- one size, which fights AutomaticSize and clipped every card in v1.
-		local grid = frame(page.holder, UDim2.new(1, -30, 1, -24), UDim2.fromOffset(15, 12),
-			UI.theme.window, 1)
+		local grid = frame(stack, UDim2.new(1, 0, 1, 0), nil, UI.theme.window, 1)
+		grid.LayoutOrder = 1
 		grid.ZIndex = 1
 		page.grid = grid
 
@@ -727,9 +781,11 @@ function UI.Window(options)
 			listLayout(col, 12)
 			page.columns[i] = col
 		end
-		-- full-width strip below the grid, for wide content (read-outs)
-		page.wide = frame(page.holder, UDim2.new(1, -30, 0, 0), UDim2.fromOffset(15, 12),
-			UI.theme.window, 1)
+
+		-- full-width strip UNDER the grid, for wide content (read-outs)
+		page.wide = frame(stack, UDim2.new(1, 0, 0, 0), nil, UI.theme.window, 1)
+		page.wide.AutomaticSize = Enum.AutomaticSize.Y
+		page.wide.LayoutOrder = 2
 		page.wide.ZIndex = 1
 		listLayout(page.wide, 12)
 
@@ -744,6 +800,12 @@ function UI.Window(options)
 		-- so AbsoluteSize is still last frame's and the sum comes out short.
 		function page:Fill()
 			task.defer(function()
+				-- The wide strip auto-sizes, so the grid has to give back exactly
+				-- what it takes or the page runs off the bottom edge.
+				local wideH = self.wide.AbsoluteSize.Y
+				local free = self.stack.AbsoluteSize.Y - wideH - (wideH > 0 and 12 or 0)
+				self.grid.Size = UDim2.new(1, 0, 0, math.max(0, free))
+				task.wait()
 				for _, col in ipairs(self.columns) do
 					local used, last = 0, nil
 					for _, child in ipairs(col:GetChildren()) do
@@ -834,12 +896,12 @@ function UI.Window(options)
 			-- and Roblox's stand-in for that is Enum.Font.Code, which at 10px
 			-- uppercase comes out thin and smeared - "LOOP" and "PROGRESSION" were
 			-- the two that made it obvious. Mono stays where it belongs: numbers.
-			local bandText = label(band, string.upper(caption or ""), 10, UI.font.heading,
+			local bandText = label(band, string.upper(caption or ""), 11, UI.font.heading,
 				UI.theme.muted)
 			bandText.Position = UDim2.fromOffset(29, 0)
 			bandText.Size = UDim2.new(1, -100, 0, 30)
 			bandText.ZIndex = 4
-			local countLabel = label(band, "", 9, UI.font.mono, UI.theme.dimmer)
+			local countLabel = label(band, "", 10, UI.font.mono, UI.theme.dimmer)
 			countLabel.Position = UDim2.new(1, -75, 0, 0)
 			countLabel.Size = UDim2.fromOffset(64, 30)
 			countLabel.TextXAlignment = Enum.TextXAlignment.Right
@@ -891,7 +953,7 @@ function UI.Window(options)
 				pb.PaddingBottom = UDim.new(0, 9)
 				pb.Parent = inner2
 
-				local title = label(inner2, caption2 or "", 11, UI.font.body, UI.theme.textSoft)
+				local title = label(inner2, caption2 or "", 12, UI.font.body, UI.theme.textSoft)
 				title.Size = UDim2.new(1, -(controlWidth or 40), 0, 14)
 				title.ZIndex = 4
 
@@ -900,7 +962,7 @@ function UI.Window(options)
 					-- The hint gets the FULL card width and wraps. Giving it the same
 					-- -120 the caption reserves left it ~125px inside a two-column
 					-- card and every hint longer than four words was truncated.
-					hintLabel = label(inner2, hint, 9, UI.font.body, UI.theme.dimmer)
+					hintLabel = label(inner2, hint, 10, UI.font.body, UI.theme.dimmer)
 					hintLabel.Position = UDim2.fromOffset(0, 17)
 					hintLabel.Size = UDim2.new(1, 0, 0, 0)
 					hintLabel.AutomaticSize = Enum.AutomaticSize.Y
@@ -949,7 +1011,21 @@ function UI.Window(options)
 				knob.ZIndex = 6
 				corner(knob, 7)
 
-				local onColour = colour or UI.theme.accent
+				-- ONE accent, always. Scripts pass UI.theme.warn for anything that
+				-- spends and UI.theme.bad for anything destructive, and v1/v2 painted
+				-- the switch in it - which put amber and rose toggles next to violet
+				-- ones and made the panel look like three different tools. The
+				-- mockup uses a single violet and that is the whole reason it reads
+				-- calmly. The colour argument is still accepted (nothing to change
+				-- in nineteen scripts) and is used for the row's meaning bar
+				-- instead, where it informs without shouting.
+				local onColour = UI.theme.accent
+				if colour and colour ~= UI.theme.accent then
+					local mark = frame(r.inner, UDim2.fromOffset(2, 12),
+						UDim2.fromOffset(-11, 1), colour)
+					mark.ZIndex = 5
+					corner(mark, 1)
+				end
 				window.chipSeq = window.chipSeq + 1
 				local key = window.chipSeq
 				local entry = { on = state, caption = caption2 }
@@ -985,7 +1061,7 @@ function UI.Window(options)
 				local r = row(caption2, hint, 60)
 				local value = math.clamp(initial or minValue, minValue, maxValue)
 
-				local readout = label(r.inner, tostring(value), 10, UI.font.mono,
+				local readout = label(r.inner, tostring(value), 11, UI.font.mono,
 					UI.theme.accentSoft)
 				readout.Position = UDim2.new(1, -58, 0, 0)
 				readout.Size = UDim2.fromOffset(58, 14)
@@ -1072,7 +1148,7 @@ function UI.Window(options)
 				chip.ZIndex = 5
 				corner(chip, 6)
 				stroke(chip, UI.theme.band, 0)
-				local chipText = label(chip, "", 10, UI.font.mono, UI.theme.accentSoft)
+				local chipText = label(chip, "", 11, UI.font.mono, UI.theme.accentSoft)
 				chipText.Size = UDim2.fromScale(1, 1)
 				chipText.TextXAlignment = Enum.TextXAlignment.Center
 				chipText.ZIndex = 6
@@ -1122,7 +1198,7 @@ function UI.Window(options)
 				corner(box, 7)
 				stroke(box, UI.theme.band, 0)
 
-				local boxText = label(box, tostring(value), 10, UI.font.mono, UI.theme.accentSoft)
+				local boxText = label(box, tostring(value), 11, UI.font.mono, UI.theme.accentSoft)
 				boxText.Position = UDim2.fromOffset(9, 0)
 				boxText.Size = UDim2.new(1, -24, 1, 0)
 				boxText.ZIndex = 6
@@ -1149,7 +1225,7 @@ function UI.Window(options)
 					item.BackgroundTransparency = 1
 					item.BorderSizePixel = 0
 					item.Text = "  " .. tostring(choice)
-					item.TextSize = 10
+					item.TextSize = 11
 					item.Font = UI.font.mono
 					item.TextColor3 = UI.theme.muted
 					item.TextXAlignment = Enum.TextXAlignment.Left
@@ -1193,7 +1269,7 @@ function UI.Window(options)
 				b.BackgroundColor3 = colour or UI.theme.accent
 				b.BorderSizePixel = 0
 				b.Text = string.upper(caption2 or "")
-				b.TextSize = 10
+				b.TextSize = 11
 				b.Font = UI.font.heading
 				b.TextColor3 = (colour and colour ~= UI.theme.accent)
 					and Color3.new(1, 1, 1) or UI.theme.window
@@ -1219,7 +1295,7 @@ function UI.Window(options)
 			function card:Label(text)
 				local r = row(nil, nil, 0)
 				r.title:Destroy()
-				local l = label(r.inner, text or "", 9, UI.font.mono, UI.theme.dimmer)
+				local l = label(r.inner, text or "", 10, UI.font.mono, UI.theme.dimmer)
 				l.Size = UDim2.new(1, 0, 0, 0)
 				l.AutomaticSize = Enum.AutomaticSize.Y
 				l.TextWrapped = true
@@ -1247,7 +1323,7 @@ function UI.Window(options)
 
 				local rowLabels = {}
 				for i = 1, (lines or 10) do
-					local l = label(holder, "", 10, UI.font.mono, UI.theme.muted)
+					local l = label(holder, "", 11, UI.font.mono, UI.theme.muted)
 					l.Size = UDim2.new(1, 0, 0, 12)
 					l.LayoutOrder = i
 					l.ZIndex = 7
@@ -1255,7 +1331,15 @@ function UI.Window(options)
 				end
 
 				return {
-					set = function(list)
+					-- Called as out:set(lines) by every script, so the table arrives
+					-- as the first argument and the list as the second. Written as
+					-- set(list) the whole read-out silently stayed blank - which is
+					-- exactly what v3 shipped with for one build. Accept both forms.
+					set = function(a, b)
+						local list = b
+						if list == nil and type(a) == "table" and a[1] ~= nil then
+							list = a
+						end
 						for i, l in ipairs(rowLabels) do
 							local text = list and list[i] or ""
 							l.Text = text
@@ -1277,6 +1361,75 @@ function UI.Window(options)
 
 		table.insert(self.pages, page)
 		if not window.current then show(page) end
+		return page
+	end
+
+	--------------------------------------------------------------- HOME
+	--
+	-- Always the first entry in the rail, always the page you land on. Everything
+	-- ships through a public GitHub repo anyway, so the commit log IS the
+	-- changelog - there is no second list to maintain and no way for it to drift
+	-- out of date. Commits here are written "<script>: what changed", which is
+	-- exactly "which game was updated" plus "what happened".
+	function window:Home(options2)
+		options2 = options2 or {}
+		local page = self:Page(options2.name or "Home", UI.icon.home)
+
+		-- Move it to the front of the rail and make it the landing page. Page()
+		-- appends, so without this Home would sit wherever it was declared.
+		table.remove(self.pages, #self.pages)
+		table.insert(self.pages, 1, page)
+		for i, p in ipairs(self.pages) do p.railButton.LayoutOrder = i end
+		show(page)
+
+		-- Six, not eight. Each entry is ~46px and the body is 420px tall, so
+		-- eight ran straight under the Discord bar and the last two were
+		-- unreachable. Six fills the page and stops at the edge.
+		local card = page:Card("CHANGELOG", 0):Accent():Icon(UI.icon.clock)
+		card:Label("laedt ...")
+		local body2 = card.rowHolder
+
+		local function paint(list, err)
+			for _, child in ipairs(body2:GetChildren()) do
+				if child:IsA("Frame") then child:Destroy() end
+			end
+			if not list then
+				local l = card:Label(err or "keine Verbindung zu GitHub")
+				return
+			end
+			for _, entry in ipairs(list) do
+				local r = card.row(entry.game, entry.summary, 70)
+				r.title.TextColor3 = UI.theme.text
+				r.title.Font = UI.font.heading
+				-- newest commit gets the live dot, the rest a static one
+				local dot = frame(r.inner, UDim2.fromOffset(6, 6),
+					UDim2.fromOffset(-11, 5),
+					entry == list[1] and UI.theme.accent or UI.theme.fainter)
+				dot.ZIndex = 5
+				corner(dot, 3)
+				if entry == list[1] then registerPulse(dot, 2.2, 0.6, 0) end
+				local age = label(r.inner, entry.when, 10, UI.font.mono, UI.theme.faint)
+				age.Position = UDim2.new(1, -66, 0, 0)
+				age.Size = UDim2.fromOffset(66, 14)
+				age.TextXAlignment = Enum.TextXAlignment.Right
+				age.ZIndex = 5
+			end
+			page:Fill()
+		end
+
+		-- Never on the main thread: an executor with no working http, or GitHub
+		-- rate-limiting the IP, must leave the panel usable.
+		task.spawn(function()
+			local ok, list, err = pcall(UI.commits, options2.limit or 6)
+			paint(ok and list or nil, ok and err or "GitHub nicht erreichbar")
+		end)
+
+		page.reload = function()
+			task.spawn(function()
+				local ok, list, err = pcall(UI.commits, options2.limit or 6)
+				paint(ok and list or nil, ok and err or "GitHub nicht erreichbar")
+			end)
+		end
 		return page
 	end
 
