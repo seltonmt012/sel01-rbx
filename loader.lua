@@ -16,7 +16,8 @@
 --      that still does loadstring(readfile("ui-template.lua")) keeps working
 --   4. runs the matching game script
 --   5. re-arms itself with queue_on_teleport, so a lobby -> map teleport does
---      not drop the automation
+--      not drop the automation - but ONLY for the script that is already
+--      running, unless auto-start is switched on. See AUTO-START below.
 --
 -- Everything it downloads is cached under the executor workspace in sel01/, and
 -- a failed HttpGet falls back to that cache instead of leaving you with nothing.
@@ -26,6 +27,32 @@
 
 local BASE = "https://raw.githubusercontent.com/seltonmt012/sel01-rbx/main/"
 local CACHE = "sel01/"
+
+-- AUTO-START --------------------------------------------------------------
+--
+-- The queue below is what made this loader come back in EVERY game, not just
+-- the one it was started in, and it is worth writing down exactly why, because
+-- it does not look like it from the code:
+--
+--   * the loader queues THE LOADER, never a game script. So whatever place the
+--     client lands in next, the hub runs there and looks for a match.
+--   * it re-arms on every one of its own runs, so the chain never ends.
+--   * and the new Roblox app keeps ONE PROCESS across game joins - measured on
+--     this machine: a single client log with 15 different placeids in it. The
+--     executor's queue lives in that process, so leaving a game and joining a
+--     completely unrelated one is, to the queue, the same event as a teleport.
+--
+-- Handy when hopping from game to game all day, confusing for everybody else:
+-- you run one line once and a panel keeps appearing over games you never asked
+-- about. So it is a switch now, and it is OFF unless the file says otherwise -
+-- which is what a fresh install and everybody who never touches it gets.
+--
+-- OFF does not mean the queue is gone. A script that is already running still
+-- follows its own game across a place change (leaves lobby -> map, speedevolve
+-- world 1 -> world 2); what stops is starting a DIFFERENT game's script by
+-- itself. The two are told apart by the alias in FROM_FILE.
+local AUTOLOAD_FILE = "selux-autoload.txt"
+local FROM_FILE = CACHE .. "from.txt"
 
 local Players = game:GetService("Players")
 local HttpService = game:GetService("HttpService")
@@ -37,6 +64,12 @@ if not game:IsLoaded() then game.Loaded:Wait() end
 -- are still alive. Bump the generation and let the old ones notice.
 local PREV = _G.__SEL
 local GEN = ((PREV and PREV.gen) or 0) + 1
+
+-- Set by the queued payload and by nothing else, so it is the one reliable
+-- answer to "did a human start me, or did the queue?". A teleport builds a new
+-- Lua VM, so it cannot be left over from the last place either.
+local VIA_QUEUE = _G.__SEL_TP == true
+_G.__SEL_TP = nil
 
 -- Executor globals differ per executor; every optional one degrades to a no-op.
 local writefile   = writefile or function() end
@@ -96,12 +129,64 @@ local function run(source, chunkName)
     return chunk
 end
 
--- Armed before anything else can fail. A lobby with no connection still
--- teleports into the map, and the map is where the run happens - dropping the
--- re-arm because index.json was unreachable would lose the whole session.
-if queueTp then
-    pcall(queueTp, 'loadstring(game:HttpGet("' .. BASE .. 'loader.lua"))()')
+--------------------------------------------------------------------------------
+-- auto-start switch
+--------------------------------------------------------------------------------
+
+-- Written by the panel (lib/ui-template.lua, the card behind the mark in the
+-- rail). Missing file = off, which is the whole point: the repo ships nothing,
+-- so nobody gets the chain without asking for it.
+-- FAIL CLOSED, and every step of it is deliberate. Auto-start must be OFF when
+-- anything at all is unusual - the file missing, the file empty, the file
+-- holding something unexpected, an executor with no isfile/readfile, or either
+-- of those throwing on a path it dislikes. Only the exact strings below turn it
+-- on. The whole read sits inside a pcall for the last case: an executor that
+-- errors out of isfile would otherwise take the loader down with it, and a
+-- loader that crashes here is a loader that never reaches the switch at all.
+local function readFlag(path)
+    local ok, body = pcall(function()
+        if not (isfile and readfile and isfile(path)) then return nil end
+        local text = readfile(path)
+        if type(text) ~= "string" then return nil end
+        return (string.gsub(text, "%s", ""))
+    end)
+    if not ok then return nil end
+    return body
 end
+
+local AUTOLOAD = false
+do
+    local saved = readFlag(AUTOLOAD_FILE)
+    if type(saved) == "string" then
+        saved = string.lower(saved)
+        AUTOLOAD = saved == "1" or saved == "on" or saved == "true"
+    end
+end
+
+-- Which script was running when the queue was armed. A file and not a global,
+-- because the global is exactly what the teleport throws away.
+local FROM = readFlag(FROM_FILE)
+
+-- The queue, and the one flag that tells the next run where it came from.
+-- Semicolon on purpose: two statements in one queued string.
+local ARM = '_G.__SEL_TP = true; loadstring(game:HttpGet("' .. BASE .. 'loader.lua"))()'
+local armed = false
+
+local function arm()
+    if armed or not queueTp then return end
+    armed = true
+    pcall(queueTp, ARM)
+end
+
+-- With auto-start ON this is armed before anything else can fail: a lobby with
+-- no connection still teleports into the map, and the map is where the run
+-- happens - dropping the re-arm because index.json was unreachable would lose
+-- the whole session.
+--
+-- With auto-start OFF there is nothing to carry until a script actually runs,
+-- so arming moves into loadGame. The lobby-with-no-connection case is the price
+-- of not appearing in unrelated games, and it is the rarer of the two.
+if AUTOLOAD then arm() end
 
 --------------------------------------------------------------------------------
 -- registry
@@ -212,6 +297,18 @@ local function loadGame(entry, why)
     _G.__SEL.game = entry
     _G.__SEL.source = from
 
+    -- Written BEFORE the script runs, not after: a game script that yields for
+    -- its own reasons would otherwise never record that it was the one running,
+    -- and the next place would refuse to carry it. Written on every load, so
+    -- switching games by hand moves the marker with you.
+    pcall(function()
+        if not isfolder(CACHE) then makefolder(CACHE) end
+        writefile(FROM_FILE, tostring(entry.alias or ""))
+    end)
+    -- A script is running now, so the place it teleports itself into is worth
+    -- carrying - with auto-start off this is the only place the queue is armed.
+    arm()
+
     local chunk, err = run(body, entry.file)
     if not chunk then
         notify("syntax error in " .. entry.file .. ": " .. tostring(err), 10)
@@ -306,6 +403,19 @@ _G.__SEL = {
         end
         return table.concat(out, "\n")
     end,
+    autoStart = AUTOLOAD,
+    viaQueue = VIA_QUEUE,
+    from = FROM,
+    -- The console half of the switch in the panel; both write the same file, so
+    -- either one is enough and neither has to know about the other.
+    setAutoStart = function(on)
+        on = on and true or false
+        pcall(function() writefile(AUTOLOAD_FILE, on and "1" or "0") end)
+        _G.__SEL.autoStart = on
+        notify("Auto-Start in neuen Spielen: " .. (on and "AN" or "AUS"), 4)
+        if on then arm() end
+        return on
+    end,
     reload = function()
         local src = httpGet(BASE .. "loader.lua?t=" .. tostring(os.time()))
         if src then local c = run(src, "loader.lua") if c then return c() end end
@@ -321,7 +431,32 @@ end })
 --------------------------------------------------------------------------------
 
 local entry, why = pick()
-if entry then
+
+-- Four cases, and only the last one is new behaviour:
+--
+--   started by hand          -> run it. The user typed the line in THIS game.
+--   auto-start on            -> run it, exactly as before.
+--   queue + same script      -> run it. leaves lobby -> map, speedevolve world
+--                               1 -> 2: the script is following its own game.
+--   queue + different game   -> DO NOT run. This is the case that used to put a
+--                               panel over a game nobody asked about.
+local function mayStart()
+    if not VIA_QUEUE then return true end
+    if AUTOLOAD then return true end
+    return entry ~= nil and FROM ~= nil and FROM ~= "" and tostring(entry.alias) == FROM
+end
+
+if not mayStart() then
+    -- CONSOLE ONLY, no toast. The first version put a SendNotification up here,
+    -- and it fires on every single game join for the rest of the process - which
+    -- is the same nuisance the switch exists to remove, just smaller. Somebody
+    -- who wants the script here runs the loader line, which always works; the
+    -- print is for anyone wondering where the panel went.
+    local what = entry and (entry.name or entry.alias) or "no script"
+    print("[sel01] auto-start is off - " .. tostring(what) .. " not started.")
+    print("[sel01] run the loader line to start it here, or turn auto-start on:")
+    print("[sel01]   _G.__SEL.setAutoStart(true)   (or the switch behind the mark in the panel)")
+elseif entry then
     loadGame(entry, why)
 else
     picker()
