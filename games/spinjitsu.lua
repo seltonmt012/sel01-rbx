@@ -373,14 +373,22 @@ local function collectPlate(stage)
         holdAt(plate.Position + Vector3.new(0, 3, 0), 5, function() return wins() > before end)
     end)
 
-    CLAIMED[stage.number] = true
+    -- MARK IT CLAIMED ONLY WHEN IT ACTUALLY PAID. This used to be set on the
+    -- line above the check, so a payout the 5s window simply missed - a lag
+    -- spike, the plate streaming out, the body not settling in time - latched
+    -- the stage as collected for the rest of the run and printed "was already
+    -- paid" on top of it. The stage's wins then became unreachable until a
+    -- rebirth wiped CLAIMED, and nothing ever reported a problem.
     if wins() > before then
+        CLAIMED[stage.number] = true
         STATE.plates = STATE.plates + 1
         STATE.deepest = math.max(STATE.deepest or 0, stage.number)
         note("cashed stage %d for %s wins", stage.number, abbreviate(wins() - before))
         return true
     end
-    note("stage %d was already paid", stage.number)
+    -- Not the same thing as "already paid": we do not know that. Say what was
+    -- observed - no wins arrived - and leave the stage open to try again.
+    note("stage %d paid nothing in the window - left open", stage.number)
     return false
 end
 
