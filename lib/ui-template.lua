@@ -833,9 +833,12 @@ function UI.Window(options)
 		page.holder.BorderSizePixel = 0
 		page.holder.Visible = false
 		page.holder.ZIndex = 1
-		page.holder.ScrollBarThickness = 3
+		-- Wide enough to notice. At 3px and 40% transparent the bar was invisible
+		-- against the panel, so a page with 788px of content in a 418px viewport
+		-- read as "half the options are missing" rather than "scroll down".
+		page.holder.ScrollBarThickness = 6
 		page.holder.ScrollBarImageColor3 = UI.theme.accent
-		page.holder.ScrollBarImageTransparency = 0.4
+		page.holder.ScrollBarImageTransparency = 0.15
 		page.holder.CanvasSize = UDim2.new()
 		page.holder.AutomaticCanvasSize = Enum.AutomaticSize.Y
 		page.holder.ScrollingDirection = Enum.ScrollingDirection.Y
@@ -1101,7 +1104,15 @@ function UI.Window(options)
 				hover.BorderSizePixel = 0
 				hover.Text = ""
 				hover.AutoButtonColor = false
-				hover.ZIndex = 3
+				-- UNTER dem Inhalt, nicht darueber. Der ScreenGui laeuft mit
+				-- ZIndexBehavior.Sibling, also entscheidet bei gleichem ZIndex die
+				-- Reihenfolge - und hover wird nach r.inner erzeugt, lag also oben
+				-- und fing jeden Klick ab. Toggles funktionierten trotzdem, weil die
+				-- genau diese Flaeche benutzen; Dropdown, Stepper und Slider haben
+				-- eigene Buttons und bekamen nie ein Ereignis. Ein transparenter
+				-- Frame schluckt in Roblox keine Eingaben, also erreicht der Klick
+				-- hover weiterhin ueberall dort, wo kein Bedienelement liegt.
+				hover.ZIndex = 1
 				hover.Parent = r
 				hover.MouseEnter:Connect(function()
 					tween(hover, EASE.quick, { BackgroundTransparency = 0.965 })
@@ -1328,11 +1339,16 @@ function UI.Window(options)
 				arrow.Size = UDim2.fromOffset(14, 22)
 				arrow.ZIndex = 6
 
-				local menu = frame(r.inner, UDim2.fromOffset(96, 0), UDim2.new(1, -96, 0, 20),
+				-- The menu hangs off the WINDOW, not off the row. Every card sets
+				-- ClipsDescendants so its rounded corners hold, which cut the open
+				-- menu off after a few pixels - it looked like the dropdown simply
+				-- did nothing. Parented to the root it can overhang the card, and
+				-- its position is taken from the box on every open because the page
+				-- scrolls underneath it.
+				local menu = frame(root, UDim2.fromOffset(96, 0), UDim2.fromOffset(0, 0),
 					UI.theme.input)
 				menu.Visible = false
-				menu.ZIndex = 20
-				menu.ClipsDescendants = true
+				menu.ZIndex = 200
 				menu.AutomaticSize = Enum.AutomaticSize.Y
 				corner(menu, 7)
 				stroke(menu, UI.theme.band, 0)
@@ -1370,8 +1386,18 @@ function UI.Window(options)
 				end
 
 				box.MouseButton1Click:Connect(function()
+					if not menu.Visible then
+						local at = box.AbsolutePosition - root.AbsolutePosition
+						menu.Position = UDim2.fromOffset(at.X, at.Y + box.AbsoluteSize.Y + 3)
+						menu.Size = UDim2.fromOffset(box.AbsoluteSize.X, 0)
+					end
 					menu.Visible = not menu.Visible
 					arrow.Text = menu.Visible and "▲" or "▼"
+				end)
+				-- a menu left open while the page scrolls would float in mid-air
+				page.holder:GetPropertyChangedSignal("CanvasPosition"):Connect(function()
+					menu.Visible = false
+					arrow.Text = "▼"
 				end)
 
 				return { set = function(v) value = v boxText.Text = tostring(v) end }
@@ -1505,23 +1531,50 @@ function UI.Window(options)
 		-- Six, not eight. Each entry is ~46px and the body is 420px tall, so
 		-- eight ran straight under the Discord bar and the last two were
 		-- unreachable. Six fills the page and stops at the edge.
-		local card = page:Card("CHANGELOG", 0):Accent():Icon(UI.icon.clock)
+		-- Two columns like the mockup: the changelog as a timeline on the left,
+		-- what the panel is doing right now on the right. Not full width - a
+		-- single wide list of commits is all a HOME page would be, and the
+		-- interesting half is "is my farm actually running".
+		local card = page:Card("CHANGELOG", 1):Accent():Icon(UI.icon.clock)
 		card:Label("laedt ...")
 		local body2 = card.rowHolder
+
+		local live = page:Card("LAEUFT GERADE", 2):Icon(UI.icon.loop)
+		local liveTitle = live:Label("-")
+		local liveSub = live:Label("")
+		local liveOut = live:Readout(4)
+		page.live = { title = liveTitle, sub = liveSub, out = liveOut }
+
+		-- Mirrors whatever the script already tells the status strip, so a game
+		-- script gets this page for free without calling anything new.
+		task.spawn(function()
+			while page.holder.Parent do
+				liveTitle.set(window.stripTitle.Text)
+				liveSub.set(window.stripSub.Text)
+				local lines = {}
+				for i2, st in ipairs(window.stats) do
+					if st.caption.Text ~= "" then
+						lines[#lines + 1] = string.format("%-9s %s", st.caption.Text, st.value.Text)
+					end
+				end
+				if #lines == 0 then lines[1] = "  keine Zahlen gemeldet" end
+				liveOut.set(nil, lines)
+				task.wait(1)
+			end
+		end)
 
 		local function paint(list, err)
 			for _, child in ipairs(body2:GetChildren()) do
 				if child:IsA("Frame") then child:Destroy() end
 			end
 			if not list then
-				local l = card:Label(err or "keine Verbindung zu GitHub")
+				card:Label(err or "keine Verbindung zu GitHub")
 				return
 			end
 			for _, entry in ipairs(list) do
-				local r = card.row(entry.game, entry.summary, 70)
+				local r = card.row(entry.game, entry.summary, 58)
 				r.title.TextColor3 = UI.theme.text
 				r.title.Font = UI.font.heading
-				-- newest commit gets the live dot, the rest a static one
 				local dot = frame(r.inner, UDim2.fromOffset(6, 6),
 					UDim2.fromOffset(-11, 5),
 					entry == list[1] and UI.theme.accent or UI.theme.fainter)
@@ -1529,8 +1582,8 @@ function UI.Window(options)
 				corner(dot, 3)
 				if entry == list[1] then registerPulse(dot, 2.2, 0.6, 0) end
 				local age = label(r.inner, entry.when, 10, UI.font.mono, UI.theme.faint)
-				age.Position = UDim2.new(1, -66, 0, 0)
-				age.Size = UDim2.fromOffset(66, 14)
+				age.Position = UDim2.new(1, -54, 0, 0)
+				age.Size = UDim2.fromOffset(54, 14)
 				age.TextXAlignment = Enum.TextXAlignment.Right
 				age.ZIndex = 5
 			end
@@ -1539,17 +1592,15 @@ function UI.Window(options)
 
 		-- Never on the main thread: an executor with no working http, or GitHub
 		-- rate-limiting the IP, must leave the panel usable.
-		task.spawn(function()
-			local ok, list, err = pcall(UI.commits, options2.limit or 6)
-			paint(ok and list or nil, ok and err or "GitHub nicht erreichbar")
-		end)
-
-		page.reload = function()
+		local function load()
 			task.spawn(function()
 				local ok, list, err = pcall(UI.commits, options2.limit or 6)
 				paint(ok and list or nil, ok and err or "GitHub nicht erreichbar")
 			end)
 		end
+		load()
+		page.reload = load
+
 		return page
 	end
 
