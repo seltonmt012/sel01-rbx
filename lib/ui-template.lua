@@ -1620,12 +1620,63 @@ function UI.Window(options)
 		-- Report card. Sits on Home, under the live panel, so a user who thinks
 		-- something is broken finds it without being told where to look.
 		local report = page:Card("PROBLEM MELDEN", 2):Icon(UI.icon.shield)
-		local reportHint = report:Label("Script kaputt oder Spiel geupdatet? Ein Klick, kein Text noetig.")
+		local reportHint = report:Label("Script kaputt oder Spiel geupdatet? Ein Klick reicht - "
+			.. "wenn du willst, schreib kurz dazu was nicht geht.")
+
+		-- Optional free text. Deliberately an inline field and not a popup: a
+		-- modal would make the common case (just press it) two clicks, and a
+		-- report with nothing typed is still worth having.
+		local MAX_MESSAGE = 300
+		local msgRow = report.row(nil, nil, 0)
+		msgRow.title:Destroy()
+		msgRow.inner.Size = UDim2.new(1, -22, 0, 58)
+		msgRow.inner.AutomaticSize = Enum.AutomaticSize.None
+		local msgBox = frame(msgRow.inner, UDim2.new(1, 0, 0, 58), nil, UI.theme.input)
+		msgBox.ZIndex = 5
+		corner(msgBox, 7)
+		stroke(msgBox, UI.theme.band, 0)
+		pad(msgBox, 9, 9, 7, 7)
+		local msgInput = Instance.new("TextBox")
+		msgInput.BackgroundTransparency = 1
+		msgInput.Size = UDim2.fromScale(1, 1)
+		msgInput.Text = ""
+		msgInput.PlaceholderText = "Was genau geht nicht? (optional)"
+		msgInput.TextSize = 11
+		msgInput.Font = UI.font.body
+		msgInput.TextColor3 = UI.theme.textSoft
+		msgInput.PlaceholderColor3 = UI.theme.faint
+		msgInput.TextXAlignment = Enum.TextXAlignment.Left
+		msgInput.TextYAlignment = Enum.TextYAlignment.Top
+		msgInput.TextWrapped = true
+		msgInput.MultiLine = true
+		msgInput.ClearTextOnFocus = false
+		msgInput.ZIndex = 6
+		msgInput.Parent = msgBox
+		local counter = label(msgRow.inner, "", 9, UI.font.mono, UI.theme.fainter)
+		counter.Position = UDim2.new(1, -60, 0, 60)
+		counter.Size = UDim2.fromOffset(60, 12)
+		counter.TextXAlignment = Enum.TextXAlignment.Right
+		counter.ZIndex = 6
+		-- Cut at the ceiling as it is typed. The Worker caps it too, but silently
+		-- losing the end of what somebody wrote is worse than stopping them.
+		msgInput:GetPropertyChangedSignal("Text"):Connect(function()
+			if #msgInput.Text > MAX_MESSAGE then
+				msgInput.Text = string.sub(msgInput.Text, 1, MAX_MESSAGE)
+			end
+			counter.Text = #msgInput.Text .. " / " .. MAX_MESSAGE
+		end)
+
 		local reportBtn
 		local sent = false
 		reportBtn = report:Button("MELDEN", function()
 			if sent then return end
 			local r = UI.buildReport(window)
+			r.message = msgInput.Text
+			-- The clipboard fallback wants it on one line; the relay gets the
+			-- message as its own field and formats it itself.
+			if r.message ~= "" then
+				r.text = r.text .. "  |  Text: " .. r.message
+			end
 			local ok, how = UI.sendReport(r)
 			if not ok then
 				reportHint.set("Konnte nicht senden. Bitte im Discord im Support-Forum melden.")
