@@ -56,6 +56,21 @@ UI.BRAND = "SELUX"
 UI.DISCORD = "discord.gg/ARdpzFuKMm"
 UI.REPO = "seltonmt012/sel01-rbx"
 
+-- Where a "this is broken" report goes. EMPTY means the panel falls back to the
+-- clipboard, which needs no infrastructure at all - so the button works from day
+-- one and switching to the relay later is this one line, not a re-push of every
+-- script.
+--
+-- It must NOT be a Discord webhook. These scripts are public on GitHub, webhook
+-- URLs are scraped out of public repos by bots, and a webhook lets whoever finds
+-- it post arbitrary content - images, links, @everyone - straight into the
+-- channel. The only cure would be deleting the webhook and republishing all 21
+-- scripts. A small relay in front of it does not hide the URL (nothing can) but
+-- it turns the open letterbox into a form: it accepts a fixed set of fields,
+-- writes the Discord message itself, rate-limits per IP, and can be changed in
+-- one place in seconds without touching a single script.
+UI.REPORT_URL = ""
+
 -- Palette ---------------------------------------------------------------------
 -- Four depths, not five. v2 had void/rail/sidebar/window/header/subBar/card and
 -- the difference between several of them was invisible on a real screen; this
@@ -1602,6 +1617,36 @@ function UI.Window(options)
 			end
 		end)
 
+		-- Report card. Sits on Home, under the live panel, so a user who thinks
+		-- something is broken finds it without being told where to look.
+		local report = page:Card("PROBLEM MELDEN", 2):Icon(UI.icon.shield)
+		local reportHint = report:Label("Script kaputt oder Spiel geupdatet? Ein Klick, kein Text noetig.")
+		local reportBtn
+		local sent = false
+		reportBtn = report:Button("MELDEN", function()
+			if sent then return end
+			local r = UI.buildReport(window)
+			local ok, how = UI.sendReport(r)
+			if not ok then
+				reportHint.set("Konnte nicht senden. Bitte im Discord im Support-Forum melden.")
+				return
+			end
+			-- Locked afterwards: the same person pressing twenty times tells us
+			-- nothing more than pressing once, and it is the whole spam surface.
+			sent = true
+			reportBtn.Text = "GEMELDET - DANKE  #" .. r.id
+			reportBtn.BackgroundColor3 = UI.theme.good
+			if how == "clipboard" then
+				reportHint.set("In die Zwischenablage kopiert - bitte im Discord "
+					.. "unter #support einfuegen. Nummer #" .. r.id)
+			else
+				reportHint.set("Angekommen. Nummer #" .. r.id
+					.. " - die kannst du im Support-Forum nennen.")
+			end
+		end, UI.theme.warn)
+		report:Label("Mitgeschickt werden Spiel, Script-Version, der letzte Status "
+			.. "und die aktiven Optionen. Kein Roblox-Name, keine UserId.")
+
 		local function paint(list, err)
 			for _, child in ipairs(body2:GetChildren()) do
 				if child:IsA("Frame") then child:Destroy() end
@@ -1746,6 +1791,96 @@ local function ago(iso)
 	if delta < 5400 then return math.floor(delta / 60) .. " Min" end
 	if delta < 172800 then return math.floor(delta / 3600) .. " Std" end
 	return math.floor(delta / 86400) .. " Tage"
+end
+
+-- A one-click "this is broken" report ------------------------------------------
+--
+-- The user types NOTHING. Everything worth knowing is already on screen: which
+-- game, which script version, and - the valuable part - the panel's own last
+-- note, which is where these scripts write the reason something failed. A report
+-- built from that is actionable without a single follow-up question.
+--
+-- What is deliberately NOT sent: the Roblox name and user id. Those are somebody
+-- else's account, they are not needed to fix a script, and collecting them from
+-- strangers is not something a bug button should do quietly.
+
+local function executorName()
+	local ok, name = pcall(function()
+		return (identifyexecutor or getexecutorname or function() return nil end)()
+	end)
+	return (ok and name) or "unbekannt"
+end
+
+function UI.buildReport(window, note)
+	local placeId = tostring(game.PlaceId)
+	local gameName = "?"
+	pcall(function()
+		gameName = (_G.__SEL and _G.__SEL.game and _G.__SEL.game.name) or game.Name or "?"
+	end)
+	local alias = "?"
+	pcall(function() alias = (_G.__SEL and _G.__SEL.game and _G.__SEL.game.alias) or "?" end)
+
+	local active = {}
+	if window and window.chips then
+		for _, entry in pairs(window.chips) do
+			if entry.on and entry.caption then table.insert(active, entry.caption) end
+		end
+	end
+	table.sort(active)
+
+	local report = {
+		place = placeId,
+		game = gameName,
+		script = alias,
+		ui = UI.VERSION,
+		executor = executorName(),
+		-- the panel's own words: status line, last note, and whatever the script
+		-- parked in STATE.blocked
+		status = window and window.stripSub and window.stripSub.Text or "",
+		note = note or (window and window.stripTitle and window.stripTitle.Text) or "",
+		active = table.concat(active, ", "),
+		at = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+	}
+	-- short id so the user has something to quote in the support forum
+	local seed = 0
+	for _, ch in ipairs({ string.byte(placeId .. report.at, 1, -1) }) do
+		seed = (seed * 31 + ch) % 0xFFFFFF
+	end
+	report.id = string.format("%04x", seed % 0xFFFF)
+
+	report.text = table.concat({
+		"**Selux report #" .. report.id .. "**",
+		"Spiel: " .. report.game .. "  (place " .. report.place .. ")",
+		"Script: " .. report.script .. "   UI v" .. report.ui,
+		"Status: " .. (report.status ~= "" and report.status or "-"),
+		"Notiz: " .. (report.note ~= "" and report.note or "-"),
+		"Aktiv: " .. (report.active ~= "" and report.active or "-"),
+		"Executor: " .. report.executor .. "   " .. report.at,
+	}, "\n")
+	return report
+end
+
+-- Returns ok, wie ("relay" | "clipboard" | "keiner")
+function UI.sendReport(report)
+	if UI.REPORT_URL ~= "" then
+		local request = (syn and syn.request) or (http and http.request) or http_request or request
+		if request then
+			local ok, response = pcall(request, {
+				Url = UI.REPORT_URL,
+				Method = "POST",
+				Headers = { ["Content-Type"] = "application/json" },
+				Body = HttpService:JSONEncode(report),
+			})
+			if ok and response and (response.StatusCode or 0) < 400 then
+				return true, "relay"
+			end
+		end
+	end
+	-- No relay, or it refused: the clipboard still gets the report to us.
+	local ok = pcall(function()
+		(setclipboard or toclipboard or set_clipboard)(report.text)
+	end)
+	return ok, ok and "clipboard" or "keiner"
 end
 
 function UI.commits(limit)
