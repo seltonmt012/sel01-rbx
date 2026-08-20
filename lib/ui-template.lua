@@ -1289,7 +1289,10 @@ function UI.Window(options)
 				end
 
 				-- The value gets its own centred chip between - and +, never glued
-				-- to the label, or a long value truncates.
+				-- to the label, or a long value truncates. The chip WIDTH follows
+				-- the text: at a fixed 50px "smart ladder" rendered as "art ladde"
+				-- and "auto 1" lost its tail. It grows, and the two buttons and the
+				-- caption move out of its way - nothing else changes.
 				local chip = frame(r.inner, UDim2.fromOffset(50, 20), UDim2.new(1, -72, 0, -3),
 					UI.theme.input)
 				chip.ZIndex = 5
@@ -1303,10 +1306,26 @@ function UI.Window(options)
 				local minus = stepButton("−", -92, -1)
 				local plus = stepButton("+", -20, 1)
 
+				local CHIP_MIN, CHIP_MAX = 50, 190
 				local function refresh()
 					local ok, text = pcall(getText)
-					chipText.Text = ok and tostring(text) or "-"
+					text = ok and tostring(text) or "-"
+					chipText.Text = text
+					-- TextService:GetTextSize, never TextBounds: a label that has not
+					-- rendered yet reports zero on the first frame, and the chip
+					-- would collapse to its minimum on every rebuild.
+					local measured = TextService:GetTextSize(text, 11, UI.font.mono,
+						Vector2.new(1000, 100)).X
+					local width = math.clamp(math.ceil(measured) + 18, CHIP_MIN, CHIP_MAX)
+					chip.Size = UDim2.fromOffset(width, 20)
+					chip.Position = UDim2.new(1, -(width + 22), 0, -3)
+					minus.Position = UDim2.new(1, -(width + 44), 0, -3)
+					-- the caption gives up exactly what the controls now take
+					r.title.Size = UDim2.new(1, -(width + 52), 0, 14)
 				end
+				-- after the definition, never before it: a local is invisible above
+				-- the line that declares it, so calling refresh() earlier resolves
+				-- to a nil global and throws.
 				refresh()
 
 				local function bind(button, dir)
