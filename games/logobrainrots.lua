@@ -219,18 +219,50 @@ end
 -- is cached the first time it is readable. A census taken from a streamed-out
 -- plot is a missing chunk, not a fact - every decision below waits until we
 -- are home again.
-local HOME = nil
+-- Kept in _G on purpose. A reload out in the far stages starts with the plot
+-- streamed out, and a nil home meant carryHome() bailed instantly and the
+-- brainrot was dropped every single cycle - the loop looked like a delivery
+-- bug when it was really "we never learned where home is".
+local HOME = _G.__LOGOBR_HOME
 local function homePos()
     local plot = myPlot()
     if plot then
         local sp = plot:FindFirstChild("SpawnPos")
         if sp then
             HOME = sp.Position + Vector3.new(0, 3.5, 0)
+            _G.__LOGOBR_HOME = HOME
         end
     end
     return HOME
 end
 homePos()
+
+-- Somewhere to aim at when the exact home is not known yet. From the far
+-- stages every BasePart around the plot is streamed out - SpawnPos, the
+-- SpawnLocation and the ReturnPart are all simply absent - but the plot FOLDER
+-- survives and its Model children keep a readable WorldPivot. That pivot is
+-- close enough to fly to; landing there brings the plot back into range and
+-- homePos() resolves exactly on the next tick.
+local function homeAnchor()
+    local h = homePos()
+    if h then return h end
+    local plot = myPlot()
+    if plot then
+        for _, c in ipairs(plot:GetChildren()) do
+            if c:IsA("Model") then
+                local ok, pivot = pcall(function() return c:GetPivot().Position end)
+                if ok and pivot and pivot.Magnitude > 1 then
+                    return pivot + Vector3.new(0, 8, 0)
+                end
+            end
+        end
+    end
+    for _, name in ipairs({ "SpawnLocation", "ReturnPart" }) do
+        local part = workspace:FindFirstChild(name)
+        if part and part:IsA("BasePart") then return part.Position + Vector3.new(0, 5, 0) end
+    end
+    return nil
+end
 
 local function atHome()
     local hrp, h = rootPart(), HOME
@@ -387,17 +419,30 @@ local function weakestStand()
     return worst
 end
 
+-- Everything below ranks brainrots on their BASE CashPerSecond, never on the
+-- levelled income. A level costs cps/5 * 1.17^(L-1) and pays back in about a
+-- second and a half, so the level a brainrot happens to sit at is a few seconds
+-- of income, not an investment worth protecting - while the base value is
+-- permanent. Ranking on levelled income let a tiny brainrot at level 40 out-rank
+-- a fresh 235M one and hold a stand against it forever.
+local function rank(e) return tonumber(e.cps) or 0 end
+
+local function worstOf(list)
+    local worst = nil
+    for _, e in ipairs(list) do
+        if (not worst) or rank(e) < rank(worst) then worst = e end
+    end
+    return worst
+end
+
 -- The bar a world brainrot has to clear to be worth the trip: an empty stand
 -- means anything qualifies, a full plot means it has to beat the weakest one
 -- that is already earning.
 local function acceptanceFloor()
     local free, used, total = census()
     if #free > 0 then return 0, total end
-    local worst = nil
-    for _, e in ipairs(used) do
-        if (not worst) or e.income < worst.income then worst = e end
-    end
-    return worst and worst.income or 0, total
+    local worst = worstOf(used)
+    return worst and rank(worst) or 0, total
 end
 
 local function bestTarget()
@@ -467,15 +512,17 @@ local function collectAll()
     return gained
 end
 
+-- Confirm the sale by the inventory entry disappearing, never by the balance
+-- moving: at 150B/s the income between two reads dwarfs anything a spare
+-- brainrot is worth, so a money delta says nothing at all.
 local function sellKey(key)
-    local before = money()
+    local bb = Data and Data:FindFirstChild("BrainrotsBackpack")
+    if bb and not bb:FindFirstChild(key) then return false end
     pcall(function() Remotes.SellBrainrot:FireServer(key) end)
     task.wait(0.5)
-    if money() > before then
-        STATE.sold = STATE.sold + 1
-        return true
-    end
-    return false
+    local gone = not (bb and bb:FindFirstChild(key))
+    if gone then STATE.sold = STATE.sold + 1 end
+    return gone
 end
 
 -- Seat whatever is currently held. Returns the stand name on success.
@@ -499,38 +546,42 @@ local function placeHeld()
 
     if not CONFIG.autoSwap then return nil end
 
-    local incoming = tonumber(tool:GetAttribute("CashPerSecond"))
-    if not incoming then
-        for _, e in ipairs(inventoryEntries()) do
-            if e.key == tool.Name then incoming = levelIncome(e.cps, e.level) end
-        end
+    -- The Tool carries no CashPerSecond attribute, so the base value comes from
+    -- the inventory entry the Tool is named after.
+    local incoming = 0
+    for _, e in ipairs(inventoryEntries()) do
+        if e.key == tool.Name then incoming = rank(e) end
     end
-    incoming = incoming or 0
 
-    local worst = nil
-    for _, e in ipairs(used) do
-        if (not worst) or e.income < worst.income then worst = e end
-    end
-    if not (worst and incoming > worst.income) then return nil end
+    local worst = worstOf(used)
+    if not (worst and incoming > rank(worst)) then return nil end
 
-    -- Pull the weak one first. It lands in the inventory, not in the hand, so
-    -- the held brainrot survives the operation and can be seated straight after.
+    -- THE SERVER WILL NOT HAND A BRAINROT BACK WHILE YOUR HANDS ARE FULL. Firing
+    -- GrabBrainrotFromStand with the incoming one equipped answers nothing and
+    -- leaves the stand occupied - which reads exactly like "the swap remote does
+    -- not work" and left eight brainrots piling up in the inventory while a
+    -- $2.76K Cappuccino held a stand. Unequip, pull, re-equip, place.
     local model = standModel(worst.stand)
     if not model then return nil end
+    local wanted = tool.Name
+
+    local hum = humanoid()
+    if hum then pcall(function() hum:UnequipTools() end) end
+    task.wait(0.4)
+
     Remotes.GrabBrainrotFromStand:FireServer(model)
     task.wait(1.2)
     if standEntry(worst.stand) then
         note("swap refused on stand " .. worst.stand)
+        equipKey(wanted)
         return nil
     end
 
-    if not equipKey(tool.Name) then
-        -- Pulling the weak one may have unequipped us; re-equip and continue.
+    if not equipKey(wanted) then
         note("lost the tool during the swap")
+        return nil
     end
-    local held = heldTool()
-    if not held then return nil end
-    Remotes.PlaceBrainrotOnStand:FireServer(model, held.Name)
+    Remotes.PlaceBrainrotOnStand:FireServer(model, wanted)
     task.wait(1.2)
     if standEntry(worst.stand) then
         STATE.placed  = STATE.placed + 1
@@ -546,14 +597,11 @@ end
 local function sellSurplus()
     local free, used = census()
     if #free > 0 then return 0 end
-    local worst = nil
-    for _, e in ipairs(used) do
-        if (not worst) or e.income < worst.income then worst = e end
-    end
+    local worst = worstOf(used)
     if not worst then return 0 end
     local n = 0
     for _, e in ipairs(inventoryEntries()) do
-        if levelIncome(e.cps, e.level) <= worst.income then
+        if rank(e) <= rank(worst) then
             if sellKey(e.key) then n = n + 1 end
         end
     end
@@ -566,16 +614,27 @@ end
 local function placeInventory()
     local seated = 0
     for _ = 1, 24 do
-        local free = census()
-        if #free == 0 then break end
+        local free, used = census()
         local entries = inventoryEntries()
         if #entries == 0 then break end
+
         local best = nil
         for _, e in ipairs(entries) do
-            local inc = levelIncome(e.cps, e.level)
-            if (not best) or inc > best.inc then best = { e = e, inc = inc } end
+            if (not best) or rank(e) > best.inc then best = { e = e, inc = rank(e) } end
         end
         if not best then break end
+
+        -- Bailing out on a full plot is what silently stopped the swap. The
+        -- whole point of a full plot is that the inventory should be pushing
+        -- the weakest stand off it: three brainrots worth 232M, 174M and 134M
+        -- sat unplaced while a $2.76K Cappuccino held a stand, because this
+        -- loop returned before placeHeld() ever got the chance to swap.
+        if #free == 0 then
+            if not CONFIG.autoSwap then break end
+            local worst = worstOf(used)
+            if not (worst and best.inc > rank(worst)) then break end
+        end
+
         if not equipKey(best.e.key) then break end
         if not placeHeld() then break end
         seated = seated + 1
@@ -616,9 +675,20 @@ end
 -- attribute to actually clear, and shuffle around the spawn while waiting in
 -- case the landing point sits just outside the trigger.
 local function carryHome()
-    local h = homePos() or HOME
+    local h = homeAnchor()
     if not h then return false end
     flyTo(h)
+    -- Landing near the lobby spawn pulls the plot back into streaming range;
+    -- once it is loaded the real home coordinate is known and we finish there.
+    for _ = 1, 15 do
+        local real = homePos()
+        if real then
+            if (real - h).Magnitude > 25 then flyTo(real) end
+            h = real
+            break
+        end
+        task.wait(0.3)
+    end
 
     -- NEVER pin here. The delivery is a Touched on the plot, and the shared
     -- Heartbeat pin rewrites the CFrame every frame with zero velocity, so the
@@ -683,7 +753,7 @@ local function farmCycle()
         -- Never decide anything about the plot from the far stages.
         if not atHome() then
             STATE.phase = "returning"
-            local h = homePos() or HOME
+            local h = homeAnchor()
             if h then flyTo(h) end
             task.wait(0.5)
         end
@@ -742,7 +812,14 @@ local function farmCycle()
             if stand then
                 note(("seated %s on stand %s"):format(target.name, stand))
             else
+                -- Nothing on the plot is worse than what we just carried home,
+                -- so it is dead weight. Sell it on the spot instead of letting
+                -- the inventory grow - only the best belong on the stands.
                 note("nothing on the plot is worse than " .. target.name)
+                if CONFIG.autoSell then
+                    local held = heldTool()
+                    if held then sellKey(held.Name) end
+                end
             end
         end
     end)
@@ -972,7 +1049,7 @@ cPlot:Button("Seat inventory now", function()
 end)
 cPlot:Button("Fly home", function()
     task.spawn(function()
-        local h = homePos() or HOME
+        local h = homeAnchor()
         if h then flyTo(h) end
     end)
 end)
@@ -1007,10 +1084,9 @@ local out = cStatus:Readout(11)
 task.spawn(function()
     while _G.__LOGOBR == GEN do
         local free, used, total = census()
-        local worst, best = nil, nil
+        local worst, best = worstOf(used), nil
         for _, e in ipairs(used) do
-            if (not worst) or e.income < worst.income then worst = e end
-            if (not best) or e.income > best.income then best = e end
+            if (not best) or rank(e) > rank(best) then best = e end
         end
 
         win:SetStatus(("%s$   %s/s   stands %d/%d   R%d (%sx)"):format(
@@ -1033,9 +1109,10 @@ task.spawn(function()
             "PLOT",
             ("  %d of %d stands used   inventory %d   sold %d"):format(
                 #used, total, #inventoryEntries(), STATE.sold),
-            ("  best %s $%s/s   weakest %s $%s/s"):format(
-                best and best.name or "-", best and fmt(best.income) or "0",
-                worst and worst.name or "-", worst and fmt(worst.income) or "0"),
+            ("  best %s base $%s/s   weakest %s base $%s/s (now $%s/s)"):format(
+                best and best.name or "-", best and fmt(rank(best)) or "0",
+                worst and worst.name or "-", worst and fmt(rank(worst)) or "0",
+                worst and fmt(worst.income) or "0"),
             "ECONOMY",
             ("  collected %s   levels bought %d"):format(fmt(STATE.collected), STATE.levels),
             (nextLevel
@@ -1072,6 +1149,7 @@ _G.__LOGOBR_DBG = {
     worldBrainrots = worldBrainrots, bestTarget = bestTarget,
     census = census, standEntry = standEntry, standModel = standModel,
     weakestStand = weakestStand, acceptanceFloor = acceptanceFloor,
+    rank = rank, worstOf = worstOf,
     placeHeld = placeHeld, placeInventory = placeInventory,
     inventoryEntries = inventoryEntries, equipKey = equipKey, heldTool = heldTool,
     collectAll = collectAll, sellKey = sellKey, sellSurplus = sellSurplus,
