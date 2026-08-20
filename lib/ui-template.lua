@@ -2039,6 +2039,175 @@ function UI.Window(options)
 				end }
 			end
 
+			---------------------------------------------------------- Colour
+			--
+			-- A colour is one of the few settings a panel cannot express with the
+			-- controls above: a slider per channel is three rows for one value and
+			-- nobody thinks in RGB triples. This is a swatch that opens a small
+			-- picker underneath it - twelve presets for the common case and a hue
+			-- plus brightness slider for everything else.
+			--
+			-- Written against the SAME row/frame/corner helpers as the rest, so it
+			-- inherits the palette, the small-screen font pass and the language
+			-- switch without knowing about any of them.
+			--
+			-- The callback fires on every drag frame, not only on release: these
+			-- values drive things that are drawn live (chams, ESP boxes), and a
+			-- picker that only commits on mouse-up makes choosing a colour a
+			-- guessing game.
+			local PRESETS = {
+				Color3.fromRGB(255, 72, 88),   Color3.fromRGB(255, 138, 60),
+				Color3.fromRGB(255, 210, 90),  Color3.fromRGB(150, 230, 90),
+				Color3.fromRGB(90, 220, 120),  Color3.fromRGB(80, 220, 200),
+				Color3.fromRGB(80, 190, 255),  Color3.fromRGB(110, 130, 255),
+				Color3.fromRGB(170, 110, 255), Color3.fromRGB(255, 110, 210),
+				Color3.fromRGB(245, 245, 250), Color3.fromRGB(120, 128, 145),
+			}
+
+			function card:Colour(caption2, initial, callback, hint)
+				local r = row(caption2, hint, 30)
+				local value = initial or UI.theme.accent
+				local open = false
+
+				local swatch = Instance.new("TextButton")
+				swatch.Size = UDim2.fromOffset(52, 22)
+				swatch.Position = UDim2.new(1, -52, 0, -4)
+				swatch.BackgroundColor3 = value
+				swatch.BorderSizePixel = 0
+				swatch.Text = ""
+				swatch.AutoButtonColor = false
+				swatch.ZIndex = 6
+				swatch.Parent = r.inner
+				corner(swatch, 7)
+				stroke(swatch, UI.theme.band, 0)
+
+				local panel = frame(r.inner, UDim2.new(1, 0, 0, 96),
+					UDim2.fromOffset(0, 26), UI.theme.void)
+				panel.ZIndex = 5
+				panel.Visible = false
+				corner(panel, 8)
+				stroke(panel, UI.theme.band, 0)
+
+				local hue, sat, val = Color3.toHSV(value)
+
+				local function emit(fire)
+					value = Color3.fromHSV(hue, sat, val)
+					swatch.BackgroundColor3 = value
+					if fire and callback then task.spawn(callback, value) end
+				end
+
+				-- twelve preset chips, two rows of six
+				for i, preset in ipairs(PRESETS) do
+					local col = (i - 1) % 6
+					local rowN = math.floor((i - 1) / 6)
+					local chip = Instance.new("TextButton")
+					chip.Size = UDim2.fromOffset(20, 20)
+					chip.Position = UDim2.fromOffset(10 + col * 25, 10 + rowN * 25)
+					chip.BackgroundColor3 = preset
+					chip.BorderSizePixel = 0
+					chip.Text = ""
+					chip.AutoButtonColor = false
+					chip.ZIndex = 7
+					chip.Parent = panel
+					corner(chip, 6)
+					stroke(chip, UI.theme.band, 0.4)
+					chip.MouseButton1Click:Connect(function()
+						hue, sat, val = Color3.toHSV(preset)
+						emit(true)
+					end)
+				end
+
+				-- one draggable bar, used twice: hue across the spectrum and then
+				-- brightness of whatever hue is selected
+				local function bar(y, gradientFor, get, set)
+					local track = frame(panel, UDim2.new(1, -20, 0, 10),
+						UDim2.fromOffset(10, y), UI.theme.band)
+					track.ZIndex = 7
+					corner(track, 5)
+					local grad = Instance.new("UIGradient")
+					grad.Parent = track
+
+					local knob = frame(track, UDim2.fromOffset(6, 16),
+						UDim2.new(0, -3, 0, -3), UI.theme.textSoft)
+					knob.ZIndex = 9
+					corner(knob, 3)
+					stroke(knob, UI.theme.void, 0.3)
+
+					local hit = Instance.new("TextButton")
+					hit.Size = UDim2.new(1, 0, 0, 20)
+					hit.Position = UDim2.fromOffset(0, -5)
+					hit.BackgroundTransparency = 1
+					hit.Text = ""
+					hit.ZIndex = 10
+					hit.Parent = track
+
+					local function repaint()
+						grad.Color = gradientFor()
+						knob.Position = UDim2.new(math.clamp(get(), 0, 1), -3, 0, -3)
+					end
+
+					local dragging = false
+					hit.MouseButton1Down:Connect(function() dragging = true end)
+					UserInputService.InputEnded:Connect(function(input)
+						if input.UserInputType == Enum.UserInputType.MouseButton1 then
+							dragging = false
+						end
+					end)
+					RunService.RenderStepped:Connect(function()
+						if not dragging or not track.Parent or not panel.Visible then return end
+						local mouse = UserInputService:GetMouseLocation()
+						local a = (mouse.X - track.AbsolutePosition.X)
+							/ math.max(1, track.AbsoluteSize.X)
+						set(math.clamp(a, 0, 1))
+						emit(true)
+						repaint()
+					end)
+					return repaint
+				end
+
+				local repaintHue, repaintVal
+
+				repaintHue = bar(62, function()
+					local keys = {}
+					for i = 0, 6 do
+						table.insert(keys, ColorSequenceKeypoint.new(i / 6,
+							Color3.fromHSV(i / 6, 1, 1)))
+					end
+					return ColorSequence.new(keys)
+				end, function() return hue end, function(v)
+					hue = v
+					if sat < 0.15 then sat = 1 end
+					if repaintVal then repaintVal() end
+				end)
+
+				repaintVal = bar(80, function()
+					return ColorSequence.new(Color3.fromHSV(hue, sat, 0.05),
+						Color3.fromHSV(hue, sat, 1))
+				end, function() return val end, function(v) val = math.max(v, 0.05) end)
+
+				repaintHue()
+				repaintVal()
+
+				swatch.MouseButton1Click:Connect(function()
+					open = not open
+					panel.Visible = open
+					r.inner.Size = UDim2.new(1, -22, 0, open and 126 or 30)
+					if open then repaintHue() repaintVal() end
+				end)
+
+				return {
+					set = function(a, b)
+						local v = arg(a, b)
+						if typeof(v) == "Color3" then
+							hue, sat, val = Color3.toHSV(v)
+							emit(false)
+							repaintHue() repaintVal()
+						end
+					end,
+					get = function() return value end,
+				}
+			end
+
 			---------------------------------------------------------- Stepper
 			function card:Stepper(caption2, getText, onStep, hint)
 				local r = row(caption2, hint, 92)
