@@ -937,9 +937,19 @@ function UI.askDevice(onDone)
 	paintAuto()
 
 	autoBtn.MouseButton1Click:Connect(function()
-		autoOn = not autoOn
-		UI.setAutoload(autoOn)
+		UI.setAutoload(not autoOn)
+		-- Read the answer back rather than trusting the write. An executor with
+		-- no working writefile - and mobile ones are exactly where that happens -
+		-- would otherwise leave the button reading AN while the loader keeps
+		-- seeing OFF. Snapping back to AUS is the honest outcome: nothing was
+		-- saved, and the switch says so.
+		autoOn = UI.getAutoload()
 		paintAuto()
+		if autoOn then
+			setText(autoHint, "An: das Panel kommt in jedem Spiel, das Selux kennt.")
+		else
+			setText(autoHint, "Aus: das Panel kommt nur in dem Spiel, in dem du den Loader ausfuehrst.")
+		end
 	end)
 
 	return gui

@@ -8,7 +8,7 @@
 -- they are - they keep passing "Auto rebirth" and only this file decides what
 -- the player reads.
 --
--- 697 entries.
+-- 698 entries.
 
 return {
 	["%d Min"] = "%d мин",
@@ -41,6 +41,7 @@ return {
 	["AddKick from anywhere, best unlocked target, ~15 credited calls/s"] = "AddKick откуда угодно, лучшая цель, ~15 засчитанных вызовов/с",
 	["AddSpeed once per frame, the server caps it at ~9/s"] = "AddSpeed раз в кадр, сервер режет на ~9/с",
 	["Amber x1.5 @5K ... Void x7.5, stacks with the trail"] = "Amber x1.5 @5K ... Void x7.5, складывается со следом",
+	["An: das Panel kommt in jedem Spiel, das Selux kennt."] = "Вкл: панель появляется в каждой игре, которую знает Selux.",
 	["Angekommen. Nummer #%s - die kannst du im Support-Forum nennen."] = "Доставлено. Номер #%s - можете указать его в форуме поддержки.",
 	["Anti-AFK"] = "Анти-АФК",
 	["Aura rolls"] = "Роллы аур",

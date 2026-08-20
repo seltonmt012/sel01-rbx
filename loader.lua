@@ -50,9 +50,13 @@ local CACHE = "sel01/"
 -- OFF does not mean the queue is gone. A script that is already running still
 -- follows its own game across a place change (leaves lobby -> map, speedevolve
 -- world 1 -> world 2); what stops is starting a DIFFERENT game's script by
--- itself. The two are told apart by the alias in FROM_FILE.
+-- itself. The two are told apart by the alias the queue carries in _G.__SEL_TP.
+--
+-- NOTHING here needs the filesystem to work. The default is the hardcoded false
+-- below and only an explicit 1/on/true moves it, so an executor with no file
+-- API, a missing workspace folder or an isfile that throws all end up OFF -
+-- which is the answer that cannot surprise anybody.
 local AUTOLOAD_FILE = "selux-autoload.txt"
-local FROM_FILE = CACHE .. "from.txt"
 
 local Players = game:GetService("Players")
 local HttpService = game:GetService("HttpService")
@@ -68,7 +72,16 @@ local GEN = ((PREV and PREV.gen) or 0) + 1
 -- Set by the queued payload and by nothing else, so it is the one reliable
 -- answer to "did a human start me, or did the queue?". A teleport builds a new
 -- Lua VM, so it cannot be left over from the last place either.
-local VIA_QUEUE = _G.__SEL_TP == true
+--
+-- It carries the ALIAS of the script that armed it, not just a boolean, and
+-- that is on purpose: the alternative was a file in the workspace, which needs
+-- makefolder/writefile/readfile to all exist and work. Plenty of mobile
+-- executors have a partial or missing file API, and there the marker would be
+-- unreadable - which would refuse the one case that has to keep working, a
+-- script following its own game from a lobby into a map. The queued string is
+-- something this loader writes itself, so it is available wherever the queue is.
+local VIA_QUEUE = type(_G.__SEL_TP) == "string"
+local FROM = VIA_QUEUE and _G.__SEL_TP or nil
 _G.__SEL_TP = nil
 
 -- Executor globals differ per executor; every optional one degrades to a no-op.
@@ -163,19 +176,23 @@ do
     end
 end
 
--- Which script was running when the queue was armed. A file and not a global,
--- because the global is exactly what the teleport throws away.
-local FROM = readFlag(FROM_FILE)
-
--- The queue, and the one flag that tells the next run where it came from.
--- Semicolon on purpose: two statements in one queued string.
-local ARM = '_G.__SEL_TP = true; loadstring(game:HttpGet("' .. BASE .. 'loader.lua"))()'
+-- The queue, and the flag that tells the next run where it came from. Two
+-- statements in one queued string, and %q rather than plain quotes so an alias
+-- with anything unusual in it cannot break out of the literal.
+--
+-- ARMED ONCE PER RUN, and the guard matters: queue_on_teleport APPENDS, so
+-- arming twice makes the loader run twice on the other side and build two
+-- panels. With auto-start on, the arm at the top wins and carries an empty
+-- alias - harmless, because auto-start on does not consult it. With it off,
+-- loadGame is the only caller and passes the real one.
 local armed = false
 
-local function arm()
+local function arm(alias)
     if armed or not queueTp then return end
     armed = true
-    pcall(queueTp, ARM)
+    local tag = type(alias) == "string" and alias or ""
+    pcall(queueTp, string.format('_G.__SEL_TP = %q; loadstring(game:HttpGet(%q))()',
+        tag, BASE .. "loader.lua"))
 end
 
 -- With auto-start ON this is armed before anything else can fail: a lobby with
@@ -297,17 +314,13 @@ local function loadGame(entry, why)
     _G.__SEL.game = entry
     _G.__SEL.source = from
 
-    -- Written BEFORE the script runs, not after: a game script that yields for
-    -- its own reasons would otherwise never record that it was the one running,
-    -- and the next place would refuse to carry it. Written on every load, so
-    -- switching games by hand moves the marker with you.
-    pcall(function()
-        if not isfolder(CACHE) then makefolder(CACHE) end
-        writefile(FROM_FILE, tostring(entry.alias or ""))
-    end)
-    -- A script is running now, so the place it teleports itself into is worth
-    -- carrying - with auto-start off this is the only place the queue is armed.
-    arm()
+    -- Armed BEFORE the script runs, not after: a game script that yields for its
+    -- own reasons would otherwise never get the alias into the queue, and the
+    -- place it teleports itself into would refuse to carry it.
+    --
+    -- A script is running now, so where it teleports itself is worth following -
+    -- with auto-start off this is the only place the queue is armed at all.
+    arm(entry.alias)
 
     local chunk, err = run(body, entry.file)
     if not chunk then
@@ -413,7 +426,10 @@ _G.__SEL = {
         pcall(function() writefile(AUTOLOAD_FILE, on and "1" or "0") end)
         _G.__SEL.autoStart = on
         notify("Auto-Start in neuen Spielen: " .. (on and "AN" or "AUS"), 4)
-        if on then arm() end
+        -- Carry whatever is loaded right now, so switching it on mid-session
+        -- behaves like it had been on from the start rather than needing a
+        -- second game join to take effect.
+        if on then arm(_G.__SEL.game and _G.__SEL.game.alias) end
         return on
     end,
     reload = function()
