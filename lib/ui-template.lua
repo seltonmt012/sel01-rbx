@@ -69,7 +69,7 @@ UI.REPO = "seltonmt012/sel01-rbx"
 -- it turns the open letterbox into a form: it accepts a fixed set of fields,
 -- writes the Discord message itself, rate-limits per IP, and can be changed in
 -- one place in seconds without touching a single script.
-UI.REPORT_URL = ""
+UI.REPORT_URL = "https://selux-report.selux.workers.dev"
 
 -- Palette ---------------------------------------------------------------------
 -- Four depths, not five. v2 had void/rail/sidebar/window/header/subBar/card and
