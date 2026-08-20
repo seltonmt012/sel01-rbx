@@ -887,8 +887,10 @@ task.spawn(function()
 			win:SetStat(1, short(STATE.wins))
 			win:SetStat(2, short(STATE.winsRate) .. "/s")
 			win:SetStat(3, tostring(STATE.rebirths))
-			win:SetMaster(CONFIG.auto, CONFIG.auto and "Auto Farm laeuft" or "Gestoppt",
-				STATE.targetName ~= "-" and ("Ziel " .. STATE.targetName) or nil)
+			-- Kein Untertitel hier. Die Zeile darunter gehoert SetStatus, das sie
+			-- im Read-out-Loop mit den Zahlen fuellt - beide zu schreiben liess
+			-- sie im Sekundentakt zwischen den Zahlen und "Ziel ..." springen.
+			win:SetMaster(CONFIG.auto, CONFIG.auto and "Auto Farm laeuft" or "Gestoppt")
 		end)
 		task.wait(1)
 	end
