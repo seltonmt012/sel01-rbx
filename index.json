@@ -244,6 +244,16 @@
       "detect": "return game.Workspace:FindFirstChild('NestEggs') ~= nil and game:GetService('ReplicatedStorage'):FindFirstChild('HatchEgg', true) ~= nil"
     },
     {
+      "alias": "poortorich",
+      "name": "[💰] +1 Poor To Rich",
+      "file": "games/poortorich.lua",
+      "places": [
+        96003649748017
+      ],
+      "status": "ok",
+      "detect": "local rs = game:GetService('ReplicatedStorage') local inv = rs:FindFirstChild('Inventory') local ctrl = rs:FindFirstChild('Controllers') return rs:FindFirstChild('GetRebirthInfo') ~= nil and inv ~= nil and inv:FindFirstChild('Food') ~= nil and ctrl ~= nil and ctrl:FindFirstChild('Data') ~= nil and game.Workspace:FindFirstChild('MapPoorRich') ~= nil"
+    },
+    {
       "alias": "beflash",
       "name": "[Galaxy] Be Flash For Brainrots!",
       "file": "games/beflash.lua",
@@ -252,6 +262,16 @@
       ],
       "status": "ok",
       "detect": "local rs = game:GetService('ReplicatedStorage') return rs:FindFirstChild('DashEvent') ~= nil and rs:FindFirstChild('RemoteGUI') ~= nil"
+    },
+    {
+      "alias": "logobrainrots",
+      "name": "Logo für Brainrots!",
+      "file": "games/logobrainrots.lua",
+      "places": [
+        123959902101040
+      ],
+      "status": "ok",
+      "detect": "local rs = game:GetService('ReplicatedStorage') return rs:FindFirstChild('PlaceBrainrotOnStand', true) ~= nil and rs:FindFirstChild('MathDoorResult', true) ~= nil"
     }
   ]
 }
