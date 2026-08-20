@@ -242,6 +242,16 @@
       "status": "wip",
       "note": "collector + hatcher only, no shared panel yet",
       "detect": "return game.Workspace:FindFirstChild('NestEggs') ~= nil and game:GetService('ReplicatedStorage'):FindFirstChild('HatchEgg', true) ~= nil"
+    },
+    {
+      "alias": "beflash",
+      "name": "[Galaxy] Be Flash For Brainrots!",
+      "file": "games/beflash.lua",
+      "places": [
+        136066387156306
+      ],
+      "status": "ok",
+      "detect": "local rs = game:GetService('ReplicatedStorage') return rs:FindFirstChild('DashEvent') ~= nil and rs:FindFirstChild('RemoteGUI') ~= nil"
     }
   ]
 }
