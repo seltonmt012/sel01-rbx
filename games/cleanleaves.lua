@@ -200,7 +200,7 @@ local function tryRequire(inst)
 end
 
 -- FindFirstChild, never WaitForChild. LeafSim only exists inside a run, and in
--- the lobby WaitForChild("LeafSim") waits forever: the script never reaches its
+-- the lobby WaitForChild("LeafSim", 10) waits forever: the script never reaches its
 -- end, the bridge job never returns, the client stops polling, and from the
 -- outside that is indistinguishable from a crashed client. Three "lobby
 -- crashes" were this one line.
@@ -2022,6 +2022,11 @@ task.spawn(function()
         task.wait(0.5)
     end
 end)
+
+-- Der Home-Tab: das GitHub-Commit-Log als Changelog plus der aktuelle Lauf.
+-- Zuletzt deklariert, aber das Template schiebt ihn an den Anfang der Leiste -
+-- er ist immer das erste Icon und die Seite, auf der das Panel aufgeht.
+pcall(function() win:Home() end)
 
 win:Refresh()
 

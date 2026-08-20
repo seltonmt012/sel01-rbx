@@ -1057,4 +1057,8 @@ _G.__LUCKYFISH_DBG = {
     swapBetter = swapBetter, baseEarnings = baseEarnings, toolSpecies = toolSpecies, scoreOf = scoreOf,
 }
 
+-- Der Home-Tab: das GitHub-Commit-Log als Changelog plus der aktuelle Lauf.
+-- Zuletzt deklariert, aber das Template schiebt ihn an den Anfang der Leiste.
+pcall(function() win:Home() end)
+
 print("[luckyfish] loaded - gen " .. GEN .. ", RightShift for the panel")

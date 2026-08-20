@@ -190,7 +190,7 @@ local function channel(name)
 	local cache = _G.__LOOKSCLICK_WARP
 	if cache[name] then return cache[name] end
 	if not warpLib then
-		warpLib = asGame(require, ReplicatedStorage:WaitForChild("Packages"):WaitForChild("warp"))
+		warpLib = asGame(require, ReplicatedStorage:WaitForChild("Packages", 10):WaitForChild("warp", 10))
 	end
 	if not warpLib then return nil end
 	local client = asGame(function() return warpLib.Client(name) end)
@@ -1251,6 +1251,11 @@ task.spawn(function()
 		task.wait(0.5)
 	end
 end)
+
+-- Der Home-Tab: das GitHub-Commit-Log als Changelog plus der aktuelle Lauf.
+-- Zuletzt deklariert, aber das Template schiebt ihn an den Anfang der Leiste -
+-- er ist immer das erste Icon und die Seite, auf der das Panel aufgeht.
+pcall(function() win:Home() end)
 
 win:Refresh()
 

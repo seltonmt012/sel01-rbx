@@ -48,9 +48,9 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local LocalPlayer = Players.LocalPlayer
 
-local Paper       = require(ReplicatedStorage:WaitForChild("Paper"))
+local Paper       = require(ReplicatedStorage:WaitForChild("Paper", 10))
 local Mining      = require(ReplicatedStorage.Modules.Client.Mining)
-local Tables      = ReplicatedStorage:WaitForChild("Tables")
+local Tables      = ReplicatedStorage:WaitForChild("Tables", 10)
 local PickaxeData = require(Tables.Pickaxes)
 local EggData     = require(Tables.Eggs)
 local RebirthData = require(Tables.Rebirths)
@@ -102,7 +102,7 @@ end
 -- the stats folder is the oracle
 ----------------------------------------------------------------------------
 
-local Stats = ReplicatedStorage:WaitForChild("Stats"):WaitForChild(LocalPlayer.Name, 20)
+local Stats = ReplicatedStorage:WaitForChild("Stats", 10):WaitForChild(LocalPlayer.Name, 20)
 if not Stats then
     warn("[pickaxesim] no stats folder for " .. LocalPlayer.Name .. " - still loading?")
     return
@@ -575,5 +575,9 @@ _G.__PICKSIM_DBG = {
     invoke = invoke, fire = fire, ladder = LADDER, rebirthCost = rebirthCost,
     nextPickaxe = nextPickaxe, eggFor = eggFor,
 }
+
+-- Der Home-Tab: das GitHub-Commit-Log als Changelog plus der aktuelle Lauf.
+-- Zuletzt deklariert, aber das Template schiebt ihn an den Anfang der Leiste.
+pcall(function() win:Home() end)
 
 print("[pickaxesim] running - RightShift toggles the panel")

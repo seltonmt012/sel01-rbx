@@ -91,40 +91,40 @@ local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local plr = Players.LocalPlayer
-local Remotes = ReplicatedStorage:WaitForChild("Remotes")
-local Server = Remotes:WaitForChild("Server")
+local Remotes = ReplicatedStorage:WaitForChild("Remotes", 10)
+local Server = Remotes:WaitForChild("Server", 10)
 
-local Click        = Server:WaitForChild("Click")
-local HitWall      = Server:WaitForChild("HitWall")
-local SellAllLoot  = Server:WaitForChild("SellAllLoot")
-local PurchasePick = Server:WaitForChild("PurchasePickaxe")
-local EquipPick    = Server:WaitForChild("EquipPickaxe")
-local RebirthRE    = Server:WaitForChild("Rebirth")
-local UpgradeSlot  = Server:WaitForChild("UpgradeSlot")
-local UpgradeWalk  = Server:WaitForChild("UpgradeWalkspeed")
-local PurchaseAura = Server:WaitForChild("PurchaseAura")
-local EquipAura    = Server:WaitForChild("EquipAura")
-local GroupReward  = Server:WaitForChild("GroupReward")
-local TeleportStage= Server:WaitForChild("TeleportToStage")
-local GotoSurface  = Server:WaitForChild("GotoSurface")
+local Click        = Server:WaitForChild("Click", 10)
+local HitWall      = Server:WaitForChild("HitWall", 10)
+local SellAllLoot  = Server:WaitForChild("SellAllLoot", 10)
+local PurchasePick = Server:WaitForChild("PurchasePickaxe", 10)
+local EquipPick    = Server:WaitForChild("EquipPickaxe", 10)
+local RebirthRE    = Server:WaitForChild("Rebirth", 10)
+local UpgradeSlot  = Server:WaitForChild("UpgradeSlot", 10)
+local UpgradeWalk  = Server:WaitForChild("UpgradeWalkspeed", 10)
+local PurchaseAura = Server:WaitForChild("PurchaseAura", 10)
+local EquipAura    = Server:WaitForChild("EquipAura", 10)
+local GroupReward  = Server:WaitForChild("GroupReward", 10)
+local TeleportStage= Server:WaitForChild("TeleportToStage", 10)
+local GotoSurface  = Server:WaitForChild("GotoSurface", 10)
 
-local ClientRemotes    = Remotes:WaitForChild("Client")
-local UpdateWallHealth = ClientRemotes:WaitForChild("UpdateWallHealth")
+local ClientRemotes    = Remotes:WaitForChild("Client", 10)
+local UpdateWallHealth = ClientRemotes:WaitForChild("UpdateWallHealth", 10)
 
-local Client       = ReplicatedStorage:WaitForChild("Client")
-local DataClient   = require(Client:WaitForChild("DataClient"))
-local StageClient  = require(Client:WaitForChild("StageClient"))
+local Client       = ReplicatedStorage:WaitForChild("Client", 10)
+local DataClient   = require(Client:WaitForChild("DataClient", 10))
+local StageClient  = require(Client:WaitForChild("StageClient", 10))
 
-local Databases    = ReplicatedStorage:WaitForChild("Databases")
-local StagesList   = require(Databases:WaitForChild("StagesList"))
-local PickaxeList  = require(Databases:WaitForChild("PickaxeList"))
-local TrainingList = require(Databases:WaitForChild("TrainingList"))
-local AurasList    = require(Databases:WaitForChild("AurasList"))
-local ItemsList    = require(Databases:WaitForChild("ItemsList"))
+local Databases    = ReplicatedStorage:WaitForChild("Databases", 10)
+local StagesList   = require(Databases:WaitForChild("StagesList", 10))
+local PickaxeList  = require(Databases:WaitForChild("PickaxeList", 10))
+local TrainingList = require(Databases:WaitForChild("TrainingList", 10))
+local AurasList    = require(Databases:WaitForChild("AurasList", 10))
+local ItemsList    = require(Databases:WaitForChild("ItemsList", 10))
 
-local Helpers      = ReplicatedStorage:WaitForChild("Helpers")
-local LevelsHelper = require(Helpers:WaitForChild("LevelsHelper"))
-local UpgradesHelper = require(Helpers:WaitForChild("UpgradesHelper"))
+local Helpers      = ReplicatedStorage:WaitForChild("Helpers", 10)
+local LevelsHelper = require(Helpers:WaitForChild("LevelsHelper", 10))
+local UpgradesHelper = require(Helpers:WaitForChild("UpgradesHelper", 10))
 
 --------------------------------------------------------------------------------
 -- config / state
@@ -1009,6 +1009,11 @@ task.spawn(function()
 		task.wait(0.5)
 	end
 end)
+
+-- Der Home-Tab: das GitHub-Commit-Log als Changelog plus der aktuelle Lauf.
+-- Zuletzt deklariert, aber das Template schiebt ihn an den Anfang der Leiste -
+-- er ist immer das erste Icon und die Seite, auf der das Panel aufgeht.
+pcall(function() win:Home() end)
 
 win:Refresh()
 

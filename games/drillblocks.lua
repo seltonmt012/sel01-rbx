@@ -68,13 +68,13 @@ _G.__DRILL = (_G.__DRILL or 0) + 1
 local generation = _G.__DRILL
 if _G.__DRILL_GUI then pcall(function() _G.__DRILL_GUI:Destroy() end) end
 
-local Remotes = ReplicatedStorage:WaitForChild("Network"):WaitForChild("RemoteEvents")
+local Remotes = ReplicatedStorage:WaitForChild("Network", 10):WaitForChild("RemoteEvents", 10)
 local itemsConfig = require(ReplicatedStorage.Configurations.Modules.ItemsConfigurations)
 local mutationsConfig = require(ReplicatedStorage.Configurations.Modules.MutationsConfigurations)
 local itemsHelper = require(ReplicatedStorage.Configurations.Modules.ItemsHelper)
 
-local itemsFolder = workspace:WaitForChild("Items")
-local basesFolder = workspace:WaitForChild("Bases")
+local itemsFolder = workspace:WaitForChild("Items", 10)
+local basesFolder = workspace:WaitForChild("Bases", 10)
 
 local function shortNumber(n)
 	n = tonumber(n) or 0
@@ -826,7 +826,7 @@ gui.Name = "DrillBlocks"
 gui.ResetOnSpawn = false
 gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 pcall(function() gui.Parent = (gethui and gethui()) or game:GetService("CoreGui") end)
-if not gui.Parent then gui.Parent = plr:WaitForChild("PlayerGui") end
+if not gui.Parent then gui.Parent = plr:WaitForChild("PlayerGui", 10) end
 _G.__DRILL_GUI = gui
 
 local frame = Instance.new("Frame")

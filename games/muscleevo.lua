@@ -1078,6 +1078,11 @@ task.spawn(function()
 	end
 end)
 
+-- Der Home-Tab: das GitHub-Commit-Log als Changelog plus der aktuelle Lauf.
+-- Zuletzt deklariert, aber das Template schiebt ihn an den Anfang der Leiste -
+-- er ist immer das erste Icon und die Seite, auf der das Panel aufgeht.
+pcall(function() win:Home() end)
+
 win:Refresh()
 
 --------------------------------------------------------------------------------

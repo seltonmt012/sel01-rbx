@@ -53,7 +53,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local LocalPlayer = Players.LocalPlayer
 
-local Shared            = ReplicatedStorage:WaitForChild("Shared")
+local Shared            = ReplicatedStorage:WaitForChild("Shared", 10)
 local LevelUtil         = require(Shared.LevelUtil)
 local WallHealth        = require(Shared.WallHealth)
 local KickBagConstants  = require(Shared.KickBagConstants)
@@ -62,7 +62,7 @@ local EggConfig         = require(Shared.EggConfig)
 local BoostConfig       = require(Shared.BoostConfig)
 local PetConfig         = require(Shared.PetConfig)
 local TitleConfig       = require(Shared.TitleConfig)
-local Knit              = require(ReplicatedStorage:WaitForChild("Packages"):WaitForChild("Knit"))
+local Knit              = require(ReplicatedStorage:WaitForChild("Packages", 10):WaitForChild("Knit", 10))
 
 ----------------------------------------------------------------------------
 -- config / state
@@ -727,5 +727,9 @@ _G.__AMMOCLICK_DBG = {
     claimFreeRewards = claimFreeRewards, call = call,
     cursor = function() return cursor end,
 }
+
+-- Der Home-Tab: das GitHub-Commit-Log als Changelog plus der aktuelle Lauf.
+-- Zuletzt deklariert, aber das Template schiebt ihn an den Anfang der Leiste.
+pcall(function() win:Home() end)
 
 print("[ammoclick] running - RightShift toggles the panel")

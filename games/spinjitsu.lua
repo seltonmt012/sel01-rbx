@@ -47,8 +47,8 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local LocalPlayer = Players.LocalPlayer
 
-local Remotes   = ReplicatedStorage:WaitForChild("Remotes")
-local Modules   = ReplicatedStorage:WaitForChild("Modules")
+local Remotes   = ReplicatedStorage:WaitForChild("Remotes", 10)
+local Modules   = ReplicatedStorage:WaitForChild("Modules", 10)
 local SpinCfg   = require(Modules.Spinjitsu.SpinjitsuConfig)
 local PetConfig = require(Modules.Pets.PetConfig)
 local AuraConfig= require(Modules.Auras.AuraConfig)
@@ -808,5 +808,9 @@ _G.__SPINJITSU_DBG = {
     MOVE = MOVE, withBody = withBody,
     levelNow = levelNow, currentPerSecond = currentPerSecond, holdAt = holdAt,
 }
+
+-- Der Home-Tab: das GitHub-Commit-Log als Changelog plus der aktuelle Lauf.
+-- Zuletzt deklariert, aber das Template schiebt ihn an den Anfang der Leiste.
+pcall(function() win:Home() end)
 
 print("[spinjitsu] running - RightShift toggles the panel")

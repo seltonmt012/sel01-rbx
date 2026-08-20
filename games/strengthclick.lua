@@ -184,10 +184,10 @@ local function value(name, default)
 	return default
 end
 
-local Remotes = ReplicatedStorage:WaitForChild("Remotes")
-local Events = Remotes:WaitForChild("Events")
-local Functions = Remotes:WaitForChild("Functions")
-local Config = ReplicatedStorage:WaitForChild("Configuration")
+local Remotes = ReplicatedStorage:WaitForChild("Remotes", 10)
+local Events = Remotes:WaitForChild("Events", 10)
+local Functions = Remotes:WaitForChild("Functions", 10)
+local Config = ReplicatedStorage:WaitForChild("Configuration", 10)
 
 local function conf(name)
 	local mod = Config:FindFirstChild(name)
@@ -1252,6 +1252,11 @@ task.spawn(function()
 		task.wait(0.5)
 	end
 end)
+
+-- Der Home-Tab: das GitHub-Commit-Log als Changelog plus der aktuelle Lauf.
+-- Zuletzt deklariert, aber das Template schiebt ihn an den Anfang der Leiste -
+-- er ist immer das erste Icon und die Seite, auf der das Panel aufgeht.
+pcall(function() win:Home() end)
 
 win:Refresh()
 

@@ -76,19 +76,19 @@ local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local plr = Players.LocalPlayer
-local Shared = ReplicatedStorage:WaitForChild("Modules"):WaitForChild("Shared")
-local Remotes = Shared:WaitForChild("RemoteEventService")
+local Shared = ReplicatedStorage:WaitForChild("Modules", 10):WaitForChild("Shared", 10)
+local Remotes = Shared:WaitForChild("RemoteEventService", 10)
 
-local AddSpeed    = Remotes:WaitForChild("AddSpeedRemoteEvent")
-local EvolutionRE = Remotes:WaitForChild("EvolutionRemoteEvent")
-local RebirthRE   = Remotes:WaitForChild("RebirthRemoteEvent")
-local TrailRE     = Remotes:WaitForChild("TrailRemoteEvent")
-local AuraRE      = Remotes:WaitForChild("AuraRemoteEvent")
-local ItemRE      = Remotes:WaitForChild("ItemRemoteEvent")
-local PlayerRE    = Remotes:WaitForChild("PlayerRemoteEvent")
-local DailyRE     = Remotes:WaitForChild("DailyLoginRemoteEvent")
-local CodesRE     = Remotes:WaitForChild("CodesRemoteEvent")
-local WorldsRE    = Remotes:WaitForChild("WorldsRemoteEvent")
+local AddSpeed    = Remotes:WaitForChild("AddSpeedRemoteEvent", 10)
+local EvolutionRE = Remotes:WaitForChild("EvolutionRemoteEvent", 10)
+local RebirthRE   = Remotes:WaitForChild("RebirthRemoteEvent", 10)
+local TrailRE     = Remotes:WaitForChild("TrailRemoteEvent", 10)
+local AuraRE      = Remotes:WaitForChild("AuraRemoteEvent", 10)
+local ItemRE      = Remotes:WaitForChild("ItemRemoteEvent", 10)
+local PlayerRE    = Remotes:WaitForChild("PlayerRemoteEvent", 10)
+local DailyRE     = Remotes:WaitForChild("DailyLoginRemoteEvent", 10)
+local CodesRE     = Remotes:WaitForChild("CodesRemoteEvent", 10)
+local WorldsRE    = Remotes:WaitForChild("WorldsRemoteEvent", 10)
 
 local Helper        = require(Shared.Helper)
 local UpgradesData  = require(Shared.UpgradesData)
@@ -99,7 +99,7 @@ local AuraData      = require(Shared.AuraData)
 local ItemData      = require(Shared.ItemData)
 local WorldsData    = require(Shared.WorldsData)
 
-local PS = plr:WaitForChild("PlayerStats")
+local PS = plr:WaitForChild("PlayerStats", 10)
 
 --------------------------------------------------------------------------------
 -- config / state
@@ -757,6 +757,11 @@ task.spawn(function()
 		task.wait(0.5)
 	end
 end)
+
+-- Der Home-Tab: das GitHub-Commit-Log als Changelog plus der aktuelle Lauf.
+-- Zuletzt deklariert, aber das Template schiebt ihn an den Anfang der Leiste -
+-- er ist immer das erste Icon und die Seite, auf der das Panel aufgeht.
+pcall(function() win:Home() end)
 
 win:Refresh()
 

@@ -41,9 +41,9 @@ local RunService        = game:GetService("RunService")
 
 local plr = Players.LocalPlayer
 
-local Remotes = ReplicatedStorage:WaitForChild("Remotes")
-local Events  = ReplicatedStorage:WaitForChild("Events")
-local Modules = ReplicatedStorage:WaitForChild("Modules")
+local Remotes = ReplicatedStorage:WaitForChild("Remotes", 10)
+local Events  = ReplicatedStorage:WaitForChild("Events", 10)
+local Modules = ReplicatedStorage:WaitForChild("Modules", 10)
 
 -- ---------------------------------------------------------------- generation
 -- Re-running in the executor does not restart the Lua VM, so every loop below
@@ -277,7 +277,7 @@ end
 
 -- ---------------------------------------------------------------- the blast
 local BlastConfig = nil
-pcall(function() BlastConfig = require(Modules:WaitForChild("BlastConfig")) end)
+pcall(function() BlastConfig = require(Modules:WaitForChild("BlastConfig", 10)) end)
 
 local function chargeSeconds()
     local full = 2.67
@@ -442,7 +442,7 @@ end
 -- --------------------------------------------------------------- upgrades
 -- BaseCost * CostMult^level, read out of the game's own UpgradeConfig.
 local UpgradeConfig = nil
-pcall(function() UpgradeConfig = require(Modules:WaitForChild("UpgradeConfig")) end)
+pcall(function() UpgradeConfig = require(Modules:WaitForChild("UpgradeConfig", 10)) end)
 
 local UPGRADE_ORDER = { "Inventory", "Strength", "TeleportSpeed", "LotCapacity" }
 
@@ -478,7 +478,7 @@ end
 
 -- ---------------------------------------------------- base floors and slots
 local BaseExpansionConfig = nil
-pcall(function() BaseExpansionConfig = require(Modules:WaitForChild("BaseExpansionConfig")) end)
+pcall(function() BaseExpansionConfig = require(Modules:WaitForChild("BaseExpansionConfig", 10)) end)
 
 -- PurchaseBaseUpgrade takes the LOT NAME, not a floor name. The client walks the
 -- pressed button up to its ancestor whose Parent is workspace.Lots and sends
@@ -614,7 +614,7 @@ end
 
 -- ---------------------------------------------------------------- rebirth
 local RebirthConfig = nil
-pcall(function() RebirthConfig = require(Modules:WaitForChild("RebirthConfig")) end)
+pcall(function() RebirthConfig = require(Modules:WaitForChild("RebirthConfig", 10)) end)
 
 local function rebirthRequirement()
     local r = num("Rebirths")
@@ -1014,5 +1014,9 @@ _G.__POWERBLAST_DBG = {
     floorUnlocked = floorUnlocked, myLot = myLot,
     safeInvoke = safeInvoke, fmt = fmt,
 }
+
+-- Der Home-Tab: das GitHub-Commit-Log als Changelog plus der aktuelle Lauf.
+-- Zuletzt deklariert, aber das Template schiebt ihn an den Anfang der Leiste.
+pcall(function() win:Home() end)
 
 print("[powerblast] loaded - gen " .. GEN .. ", RightShift for the panel")

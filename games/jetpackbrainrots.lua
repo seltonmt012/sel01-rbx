@@ -92,7 +92,7 @@ end)
 
 -- Game modules ---------------------------------------------------------------
 
-local Source = ReplicatedStorage:WaitForChild("Source")
+local Source = ReplicatedStorage:WaitForChild("Source", 10)
 local BigNum = require(Source.PlaywooEngine.Utils.BigNum)
 local BrainrotsInfo = require(Source.Info.BrainrotsInfo)
 
@@ -1276,6 +1276,11 @@ rbCard:Toggle("Auto rebirth", CONFIG.autoRebirth, function(v) CONFIG.autoRebirth
 rbCard:Button("Rebirth now", function() task.spawn(rebirthIfWorth) end, UI.theme.warn)
 
 local readout = infoPage:Card("LIVE", 0):Readout(16)
+
+-- Der Home-Tab: das GitHub-Commit-Log als Changelog plus der aktuelle Lauf.
+-- Zuletzt deklariert, aber das Template schiebt ihn an den Anfang der Leiste -
+-- er ist immer das erste Icon und die Seite, auf der das Panel aufgeht.
+pcall(function() win:Home() end)
 
 win:Refresh()
 

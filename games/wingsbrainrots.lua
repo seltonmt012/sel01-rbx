@@ -153,17 +153,17 @@ pcall(function()
 	end
 end)
 
-local Remotes = ReplicatedStorage:WaitForChild("Remotes")
-local Events = ReplicatedStorage:WaitForChild("Events")
-local Funnels = ReplicatedStorage:WaitForChild("Funnels")
+local Remotes = ReplicatedStorage:WaitForChild("Remotes", 10)
+local Events = ReplicatedStorage:WaitForChild("Events", 10)
+local Funnels = ReplicatedStorage:WaitForChild("Funnels", 10)
 
-local placeBest = Remotes:WaitForChild("PlaceBestRequested")
-local upgradeRequested = Remotes:WaitForChild("UpgradeRequested")
-local freeBrainrot = Remotes:WaitForChild("FreeBrainrotRequest")
-local logZoneReach = Funnels:WaitForChild("LogZoneReach")
-local slotUpgrade = Events:WaitForChild("RequestSlotUpgrade")
-local baseUpgrade = Events:WaitForChild("RequestBaseUpgrade")
-local rebirthRemote = Events:WaitForChild("RequestRebirth")
+local placeBest = Remotes:WaitForChild("PlaceBestRequested", 10)
+local upgradeRequested = Remotes:WaitForChild("UpgradeRequested", 10)
+local freeBrainrot = Remotes:WaitForChild("FreeBrainrotRequest", 10)
+local logZoneReach = Funnels:WaitForChild("LogZoneReach", 10)
+local slotUpgrade = Events:WaitForChild("RequestSlotUpgrade", 10)
+local baseUpgrade = Events:WaitForChild("RequestBaseUpgrade", 10)
+local rebirthRemote = Events:WaitForChild("RequestRebirth", 10)
 
 local ItemConfig = require(ReplicatedStorage.Modules.ItemConfigurations)
 local UpgradesConfig = require(ReplicatedStorage.Configs.UpgradesConfig)
@@ -1532,6 +1532,11 @@ freeCard:Button("Open blocks now", function()
 end)
 
 local readout = infoPage:Card("LIVE", 0):Readout(20)
+
+-- Der Home-Tab: das GitHub-Commit-Log als Changelog plus der aktuelle Lauf.
+-- Zuletzt deklariert, aber das Template schiebt ihn an den Anfang der Leiste -
+-- er ist immer das erste Icon und die Seite, auf der das Panel aufgeht.
+pcall(function() win:Home() end)
 
 win:Refresh()
 

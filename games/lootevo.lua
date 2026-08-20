@@ -110,13 +110,13 @@ local generation = _G.__LOOTEVO
 if _G.__LOOTEVO_GUI then pcall(function() _G.__LOOTEVO_GUI:Destroy() end) end
 if _G.__LOOTEVO_PAD then pcall(function() _G.__LOOTEVO_PAD:Destroy() end) end
 
-local Remotes = ReplicatedStorage:WaitForChild("Remotes")
-local snapshotRemote = Remotes:WaitForChild("GetPlayerDataSnapshot")
-local backpackRemote = Remotes:WaitForChild("BackPackActionEvent")
-local rebirthRemote = Remotes:WaitForChild("RebirthRequest")
-local buyEggRemote = Remotes:WaitForChild("BuyEggEvent")
+local Remotes = ReplicatedStorage:WaitForChild("Remotes", 10)
+local snapshotRemote = Remotes:WaitForChild("GetPlayerDataSnapshot", 10)
+local backpackRemote = Remotes:WaitForChild("BackPackActionEvent", 10)
+local rebirthRemote = Remotes:WaitForChild("RebirthRequest", 10)
+local buyEggRemote = Remotes:WaitForChild("BuyEggEvent", 10)
 
-local clickRemote = Remotes:WaitForChild("ClickRequest")
+local clickRemote = Remotes:WaitForChild("ClickRequest", 10)
 
 local weaponCfg = require(ReplicatedStorage.Config.WeaponConfig)
 local eggHelper = require(ReplicatedStorage.Config.EggHelper)
@@ -1813,6 +1813,11 @@ toolCard:Button("Rescan controllers", function()
 	scanControllers()
 	STATE.note = "controllers rescanned"
 end)
+
+-- Der Home-Tab: das GitHub-Commit-Log als Changelog plus der aktuelle Lauf.
+-- Zuletzt deklariert, aber das Template schiebt ihn an den Anfang der Leiste -
+-- er ist immer das erste Icon und die Seite, auf der das Panel aufgeht.
+pcall(function() win:Home() end)
 
 win:Refresh()
 
