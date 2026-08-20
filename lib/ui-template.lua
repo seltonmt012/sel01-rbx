@@ -489,6 +489,42 @@ function UI.scaleFor(width, height)
 	return math.max(s, 0.3)
 end
 
+-- SMALL TEXT IS THE FIRST THING THAT BREAKS WHEN THE PANEL IS SCALED DOWN, and
+-- it broke on a real phone: the 10px hint under a toggle caption, scaled by
+-- 0.54, asks Roblox for a five-pixel Gotham and gets an unreadable smear. The
+-- panel scale itself is right - only the type is too small to rasterise.
+--
+-- So every small label asks for its size through UI.small(), which puts a FLOOR
+-- under it: whatever is requested, what finally renders never falls below a few
+-- real pixels. The layout absorbs the bigger type because the rows and the page
+-- size themselves; only the read-out box has to do its own arithmetic.
+UI.MIN_TEXT_PX = 8
+
+function UI.small(size, minPx)
+	if UI.device ~= "mobile" then return size end
+	local s = UI.scaleFor(820, 582)
+	if s >= 1 then return size end
+	return math.max(size, math.ceil((minPx or UI.MIN_TEXT_PX) / s))
+end
+
+-- The device is answered AFTER the window is built (the panel waits hidden
+-- behind the card), so the sizes chosen during the build can be the wrong ones -
+-- and a user who overrides a wrong detection would otherwise be left with phone
+-- scale and desktop type. Each site registers how to redo its own sizing, keyed
+-- weakly by the instance so a destroyed panel drops out by itself.
+local smallText = setmetatable({}, { __mode = "k" })
+
+function UI.onSmall(anchor, fn)
+	smallText[anchor] = fn
+	pcall(fn)
+end
+
+function UI.refreshSmall()
+	for anchor, fn in pairs(smallText) do
+		if anchor and anchor.Parent then pcall(fn) end
+	end
+end
+
 -- Live windows register a rescale hook, so switching the device moves every open
 -- panel at once - exactly like the language switch does.
 local liveScales = setmetatable({}, { __mode = "k" })
@@ -502,6 +538,7 @@ function UI.setDevice(code, remember)
 		_G.__SEL_DEVICE_ASKED = true
 		pcall(function() writefile(DEVICE_FILE, code) end)
 	end
+	UI.refreshSmall()
 	for window in pairs(liveScales) do
 		pcall(function() window.applyScale() end)
 	end
@@ -1198,8 +1235,14 @@ function UI.Window(options)
 		capt.TextXAlignment = Enum.TextXAlignment.Right
 		capt.ZIndex = 4
 		stats[i] = { value = value, caption = capt }
+		UI.onSmall(capt, function()
+			capt.TextSize = UI.small(10, 8)
+		end)
 	end
 	window.stats = stats
+	UI.onSmall(stripSub, function()
+		stripSub.TextSize = UI.small(11, 9)
+	end)
 
 	----------------------------------------------------------------- pages
 	local body = frame(content, UDim2.new(1, 0, 1, -38 - 52 - 50 - 22), UDim2.fromOffset(0, 90),
@@ -1247,6 +1290,9 @@ function UI.Window(options)
 	dPillText.Size = UDim2.fromScale(1, 1)
 	dPillText.TextXAlignment = Enum.TextXAlignment.Center
 	dPillText.ZIndex = 4
+	UI.onSmall(dSub, function()
+		dSub.TextSize = UI.small(10, 8)
+	end)
 
 	discord.MouseEnter:Connect(function()
 		tween(discord, EASE.soft, { BackgroundColor3 = UI.theme.accentAlt })
@@ -1278,6 +1324,9 @@ function UI.Window(options)
 	footText.TextXAlignment = Enum.TextXAlignment.Center
 	footText.ZIndex = 3
 	window.footText = footText
+	UI.onSmall(footText, function()
+		footText.TextSize = UI.small(10, 8)
+	end)
 
 	----------------------------------------------------------------- state
 	window.pages = {}
@@ -1629,6 +1678,10 @@ function UI.Window(options)
 			countLabel.ZIndex = 4
 			hairline(band, 0, UI.theme.band).Position = UDim2.new(0, 0, 1, -1)
 			card.band, card.bandIcon, card.countLabel = band, bandIcon, countLabel
+			UI.onSmall(bandText, function()
+				bandText.TextSize = UI.small(11, 9)
+				countLabel.TextSize = UI.small(10, 8)
+			end)
 
 			local rows = frame(inner, UDim2.new(1, 0, 0, 0), nil, UI.theme.card, 1)
 			rows.AutomaticSize = Enum.AutomaticSize.Y
@@ -1700,6 +1753,20 @@ function UI.Window(options)
 					hintLabel.TextYAlignment = Enum.TextYAlignment.Top
 					hintLabel.ZIndex = 4
 				end
+
+				-- The caption line and the hint under it, re-derived whenever the
+				-- device changes. The caption's height and the hint's offset are
+				-- computed from the caption size rather than hardcoded at 14 and 17,
+				-- or a floored caption would print straight through its own hint.
+				UI.onSmall(title, function()
+					local cap = UI.small(12, 10)
+					title.TextSize = cap
+					title.Size = UDim2.new(1, -(controlWidth or 40), 0, cap + 2)
+					if hintLabel then
+						hintLabel.TextSize = UI.small(10, 8)
+						hintLabel.Position = UDim2.fromOffset(0, cap + 5)
+					end
+				end)
 
 				-- The hover/click surface is a TextButton behind the labels, not the
 				-- row Frame: a Frame has no MouseEnter at all and assigning one
@@ -2091,7 +2158,8 @@ function UI.Window(options)
 
 			---------------------------------------------------------- Readout
 			function card:Readout(lines, colourFor)
-				local height2 = (lines or 10) * 13 + 16
+				local count = lines or 10
+				local height2 = count * 13 + 16
 				local r = row(nil, nil, 0)
 				r.title:Destroy()
 				r.inner.Size = UDim2.new(1, -22, 0, height2)
@@ -2107,13 +2175,28 @@ function UI.Window(options)
 				listLayout(holder, 1)
 
 				local rowLabels = {}
-				for i = 1, (lines or 10) do
+				for i = 1, count do
 					local l = label(holder, "", 11, UI.font.mono, UI.theme.muted)
 					l.Size = UDim2.new(1, 0, 0, 12)
 					l.LayoutOrder = i
 					l.ZIndex = 7
 					rowLabels[i] = l
 				end
+
+				-- The read-out is the ONE place with a fixed height, so a floored
+				-- font has to grow the box with it - left at 13 per line the last
+				-- lines would simply be cut off inside the frame.
+				UI.onSmall(box, function()
+					local fs = UI.small(11, 8)
+					local lh = fs + 1
+					local h = count * (lh + 1) + 16
+					for _, l in ipairs(rowLabels) do
+						l.TextSize = fs
+						l.Size = UDim2.new(1, 0, 0, lh)
+					end
+					box.Size = UDim2.new(1, 0, 0, h)
+					r.inner.Size = UDim2.new(1, -22, 0, h)
+				end)
 
 				return {
 					-- Called as out:set(lines) by every script, so the table arrives
