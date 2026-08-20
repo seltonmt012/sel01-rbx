@@ -296,11 +296,36 @@ end
 -- stage's zone - so once the body was parked in a training area to farm the
 -- click multiplier, every stage but the one it had visited looked unfinished and
 -- the script re-mined stage 2 forever while StagesUnlocked already read 14.
+--
+-- StagesUnlocked IS NOT A DONE LIST. Measured 2026-08-20 on a fresh account:
+-- StagesUnlocked read {1, 2} while StageClient.BrokenWalls showed all three
+-- walls of stage 1 AND stage 2 still standing (every entry false). Treating it
+-- as "done" made the script skip both, jump to stage 3, hammer HitWall 22 times
+-- against a stage the server will not accept, and then announce "walls are
+-- throttled, rejoin the server" - a diagnosis that sent the user to restart
+-- while the real answer was "you have not broken stage 1 yet". It also went on
+-- to collect loot from a stage it had never opened, which the game answers with
+-- "Complete Stage N First!".
+--
+-- It is also a plain ARRAY, so `unlocked[2]` only looked like a set lookup
+-- because index happened to equal value.
+--
+-- The honest signal is the wall record: a stage is done when every wall in it is
+-- marked broken. BrokenWalls only fills from BreakWall events and those only
+-- arrive while the character is in that stage's zone, so an EMPTY record means
+-- "not known to be done" - which is the safe answer, because working a stage
+-- that is already clear costs one dwell window while skipping one that is not
+-- costs the whole run.
 local function stageDone(stageNum)
-	local unlocked = data().StagesUnlocked or {}
-	if unlocked[stageNum] or unlocked[tostring(stageNum)] then return true end
-	local ok, wall = pcall(StageClient.GetNextWall, StageClient, stageNum)
-	return ok and wall == nil
+	local broken = StageClient.BrokenWalls
+	local record = broken and (broken[stageNum] or broken[tostring(stageNum)])
+	if type(record) ~= "table" then return false end
+	local walls, down = 0, 0
+	for _, isBroken in pairs(record) do
+		walls = walls + 1
+		if isBroken then down = down + 1 end
+	end
+	return walls > 0 and down >= walls
 end
 
 local function freeLoot()
@@ -811,8 +836,23 @@ local function think()
 		STATE.mode = "wait"
 		STATE.targetName = "stage " .. stageNum .. " took no hits"
 		if STATE.deadSwings >= 3 then
-			STATE.blocked = "HitWall refused " .. STATE.deadSwings ..
-				"x on stage " .. stageNum .. " - rejoin the server, walls are throttled"
+			-- NAME THE ORDINARY CAUSE FIRST. "The server is throttling, rejoin"
+			-- used to be the only explanation offered, and on a fresh account it
+			-- was simply wrong: stage 3 was not unlocked, the refusal was
+			-- correct, and the user was sent to restart for nothing. A wrong
+			-- diagnosis costs more than no diagnosis. Throttling is real - it
+			-- happened after ~490 walls - but it is the LAST thing to claim.
+			local reach = maxUnlockedStage()
+			if stageNum > reach + 1 then
+				STATE.blocked = "stage " .. stageNum .. " is not unlocked (reached "
+					.. reach .. ") - break the walls in stage " .. (reach + 1) .. " first"
+			elseif (data().Strength or 0) <= 0 then
+				STATE.blocked = "no strength yet - train before mining"
+			else
+				STATE.blocked = "HitWall refused " .. STATE.deadSwings .. "x on stage "
+					.. stageNum .. ". If the stages below still have walls, work those; "
+					.. "if not, the server has stopped accepting hits - rejoin."
+			end
 		end
 	end
 
