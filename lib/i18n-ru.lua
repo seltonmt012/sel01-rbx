@@ -8,7 +8,7 @@
 -- they are - they keep passing "Auto rebirth" and only this file decides what
 -- the player reads.
 --
--- 693 entries.
+-- 697 entries.
 
 return {
 	["%d Min"] = "%d мин",
@@ -31,8 +31,10 @@ return {
 	["64 steps, Cockroach x1 to Pteranodon x1550, level + wins"] = "64 ступени, Cockroach x1 до Pteranodon x1550, уровень + победы",
 	["7.99 cash, only after the bag ladder is done"] = "7.99 денег, только после лестницы рюкзаков",
 	["ACCOUNT"] = "АККАУНТ",
+	["AN"] = "ВКЛ",
 	["AURA LADDER"] = "ЛЕСТНИЦА АУР",
 	["AURAS"] = "АУРЫ",
+	["AUS"] = "ВЫКЛ",
 	["AUTO"] = "АВТО",
 	["AUTO FARM"] = "АВТО ФАРМ",
 	["Accuracy"] = "Точность",
@@ -43,6 +45,7 @@ return {
 	["Anti-AFK"] = "Анти-АФК",
 	["Aura rolls"] = "Роллы аур",
 	["Auras"] = "Ауры",
+	["Aus: das Panel kommt nur in dem Spiel, in dem du den Loader ausfuehrst."] = "Выкл: панель появляется только в той игре, где вы запускаете загрузчик.",
 	["Auto"] = "Авто",
 	["Auto (best)"] = "Авто (лучшее)",
 	["Auto Farm laeuft"] = "Авто фарм работает",
@@ -88,6 +91,7 @@ return {
 	["Auto upgrades"] = "Авто улучшения",
 	["Auto walls"] = "Авто стены",
 	["Auto world"] = "Авто мир",
+	["Auto-Start in neuen Spielen"] = "Автозапуск в новых играх",
 	["AutoTrain on the best stone; power is what a rebirth costs"] = "AutoTrain на лучшем камне; сила - это цена ребёрна",
 	["BASE"] = "БАЗА",
 	["BEST BY OUTPUT PER PRICE"] = "ЛУЧШЕЕ ПО ОТДАЧЕ НА ЦЕНУ",

@@ -8,7 +8,7 @@
 -- they are - they keep passing "Auto rebirth" and only this file decides what
 -- the player reads.
 --
--- 693 entries.
+-- 697 entries.
 
 return {
 	["%d Min"] = "%d min",
@@ -16,8 +16,12 @@ return {
 	["%d Tage"] = "%d days",
 	["%s / %s an"] = "%s / %s on",
 	["%s aktiv"] = "%s active",
+	["AN"] = "ON",
+	["AUS"] = "OFF",
 	["Angekommen. Nummer #%s - die kannst du im Support-Forum nennen."] = "Arrived. Number #%s - quote it in the support forum.",
+	["Aus: das Panel kommt nur in dem Spiel, in dem du den Loader ausfuehrst."] = "Off: the panel only comes up in the game you run the loader in.",
 	["Auto Farm laeuft"] = "Auto farm running",
+	["Auto-Start in neuen Spielen"] = "Auto-start in new games",
 	["Bereit"] = "Ready",
 	["Codes, Updates & Support"] = "Codes, updates & support",
 	["DISCORD BEITRETEN"] = "JOIN THE DISCORD",

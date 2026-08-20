@@ -545,6 +545,52 @@ function UI.setDevice(code, remember)
 	return true
 end
 
+--------------------------------------------------------------------------------
+-- auto-start in new games
+--------------------------------------------------------------------------------
+--
+-- hub/loader.lua queues ITSELF with queue_on_teleport and re-arms on every run,
+-- and the Roblox app keeps one client process across game joins - so before this
+-- switch existed, running the loader line once meant a panel came up in every
+-- game joined afterwards, forever. Measured, not assumed: a queued marker set in
+-- one game was still there after leaving and joining an unrelated one.
+--
+-- The file is the whole contract with the loader, which reads it by itself and
+-- has no settings UI of its own. Missing file = OFF, so the repo ships nothing
+-- and nobody inherits the chain without asking for it.
+local AUTOLOAD_FILE = "selux-autoload.txt"
+UI.AUTOLOAD_FILE = AUTOLOAD_FILE
+
+-- Read on every call rather than cached at load: the loader writes the same file
+-- from the other side, and a panel built an hour later must not show a stale
+-- switch.
+-- FAIL CLOSED, exactly like the loader's copy: file missing, file empty, file
+-- holding junk, no isfile/readfile at all, or either of them throwing - every
+-- one of those answers false. Only the three strings below are a yes, so the
+-- switch can never read as ON because something went wrong.
+function UI.getAutoload()
+	local ok, on = pcall(function()
+		if not (isfile and readfile and isfile(AUTOLOAD_FILE)) then return false end
+		local saved = readfile(AUTOLOAD_FILE)
+		if type(saved) ~= "string" then return false end
+		saved = string.lower((string.gsub(saved, "%s", "")))
+		return saved == "1" or saved == "on" or saved == "true"
+	end)
+	return ok and on == true
+end
+
+function UI.setAutoload(on)
+	on = on and true or false
+	UI.autoload = on
+	pcall(function() writefile(AUTOLOAD_FILE, on and "1" or "0") end)
+	-- The loader keeps its own copy in the handle; keep them in step so a script
+	-- reading _G.__SEL.autoStart does not disagree with the switch on screen.
+	if _G.__SEL then _G.__SEL.autoStart = on end
+	return on
+end
+
+UI.autoload = UI.getAutoload()
+
 -- The flag itself: the repo copy for everybody, the workspace copy while
 -- developing, and the two letters when neither is reachable. A panel must never
 -- lose its language switch because an image did not load.
@@ -758,7 +804,10 @@ end
 function UI.askDevice(onDone)
 	if UI.deviceGui and UI.deviceGui.Parent then return UI.deviceGui end
 
-	local W, H = 300, 186
+	-- 300x264 rather than 300x186: the auto-start switch shares this card. The
+	-- mark in the rail is the only control every panel has in the same place, so
+	-- a second popup for one boolean would only be a second thing to find.
+	local W, H = 300, 264
 	local gui = Instance.new("ScreenGui")
 	gui.Name = "SeluxDevice"
 	gui.ResetOnSpawn = false
@@ -842,6 +891,57 @@ function UI.askDevice(onDone)
 		end)
 	end
 	paint()
+
+	----------------------------------------------------------------- auto-start
+	hairline(card, 16, UI.theme.band).Position = UDim2.fromOffset(16, 150)
+
+	local autoCap = label(card, "Auto-Start in neuen Spielen", 12, UI.font.heading, UI.theme.text)
+	autoCap.Position = UDim2.fromOffset(16, 160)
+	autoCap.Size = UDim2.fromOffset(184, 16)
+
+	local autoHint = label(card, "Aus: das Panel kommt nur in dem Spiel, in dem du den Loader ausfuehrst.",
+		10, UI.font.body, UI.theme.muted)
+	autoHint.Position = UDim2.fromOffset(16, 180)
+	autoHint.Size = UDim2.new(1, -32, 0, 40)
+	autoHint.TextWrapped = true
+	autoHint.TextYAlignment = Enum.TextYAlignment.Top
+
+	-- 68x30, same reasoning as the device buttons above: this card exists for
+	-- phones, so nothing on it may be smaller than a fingertip.
+	local autoBtn = Instance.new("TextButton")
+	autoBtn.Size = UDim2.fromOffset(68, 30)
+	autoBtn.Position = UDim2.fromOffset(W - 84, 154)
+	autoBtn.BackgroundColor3 = UI.theme.input
+	autoBtn.BorderSizePixel = 0
+	autoBtn.Text = ""
+	autoBtn.AutoButtonColor = false
+	autoBtn.Parent = card
+	corner(autoBtn, 9)
+	local autoText = label(autoBtn, "AUS", 13, UI.font.heading, UI.theme.textSoft)
+	autoText.Size = UDim2.fromScale(1, 1)
+	autoText.TextXAlignment = Enum.TextXAlignment.Center
+
+	-- Read from disk rather than from UI.autoload: the loader writes the same
+	-- file, so the card must show what is actually on disk right now.
+	local autoOn = UI.getAutoload()
+	local function paintAuto()
+		setText(autoText, autoOn and "AN" or "AUS")
+		tween(autoBtn, EASE.quick, {
+			BackgroundColor3 = autoOn and UI.theme.good or UI.theme.input,
+			BackgroundTransparency = autoOn and 0 or 0.25,
+		})
+		tween(autoText, EASE.quick, {
+			TextColor3 = autoOn and UI.theme.window or UI.theme.textSoft,
+		})
+	end
+	paintAuto()
+
+	autoBtn.MouseButton1Click:Connect(function()
+		autoOn = not autoOn
+		UI.setAutoload(autoOn)
+		paintAuto()
+	end)
+
 	return gui
 end
 
