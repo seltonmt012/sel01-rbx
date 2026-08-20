@@ -50,6 +50,8 @@ local LocalPlayer = Players.LocalPlayer
 local Remotes   = ReplicatedStorage:WaitForChild("Remotes")
 local Modules   = ReplicatedStorage:WaitForChild("Modules")
 local SpinCfg   = require(Modules.Spinjitsu.SpinjitsuConfig)
+local PetConfig = require(Modules.Pets.PetConfig)
+local AuraConfig= require(Modules.Auras.AuraConfig)
 local StageCfg  = require(Modules.Stages.StageConfig)
 local WorldCfg  = require(Modules.World.WorldConfig)
 local RebirthCfg= require(Modules.Rebirth.RebirthConfig)
@@ -67,8 +69,14 @@ local CONFIG = {
     autoRebirth = true,   -- needs a level, costs no currency
     autoWorld   = true,   -- buy and move up when the wins cover it
     autoPets    = true,   -- hatch and keep the best team equipped
+    autoAura    = true,   -- wins-priced auras, x1.5 up to x3.5 on wins
+    autoItems   = true,   -- the restocking item shop, raises ItemJitsuMult
+    itemShare   = 0.5,    -- of the balance per item
     autoRewards = true,   -- codes, playtime, streak, milestones, offline gain
-    wallTimeout = 12,     -- give up on a wall that outgrew the Jitsu
+    wallTimeout = 10,     -- give up on a wall that outgrew the Jitsu
+    stuckWait   = 10,     -- and go shopping before trying it again
+    eggReserve  = 0,      -- wins held back from eggs once the team is full
+    hatchBurst  = 5,      -- hatches per visit to an egg
     hopDelay    = 0.15,
 }
 
@@ -101,8 +109,20 @@ local function wins()     return attr("Wins", 0) end
 local function rebirths() return attr("Rebirths", 0) end
 local function world()    return attr("CurrentWorld", 1) end
 
+-- Half of these live in sub-folders and are written with a dot in the game's own
+-- code ("PetSystem.Hatch", "ItemSystem.Buy"). FindFirstChild does not walk a
+-- path, so looking that name up returns nil and the call silently does nothing -
+-- which is why the character stood on the egg without ever hatching one.
 local function remote(name)
-    return Remotes:FindFirstChild(name, true)
+    local direct = Remotes:FindFirstChild(name, true)
+    if direct then return direct end
+
+    local node = Remotes
+    for segment in tostring(name):gmatch("[^%.]+") do
+        node = node and node:FindFirstChild(segment)
+        if not node then return nil end
+    end
+    return node
 end
 
 local function fire(name, ...)
@@ -137,6 +157,23 @@ local function partOf(instance)
     if not instance then return end
     if instance:IsA("BasePart") then return instance end
     return instance:FindFirstChildWhichIsA("BasePart", true)
+end
+
+-- There is exactly ONE body, so exactly one thing may move it. Without this the
+-- stage loop pins the character to a wall on every Heartbeat while the shop is
+-- trying to stand on an egg, the two writes fight, and the egg never hatches
+-- even though the panel says it is buying one - which is precisely what it
+-- looked like from the outside.
+local MOVE = { owner = nil }
+
+local function withBody(name, fn)
+    local deadline = os.clock() + 20
+    while MOVE.owner and MOVE.owner ~= name and os.clock() < deadline do task.wait(0.2) end
+    MOVE.owner = name
+    local ok, err = pcall(fn)
+    MOVE.owner = nil
+    if not ok then note("%s failed: %s", name, tostring(err)) end
+    return ok
 end
 
 -- Everything here is a Touched event on the server, and the server validates
@@ -208,8 +245,10 @@ local function buyVariant()
     local touch = bestPad:FindFirstChild("TouchPart", true) or partOf(bestPad)
     if not touch then return end
     local before = attr("SpinjitsuVariant", "")
-    holdAt(touch.Position + Vector3.new(0, 3, 0), 4, function()
-        return attr("SpinjitsuVariant", "") ~= before
+    withBody("shop", function()
+        holdAt(touch.Position + Vector3.new(0, 3, 0), 4, function()
+            return attr("SpinjitsuVariant", "") ~= before
+        end)
     end)
     if attr("SpinjitsuVariant", "") == best then
         note("spinjitsu %s (%s jitsu/s)", best, tostring(bestRate))
@@ -270,8 +309,11 @@ local function runStage(stage)
             local part = partOf(wall.model)
             if part then
                 STATE.phase = string.format("wall %d of stage %d", wall.index, stage.number)
-                local broke = holdAt(part.Position, CONFIG.wallTimeout, function()
-                    return wallBroken(wall.model)
+                local broke = false
+                withBody("stage", function()
+                    broke = holdAt(part.Position, CONFIG.wallTimeout, function()
+                        return wallBroken(wall.model)
+                    end)
                 end)
                 if broke then
                     STATE.walls = STATE.walls + 1
@@ -289,11 +331,13 @@ local function runStage(stage)
         task.wait(CONFIG.hopDelay)
     end
 
-    local plate = winPlate(stage.folder)
+    local plate = not CLAIMED[stage.number] and winPlate(stage.folder) or nil
     if plate then
         STATE.phase = "plate of stage " .. stage.number
         local before = wins()
-        holdAt(plate.Position + Vector3.new(0, 3, 0), 4, function() return wins() > before end)
+        withBody("stage", function()
+            holdAt(plate.Position + Vector3.new(0, 3, 0), 4, function() return wins() > before end)
+        end)
         if wins() > before then
             STATE.plates = STATE.plates + 1
             note("stage %d cleared (+%s wins)", stage.number, abbreviate(wins() - before))
@@ -302,7 +346,11 @@ local function runStage(stage)
         end
     end
     CLAIMED[stage.number] = true
-    return true
+    -- Taking a plate ENDS the run: the walls all come back, so whatever stands
+    -- further in cannot be attacked any more this pass.  Carrying on into the
+    -- next stage is what made it look like the script was hammering a wall it
+    -- had already earned - it walks back to stage 1 and works up again instead.
+    return "collected"
 end
 
 ----------------------------------------------------------------------------
@@ -356,10 +404,119 @@ local function freeRewards()
     fire("ClaimOfflineGain")
 end
 
+-- Eggs are priced in wins (`PetConfig.Eggs`): Grass 100, Fire 5,000,000, Storm
+-- 100,000,000,000; everything flagged `Exclusive` or carrying a `ProductId` is
+-- Robux and is skipped.  Hatching is position gated - the body has to be at the
+-- egg model in the world.  The first pass never hatched a single pet because
+-- the variant shop spent the balance down to zero first, so the first few pets
+-- are bought BEFORE any variant (see the shop loop).
+local function eggLadder()
+    local list = {}
+    for name, data in pairs(PetConfig.Eggs or {}) do
+        local cost = data.Cost
+        if cost and cost > 0 and not data.Exclusive and not data.ProductId then
+            list[#list + 1] = { name = name, cost = cost }
+        end
+    end
+    table.sort(list, function(a, b) return a.cost > b.cost end)
+    return list
+end
+
+local function eggModel(name)
+    local folder = worldFolder()
+    local eggs = folder and folder:FindFirstChild("Eggs")
+    if not eggs then return end
+    local direct = eggs:FindFirstChild(name)
+    if direct then return direct end
+    return eggs:GetChildren()[1]
+end
+
+local function hatchEggs()
+    local owned = LocalPlayer:FindFirstChild("Pets")
+    local count = owned and #owned:GetChildren() or 0
+    local budget = wins() - (count < (PetConfig.EquippedLimit or 3) and 0 or CONFIG.eggReserve)
+
+    for _, egg in ipairs(eggLadder()) do
+        if egg.cost <= budget then
+            local model = eggModel(egg.name)
+            local part = model and partOf(model)
+            if part then
+                local before = count
+                -- Hatching is position gated, so the body has to stay on the egg
+                -- for the whole burst - and it only can if the stage loop is not
+                -- pulling it back to a wall at the same time.
+                withBody("eggs", function()
+                    local pin = RunService.Heartbeat:Connect(function()
+                        local body = root()
+                        if body then body.CFrame = CFrame.new(part.Position + Vector3.new(0, 4, 0)) end
+                    end)
+                    task.wait(1.5)
+                    for _ = 1, CONFIG.hatchBurst do
+                        if wins() < egg.cost then break end
+                        fire("PetSystem.Hatch", egg.name)
+                        task.wait(0.6)
+                    end
+                    pin:Disconnect()
+                end)
+                local now = owned and #owned:GetChildren() or 0
+                if now > before then
+                    STATE.hatched = STATE.hatched + (now - before)
+                    note("hatched %d from %s", now - before, egg.name)
+                end
+            end
+            return
+        end
+    end
+end
+
 local function pets()
-    fire("PetSystem.SetAutoHatch", true)
     fire("PetSystem.SetAutoEquip", true)
     fire("PetSystem.EquipBest")
+end
+
+-- The players far ahead of us are not doing anything exotic - they simply have
+-- the multipliers stacked. Read off a level 300 rebirth account in the same
+-- server: PetMultiplier 19,683, AuraWinsMult 3.5, ItemJitsuMult 1.2, against
+-- 1/1/1 here. Pets and auras are the wins-priced half of that (the
+-- JitsuMultiplier / WinsMultiplier tiers in MultiplierConfig carry ProductIds
+-- only, so they are Robux and stay untouched).
+local function buyAura()
+    local best, bestMult
+    for _, aura in pairs(AuraConfig.Auras or {}) do
+        local cost = aura.WinsCost
+        local mult = aura.GainMultiplier or 0
+        if cost and cost <= wins() and mult > (bestMult or attr("AuraWinsMult", 1)) then
+            best, bestMult = aura, mult
+        end
+    end
+    if not best then return end
+    fire("BuyAura", best.Id)
+    task.wait(0.6)
+    fire("EquipAura", best.Id)
+    task.wait(0.4)
+    if attr("AuraWinsMult", 1) >= bestMult then
+        note("aura %s (x%s wins) for %s", tostring(best.Id), tostring(bestMult), abbreviate(best.WinsCost))
+    end
+end
+
+-- The item shop restocks on a timer and its deals raise ItemJitsuMult.
+local function buyItems()
+    local offers = select(1, invoke("ItemSystem.GetShopOffers"))
+    if type(offers) ~= "table" then return end
+    local deals = offers.Deals or offers
+    if type(deals) ~= "table" then return end
+
+    for key, deal in pairs(deals) do
+        if type(deal) == "table" then
+            local cost = deal.Cost or deal.WinsCost or deal.Price
+            local sold = deal.Purchased or deal.Sold
+            if cost and not sold and cost <= wins() * CONFIG.itemShare then
+                fire("ItemSystem.Buy", key)
+                task.wait(0.5)
+            end
+        end
+    end
+    fire("ItemSystem.EquipBest")
 end
 
 ----------------------------------------------------------------------------
@@ -389,7 +546,16 @@ loop("stats", 0.5, function()
 end)
 
 loop("shop", 8, function()
+    -- Pets first while the team is not even full: a Grass Egg is 100 wins and
+    -- the variant shop otherwise takes the balance to zero every single pass,
+    -- which is why the first version owned no pets at all after an hour.
+    local owned = LocalPlayer:FindFirstChild("Pets")
+    local count = owned and #owned:GetChildren() or 0
+    if CONFIG.autoPets and count < (PetConfig.EquippedLimit or 3) then hatchEggs() end
     if CONFIG.autoVariant then buyVariant() end
+    if CONFIG.autoPets and count >= (PetConfig.EquippedLimit or 3) then hatchEggs() end
+    if CONFIG.autoAura    then buyAura() end
+    if CONFIG.autoItems   then buyItems() end
     if CONFIG.autoRebirth then doRebirth() end
     if CONFIG.autoWorld   then climbWorld() end
 end)
@@ -408,19 +574,31 @@ task.spawn(function()
             STATE.phase = "stages off"
             task.wait(1)
         else
+            -- The walls are a CHAIN: only the frontmost standing wall takes
+            -- damage, so a stage further in cannot be started early.  Measured
+            -- after a rebirth, which respawns everything: 5,248 Jitsu against a
+            -- 100 health wall in stage 2 did nothing at all while stage 1 was
+            -- standing again.  So every pass walks the stages in order and
+            -- stops at the first wall that outlasts the timeout.
             local progressed = false
             for _, stage in ipairs(stageFolders()) do
                 if not alive() or not CONFIG.autoStages then break end
-                if not CLAIMED[stage.number] then
-                    progressed = runStage(stage) or progressed
-                    break
-                end
+                local result = runStage(stage)
+                if not result then break end
+                progressed = true
+                if result == "collected" then break end   -- the run reset, start over
             end
             if not progressed then
-                -- everything reachable is broken: sit still and let the Jitsu
-                -- climb until the next wall is affordable
-                STATE.phase = "waiting for jitsu"
-                task.wait(3)
+                -- A wall that outlasts the timeout is not a bug, it is simply
+                -- above the current Jitsu.  Standing in front of it is the worst
+                -- thing to do: go spend what the last stages paid instead - a
+                -- better variant or a pet raises the tick rate, which is the
+                -- only thing that gets through that wall.
+                STATE.phase = "stuck, spending instead"
+                if CONFIG.autoVariant then pcall(buyVariant) end
+                if CONFIG.autoPets    then pcall(hatchEggs) end
+                if CONFIG.autoRebirth then pcall(doRebirth) end
+                task.wait(CONFIG.stuckWait)
             end
         end
     end
@@ -457,7 +635,11 @@ spend:Toggle("Rebirth", CONFIG.autoRebirth, function(v) CONFIG.autoRebirth = v e
 spend:Toggle("Buy worlds", CONFIG.autoWorld, function(v) CONFIG.autoWorld = v end,
     "world 2 costs 1M wins, world 3 costs 240B")
 spend:Toggle("Pets", CONFIG.autoPets, function(v) CONFIG.autoPets = v end,
-    "auto hatch, auto equip and equip best")
+    "hatches the wins-priced eggs; pets multiply and are the biggest lever")
+spend:Toggle("Auras", CONFIG.autoAura, function(v) CONFIG.autoAura = v end,
+    "Natura 50K up to Galaxy 5T, x1.5 to x3.5 on every win")
+spend:Toggle("Item shop", CONFIG.autoItems, function(v) CONFIG.autoItems = v end,
+    "buys the restocking deals and equips the best")
 spend:Toggle("Free rewards", CONFIG.autoRewards, function(v) CONFIG.autoRewards = v end,
     "codes, playtime, streak, milestones, gifts, offline gain")
 
@@ -488,6 +670,8 @@ _G.__SPINJITSU_DBG = {
     buyVariant = buyVariant, runStage = runStage, stageFolders = stageFolders,
     CLAIMED = CLAIMED, winPlate = winPlate,
     doRebirth = doRebirth, climbWorld = climbWorld, freeRewards = freeRewards,
+    hatchEggs = hatchEggs, eggLadder = eggLadder, buyAura = buyAura, buyItems = buyItems,
+    MOVE = MOVE, withBody = withBody,
     levelNow = levelNow, currentPerSecond = currentPerSecond, holdAt = holdAt,
 }
 

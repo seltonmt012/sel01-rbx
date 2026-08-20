@@ -84,7 +84,11 @@ local CONFIG = {
 	mogSeconds = 45,        -- hard cap; mogging stops early once the gear is funded
 	contestSeconds = 10,    -- give up on one contest after this long
 	rebirthUntil = 0,       -- 0 = no limit
-	rebirthGap = 0.3,       -- the server lands 2-4 a second; faster is dropped
+	rebirthGap = 0.3,       -- fallback hand-firing; the server lands 2-4 a second
+	autoRebirth = true,     -- the panel's AUTO toggle: faster, free, and bulk-aware
+	-- when the next rebirth costs more than this many times the whole balance, the
+	-- curve has hit an anchor and the farm switches to raising looks-per-click
+	stallFactor = 50,
 	-- while a rebirth still lands inside this many seconds, stay on the trainer and
 	-- keep rebirthing; once one takes longer, bank the looks and go mog instead
 	fastRebirthSeconds = 2,
@@ -110,7 +114,8 @@ local STATE = {
 	npc = "-", npcPays = 0, mogs = 0,
 	rebirthNeed = 0, pets = 0, petsEquipped = 0, petMul = 0, aura = "-", auraMul = 0,
 	worldNeed = 0, mogNeed = 0, holding = false, mogHoldStart = nil, pushWorld = false,
-	rebirthPace = 0, lastRebirthAt = nil,
+	rebirthPace = 0, lastRebirthAt = nil, rebirthBulk = 0, autoRebirth = false,
+	tokensClaimed = 0,
 	busy = false, bodyOwner = nil,
 }
 
@@ -258,6 +263,8 @@ local function refresh()
 	STATE.trainer = plr:GetAttribute("CurrentTrainer")
 	if STATE.trainer == nil or STATE.trainer == "" then STATE.trainer = "-" end
 	STATE.world = plr:GetAttribute("CurrentWorld") or 1
+	STATE.rebirthBulk = tonumber(plr:GetAttribute("TokenUpgrade_Rebirth")) or 0
+	STATE.autoRebirth = plr:GetAttribute("AutoRebirth") == true
 	local worn = plr:GetAttribute("EquippedAura")
 	if type(worn) == "string" and worn ~= "" then
 		STATE.aura = worn
@@ -638,9 +645,29 @@ local function rebirthNeed()
 	return ok and tonumber(need) or nil
 end
 
+-- The rebirth curve has ANCHORS, and they are cliffs rather than slopes:
+-- `RequirementAnchors` pins 5,000 rebirths to 1e38 looks, 100,000 to 1e45 and
+-- 1,000,000 to 1e53. Measured at the first one: rebirth 4,999 cost 12.43 T and
+-- rebirth 5,000 cost 1e38 - twenty-six orders of magnitude in a single step, so
+-- the counter simply stops dead there.
+--
+-- That is not a failure state, it is the game saying "go get looks-per-click".
+-- While it holds, hand-firing rebirths and running the server's AUTO are both
+-- pointless, and the whole balance is better spent on the world walls, the gear
+-- ladder and the permanent multipliers - all of which raise the click value that
+-- eventually clears the anchor.
+local function rebirthStalled()
+	local need = rebirthNeed()
+	if not need then return false end
+	return STATE.looks * CONFIG.stallFactor < need
+end
+
 local function spendableLooks()
 	local need = rebirthNeed()
 	if not need then return STATE.looks end
+	-- behind an anchor the balance is not going into a rebirth any time soon, so
+	-- reserving against it would only freeze the permanent multipliers
+	if rebirthStalled() then return STATE.looks end
 	return math.max(0, STATE.looks - need * CONFIG.rebirthReserve)
 end
 
@@ -659,6 +686,18 @@ local function canSpendLooks(cost)
 	return need ~= nil and cost <= need * CONFIG.cheapShare
 end
 
+-- The panel's own AUTO toggle rebirths server-side and it is both free and faster
+-- than anything we can fire: 5.25 a second against 2-4 by hand, and each tick
+-- grants `1 + TokenUpgrade_Rebirth`, so at bulk 13 it measured 37.8 a second.
+-- It has to be switched OFF while banking, though - the server does not know about
+-- our holds and would wipe a world bank the instant it filled.
+local function setAutoRebirth(on)
+	if (plr:GetAttribute("AutoRebirth") == true) == (on == true) then return end
+	fire("AutoRebirth", true, on and true or false)
+	task.wait(0.3)
+	STATE.autoRebirth = plr:GetAttribute("AutoRebirth") == true
+end
+
 local function rebirthPass()
 	if CONFIG.rebirthUntil > 0 and STATE.rebirths >= CONFIG.rebirthUntil then return end
 	-- A rebirth zeroes the WINS, so wait while a rung is affordable but unbought:
@@ -675,6 +714,15 @@ local function rebirthPass()
 	local need = rebirthNeed()
 	STATE.rebirthNeed = need or 0
 
+	-- anchor reached: stop trying, switch the farm to raising the click value
+	if rebirthStalled() then
+		STATE.holding = "anchor"
+		STATE.stalled = true
+		if CONFIG.autoRebirth then setAutoRebirth(false) end
+		return
+	end
+	STATE.stalled = false
+
 	-- Everything else is one question: would rebirthing leave too few LOOKS for
 	-- whatever they are being saved for? Only then is it worth holding.
 	--
@@ -686,6 +734,7 @@ local function rebirthPass()
 	-- Never rebirth mid-contest: the mog is what the looks were banked FOR.
 	if plr:GetAttribute("InContest") then
 		STATE.holding = "contest"
+		if CONFIG.autoRebirth then setAutoRebirth(false) end
 		return
 	end
 
@@ -694,6 +743,7 @@ local function rebirthPass()
 	-- rebirth eat 60.35 Qa one tick after it crossed the 60 Qa wall.
 	if pushingForWorld and pushingForWorld() then
 		STATE.holding = "world"
+		if CONFIG.autoRebirth then setAutoRebirth(false) end
 		return
 	end
 
@@ -715,12 +765,21 @@ local function rebirthPass()
 		-- a wall-clock cap so a stuck mog can never freeze the rebirths for good
 		if reason == "world" or os.clock() - STATE.mogHoldStart < CONFIG.mogBankSeconds then
 			STATE.holding = reason
+			if CONFIG.autoRebirth then setAutoRebirth(false) end
 			return
 		end
 	else
 		STATE.mogHoldStart = nil
 	end
 	STATE.holding = false
+
+	-- nothing to save for: hand it to the server's own AUTO, which is faster than
+	-- this loop and grants the full bulk on every tick
+	if CONFIG.autoRebirth then
+		setAutoRebirth(true)
+		STATE.rebirthBulk = tonumber(plr:GetAttribute("TokenUpgrade_Rebirth")) or 0
+		return
+	end
 
 	if need and STATE.looks < need then return end
 	local before = STATE.rebirths
@@ -942,24 +1001,53 @@ local function boostPass()
 	end
 end
 
--- FameTokens arrive three per rebirth. Rebirth (500) is the cheapest and feeds
--- straight back into the thing that produces tokens, so it goes first.
+-- THIS is how a player ends up with hundreds of thousands of rebirths, and it is
+-- not clicking:
+--
+--  * `ClaimRebirthTokens:Fire(true, n)` is a FREE claim, not a trade. Claiming 167
+--    paid 501 FameTokens and the rebirth count did not move at all - it only
+--    raised `ClaimedRebirthTokens`, a high-water mark. What is claimable is
+--    therefore `Rebirths - ClaimedRebirthTokens`, at TokensPerRebirth = 3.
+--    (An earlier note in this file called it a trade and refused to fire it. That
+--    was wrong and it cost the whole mechanism.)
+--  * `BuyTokenUpgrade(true, "Rebirth")` costs a FLAT 500 tokens - PriceMultiplier
+--    is 1, so it never gets more expensive - is unlimited, and adds
+--    `BulkPerLevel` = 1 rebirth to EVERY future press. Verified: at level 1 a
+--    single Rebirth call granted 2.
+--
+-- So 167 rebirths of claim buys +1 per press, forever, and that compounds into
+-- itself. It outranks every other token sink by a distance, hence the order.
 local TOKEN_ORDER = { "Rebirth", "Aura", "Luck", "Pet" }
 
 local function tokenPass()
 	local cfg = conf("TokenUpgradesConfig")
 	if not cfg then return end
+
+	-- claim everything outstanding first; it is free
+	local claimed = tonumber(plr:GetAttribute("ClaimedRebirthTokens")) or 0
+	local claimable = math.floor((STATE.rebirths or 0) - claimed)
+	if claimable >= 1 then
+		fire("ClaimRebirthTokens", true, claimable)
+		task.wait(0.5)
+		refresh()
+		STATE.tokensClaimed = (STATE.tokensClaimed or 0) + claimable
+	end
+
 	for _, id in ipairs(TOKEN_ORDER) do
 		local entry = cfg[id]
 		local price = entry and tonumber(entry.BasePrice)
-		local level = plr:GetAttribute("TokenUpgrade_" .. id) or 0
 		local max = entry and tonumber(entry.MaxBuyable) or -1
-		if price and STATE.tokens >= price and (max < 0 or level < max) then
+		-- the Rebirth rung never changes price, so empty the wallet into it
+		for _ = 1, (id == "Rebirth" and 20 or 1) do
+			local level = tonumber(plr:GetAttribute("TokenUpgrade_" .. id)) or 0
+			if not (price and STATE.tokens >= price and (max < 0 or level < max)) then break end
 			fire("BuyTokenUpgrade", true, id)
-			task.wait(0.6)
+			task.wait(0.5)
 			refresh()
-			note("token upgrade " .. id)
-			return
+			local now = tonumber(plr:GetAttribute("TokenUpgrade_" .. id)) or 0
+			if now <= level then break end
+			STATE.rebirthBulk = tonumber(plr:GetAttribute("TokenUpgrade_Rebirth")) or 0
+			note(string.format("token upgrade %s -> %d", id, now))
 		end
 	end
 end
@@ -1091,7 +1179,12 @@ spend:Toggle("Pets", CONFIG.pets, function(v) CONFIG.pets = v end,
 spend:Toggle("Boosts", CONFIG.boosts, function(v) CONFIG.boosts = v end,
 	"uses anything sitting in the boost inventory")
 spend:Toggle("Token upgrades", CONFIG.tokens, function(v) CONFIG.tokens = v end,
-	"spends tokens you already hold; it never TRADES rebirths for them", UI.theme.good)
+	"claims tokens (free) and buys Rebirth +1: flat 500, unlimited, compounding",
+	UI.theme.good)
+spend:Toggle("Server auto rebirth", CONFIG.autoRebirth, function(v)
+	CONFIG.autoRebirth = v
+end, "the panel's AUTO: 5/s against 2-4 by hand, and it grants the full bulk",
+	UI.theme.good)
 spend:Stepper("Rebirth until", function()
 	return CONFIG.rebirthUntil == 0 and "no limit" or short(CONFIG.rebirthUntil)
 end, function(dir)
@@ -1125,9 +1218,12 @@ task.spawn(function()
 			"  gear      " .. tostring(STATE.gear),
 			"  trainer   " .. tostring(STATE.trainer) .. "   x" .. tostring(STATE.trainerMul),
 			"  world     " .. tostring(STATE.world) .. "   " .. tostring(STATE.zone),
-			"  rebirth   " .. string.format("%.1fs pace", STATE.rebirthPace)
-				.. "   wall " .. short(STATE.rebirthNeed),
-			"  holding   " .. (STATE.holding == "world"
+			"  rebirth   " .. (STATE.autoRebirth and "AUTO" or string.format("%.1fs", STATE.rebirthPace))
+				.. " x" .. (1 + (STATE.rebirthBulk or 0)) .. "   wall " .. short(STATE.rebirthNeed),
+			"  tokens    " .. short(STATE.tokens) .. "   claimed " .. short(STATE.tokensClaimed),
+			"  holding   " .. (STATE.holding == "anchor"
+					and ("ANCHOR - need " .. short(STATE.rebirthNeed) .. " looks")
+				or STATE.holding == "world"
 					and ("world " .. tostring((STATE.world or 1) + 1) .. " -> " .. short(STATE.worldNeed))
 				or STATE.holding == "mog" and ("mog -> " .. short(STATE.mogNeed))
 				or STATE.holding == "gear" and "gear (wins banked)"
@@ -1171,6 +1267,7 @@ _G.__LOOKSCLICK_DBG = {
 	nextGear = nextGear, nextRung = nextRung, gearLadder = gearLadder,
 	worldNeed = worldNeed, pushingForWorld = pushingForWorld,
 	rebirthNeed = rebirthNeed, spendableLooks = spendableLooks, canSpendLooks = canSpendLooks,
+	rebirthStalled = rebirthStalled, setAutoRebirth = setAutoRebirth,
 	askInventory = askInventory, petPass = petPass, eggPass = eggPass,
 	auraPass = auraPass, boostPass = boostPass, tokenPass = tokenPass,
 	freePass = freePass, spendPass = spendPass, cyclePass = cyclePass,

@@ -66,11 +66,14 @@ local CONFIG = {
     autoSpeed      = true,   -- pull / throw / roll speed ladders
     autoRod        = true,   -- buy + equip the best affordable rod
     autoTool       = true,   -- buy + equip the best affordable training tool
+    autoEquipBest  = true,   -- buy + use the game's own best-fish placer
     autoFreebies   = true,   -- free gift, daily login, offline money
     autoRebirth    = false,  -- opt in
 
-    trainRate      = 5,      -- calls per second, matches the real client
+    trainRate      = 8,      -- Train calls per second while holding the dumbbell
+    trainSeconds   = 20,     -- training window before each cast (0 = never)
     keepMoney      = 0,
+    keepBestFish   = 5,      -- surplus below this rank is sold
 }
 
 -- -------------------------------------------------------------------- state
@@ -166,6 +169,56 @@ local function unstuck()
     note("unstuck")
 end
 
+-- ----------------------------------------------------------------- training
+-- Strength IS the throw power, and throw power is cast distance, which is what
+-- decides the fish tier. Two things had to be right and neither is obvious:
+--   1. The dumbbell must actually be HELD. Humanoid:EquipTool() fails silently
+--      here - the character keeps holding nothing. Pressing hotbar key 1 through
+--      VirtualInputManager works.
+--   2. Train:Fire() only credits OUTSIDE the fishing zone.
+-- Measured while holding it outside the zone: strength 138 -> 238 in one minute.
+-- Firing Train without the dumbbell held credits exactly 0.
+local function equipDumbbell()
+    local ch = character()
+    if not ch then return false end
+    local want = state().trainingTool
+    if want and ch:FindFirstChild(want) then return true end
+    fire(Remotes.SetFishState, false)
+    pcall(function()
+        local S = require(ReplicatedStorage.client.Satchel)
+        if S and S.SetEnabled then S.SetEnabled(true) end
+    end)
+    local VIM = game:GetService("VirtualInputManager")
+    VIM:SendKeyEvent(true, Enum.KeyCode.One, false, game)
+    task.wait(0.15)
+    VIM:SendKeyEvent(false, Enum.KeyCode.One, false, game)
+    task.wait(0.6)
+    return ch:FindFirstChild(want or "") ~= nil
+end
+
+local function trainPhase(seconds)
+    local zone = throwZone()
+    if not zone then return false end
+    if not equipDumbbell() then note("dumbbell would not equip"); return false end
+
+    STATE.phase = "training"
+    -- deliberately far outside the zone: in the zone Train credits nothing
+    STATE.pinTarget = zone.Position + Vector3.new(0, 4, 150)
+    task.wait(0.8)
+    local before = state().strength
+    local t0 = os.clock()
+    while os.clock() - t0 < seconds do
+        if _G.__LUCKYFISH ~= GEN or not STATE.running or not CONFIG.autoTrain then break end
+        fire(Remotes.Train)
+        task.wait(1 / math.max(1, CONFIG.trainRate))
+    end
+    STATE.pinTarget = nil
+    local gained = state().strength - before
+    STATE.trained = (STATE.trained or 0) + gained
+    note(("trained +%s power (now %s)"):format(fmt(gained), fmt(state().strength)))
+    return true
+end
+
 -- ------------------------------------------------------------------ fishing
 -- The whole cast, exactly as measured. The power bar and the reel minigame are
 -- client side only and are skipped.
@@ -210,38 +263,127 @@ local function castOnce()
 end
 
 -- ---------------------------------------------------------------- placement
--- RequestPlaceFish{ConfigName, BaseSlotIndexName}; slot names are numeric
--- strings. A slot is free when it is absent from state.baseSlots.
-local function freeSlot()
+-- THERE ARE FIVE MODELS CALLED workspace.Map.Base AND FindFirstChild RETURNS A
+-- STRANGER'S. Ours is identified by matching the fish it displays against our
+-- own baseSlots. Working against the wrong plot is silent: every place call is
+-- simply ignored, which cost a long detour here.
+local function ourBase()
+    if STATE.base and STATE.base.Parent then return STATE.base end
     local s = state()
-    local used = s.baseSlots or {}
-    for i = 1, 40 do
-        local name = tostring(i)
-        if used[name] == nil then return name end
+    local mine = {}
+    for _, v in pairs(s.baseSlots or {}) do
+        if type(v) == "table" and v.FishPlaced then mine[v.FishPlaced] = true end
+    end
+    local map = workspace:FindFirstChild("Map")
+    if not map then return nil end
+    for _, b in ipairs(map:GetChildren()) do
+        if b:IsA("Model") and b.Name == "Base" then
+            for _, t in ipairs(b:GetDescendants()) do
+                if t:IsA("TextLabel") and t.Name == "DisplayName" and mine[t.Text] then
+                    STATE.base = b
+                    return b
+                end
+            end
+        end
     end
     return nil
 end
 
+-- Fish arrive as Tools literally named "Tool", tagged IsPlaceableFish.
+local function fishTools()
+    local out = {}
+    for _, c in ipairs(plr.Backpack:GetChildren()) do
+        if c:GetAttribute("IsPlaceableFish") then out[#out + 1] = c end
+    end
+    return out
+end
+
+-- RequestPlaceFish alone does nothing. The real path is the slot's own
+-- ProximityPrompt - and those prompts DO NOT EXIST until a placeable fish is
+-- equipped. Holding one makes "Place" appear on every free placement and
+-- "Replace" on the occupied ones.
 local function placeAll()
-    local s = state()
-    local inv = s.inventory or {}
+    local base = ourBase()
+    if not base then note("our base not identified"); return false end
+    local ch = character()
+    local hum = ch and ch:FindFirstChildOfClass("Humanoid")
+    if not hum then return false end
+
     local n = 0
-    for key, entry in pairs(inv) do
+    for _ = 1, 12 do
         if _G.__LUCKYFISH ~= GEN then break end
-        if type(entry) == "table" and entry.Category == "Fish" and entry.ConfigName then
-            local slot = freeSlot()
-            if not slot then note("base full"); break end
-            local before = count(state().baseSlots)
-            fire(Remotes.RequestPlaceFish, { ConfigName = entry.ConfigName, BaseSlotIndexName = slot })
-            task.wait(0.6)
-            if count(state().baseSlots) > before then n = n + 1 else break end
+        local tools = fishTools()
+        if #tools == 0 then break end
+        pcall(function() hum:EquipTool(tools[1]) end)
+        task.wait(0.4)
+
+        local prompt
+        for _, d in ipairs(base:GetDescendants()) do
+            if d:IsA("ProximityPrompt") and d.ActionText == "Place" and d.Enabled then prompt = d; break end
         end
+        if not prompt then note("no free slot - base full"); break end
+
+        local parent = prompt.Parent
+        local anchor = parent:IsA("BasePart") and parent.Position or parent:GetPivot().Position
+        local before = count(state().baseSlots)
+        STATE.pinTarget = anchor + Vector3.new(0, 3, 0)
+        task.wait(0.7)
+        pcall(fireproximityprompt, prompt)
+        task.wait(1.0)
+        STATE.pinTarget = nil
+        if count(state().baseSlots) > before then n = n + 1 else break end
     end
     if n > 0 then
         STATE.placed = STATE.placed + n
         note(("placed %d fish"):format(n))
     end
     return n > 0
+end
+
+-- ------------------------------------------------------------------ selling
+-- SellFish takes the INVENTORY KEY ("Tuna@1@Gold"), not the plain name. Only
+-- ever runs when the base is full, and it keeps the most valuable entries.
+local fishValues
+local function fishValue(configName)
+    if not fishValues then
+        fishValues = {}
+        local ok, FC = pcall(require, config.FishConfig)
+        if ok and type(FC) == "table" then
+            for name, data in pairs(FC) do
+                if type(data) == "table" then
+                    -- the field name is read out of the config, never assumed
+                    local v = data.Price or data.Value or data.Cash or data.Earnings or data.SellPrice
+                    fishValues[name] = tonumber(v) or 0
+                end
+            end
+        end
+    end
+    return fishValues[configName] or 0
+end
+
+local function sellSurplus(keepBest)
+    keepBest = keepBest or 5
+    local s = state()
+    local list = {}
+    for key, entry in pairs(s.inventory or {}) do
+        if type(entry) == "table" and entry.Category == "Fish" and entry.ConfigName then
+            list[#list + 1] = { key = key, name = entry.ConfigName, value = fishValue(entry.ConfigName) }
+        end
+    end
+    if #list <= keepBest then return false end
+    table.sort(list, function(a, b) return a.value > b.value end)
+
+    local sold, before = 0, money()
+    for i = keepBest + 1, #list do
+        if _G.__LUCKYFISH ~= GEN then break end
+        fire(Remotes.SellFish, list[i].key)
+        task.wait(0.25)
+        sold = sold + 1
+    end
+    if sold > 0 then
+        note(("sold %d surplus fish for %s (kept the best %d)"):format(sold, fmt(money() - before), keepBest))
+    end
+    return sold > 0
 end
 
 -- -------------------------------------------------------------- collect cash
@@ -401,21 +543,16 @@ local function loop(period, key, fn)
     end)
 end
 
--- the strength engine: no arguments, the real client fires it 4-6 times a second
-task.spawn(function()
-    while _G.__LUCKYFISH == GEN do
-        if CONFIG.autoTrain and STATE.running then
-            fire(Remotes.Train)
-        end
-        task.wait(1 / math.max(1, CONFIG.trainRate))
-    end
-end)
-
--- the cast loop
+-- The main loop alternates training and fishing, because they need opposite
+-- positions: Train only credits outside the zone, casting only works inside it.
 task.spawn(function()
     while _G.__LUCKYFISH == GEN do
         if STATE.running and CONFIG.autoFish and not STATE.busy then
             STATE.busy = true
+            if CONFIG.autoTrain and CONFIG.trainSeconds > 0 then
+                local ok, err = pcall(trainPhase, CONFIG.trainSeconds)
+                if not ok then note("train failed: " .. tostring(err)) end
+            end
             local ok, err = pcall(castOnce)
             if not ok then note("cast failed: " .. tostring(err)); unstuck() end
             if CONFIG.autoPlace then pcall(placeAll) end
@@ -430,6 +567,24 @@ task.spawn(function()
 end)
 
 loop(6,  "autoCollect", function() collectCash() end)
+loop(30, "autoSell",    function() sellSurplus(CONFIG.keepBestFish) end)
+
+-- The game's own "Equip Best" - 500,000 once, 10s cooldown - seats the best
+-- fish by itself, which beats reimplementing the ranking. Bought automatically
+-- when it is affordable, then used on its cooldown.
+loop(12, "autoEquipBest", function()
+    local s = state()
+    if not s.hasEquipBest then
+        if money() >= 500000 then
+            local before = money()
+            fire(Remotes.RequestBuyEquipBest)
+            task.wait(2)
+            if state().hasEquipBest then note(("unlocked Equip Best for %s"):format(fmt(before - money()))) end
+        end
+        return
+    end
+    fire(Remotes.RequestEquipBest)
+end)
 loop(15, "autoUpgrade", function() upgradeFish(money() - CONFIG.keepMoney) end)
 loop(20, "autoSpeed",   function() buySpeed(money() - CONFIG.keepMoney) end)
 loop(25, "autoRod",     function() buyRod() end)
@@ -470,6 +625,7 @@ cCast:Toggle("Auto fish", CONFIG.autoFish, function(v)
 end, "full cast loop - no power bar, no reeling needed")
 cCast:Slider("Accuracy", 0.1, 1.0, CONFIG.accuracy, function(v) CONFIG.accuracy = v end)
 cCast:Slider("Collect delay (s)", 5, 30, CONFIG.collectDelay, function(v) CONFIG.collectDelay = v end)
+cCast:Slider("Train before cast (s)", 0, 60, CONFIG.trainSeconds, function(v) CONFIG.trainSeconds = math.floor(v) end)
 cCast:Button("Cast once", function() task.spawn(function()
     if STATE.busy then return end
     STATE.busy = true; pcall(castOnce); pcall(placeAll); STATE.busy = false
@@ -535,9 +691,11 @@ _G.__LUCKYFISH_DBG = {
     CONFIG = CONFIG, STATE = STATE, Remotes = Remotes,
     state = state, money = money, fmt = fmt,
     castOnce = castOnce, placeAll = placeAll, collectCash = collectCash,
+    trainPhase = trainPhase, equipDumbbell = equipDumbbell,
     upgradeFish = upgradeFish, buySpeed = buySpeed, buyRod = buyRod, buyTool = buyTool,
     freebies = freebies, redeemCode = redeemCode, rebirth = rebirth,
-    unstuck = unstuck, freeSlot = freeSlot, bestAffordable = bestAffordable,
+    unstuck = unstuck, bestAffordable = bestAffordable,
+    ourBase = ourBase, fishTools = fishTools, sellSurplus = sellSurplus, fishValue = fishValue,
 }
 
 print("[luckyfish] loaded - gen " .. GEN .. ", RightShift for the panel")
