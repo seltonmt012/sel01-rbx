@@ -272,6 +272,16 @@
       ],
       "status": "ok",
       "detect": "local rs = game:GetService('ReplicatedStorage') return rs:FindFirstChild('PlaceBrainrotOnStand', true) ~= nil and rs:FindFirstChild('MathDoorResult', true) ~= nil"
+    },
+    {
+      "alias": "aurabrainrots",
+      "name": "Aura For Brainrots",
+      "file": "games/aurabrainrots.lua",
+      "places": [
+        122526789002601
+      ],
+      "status": "ok",
+      "detect": "local rs = game:GetService('ReplicatedStorage') local e = rs:FindFirstChild('Events') return e ~= nil and e:FindFirstChild('PurchaseAuraUpgrade') ~= nil and e:FindFirstChild('RequestSlotUpgrade') ~= nil"
     }
   ]
 }
