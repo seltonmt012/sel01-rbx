@@ -865,6 +865,35 @@ task.spawn(function()
 	end
 end)
 
+-- The Home tab: the GitHub commit log as the changelog, plus what this run is
+-- doing. Declared last but the template moves it to the front of the rail, so it
+-- is always the first icon and the page the panel opens on.
+pcall(function() win:Home() end)
+
+-- The three numbers in the header strip, and the master switch wired to AUTO so
+-- the strip's toggle is not a decoration.
+win:SetStat(1, "-", "wins")
+win:SetStat(2, "-", "rate")
+win:SetStat(3, "-", "rebirths")
+win:SetMaster(CONFIG.auto, CONFIG.auto and "Auto Farm laeuft" or "Gestoppt")
+win:OnMaster(function(on)
+	CONFIG.auto = on
+	STATE.note = on and "running" or "stopped"
+	win:Refresh()
+end)
+task.spawn(function()
+	while GEN == _G.__MONKEY do
+		pcall(function()
+			win:SetStat(1, short(STATE.wins))
+			win:SetStat(2, short(STATE.winsRate) .. "/s")
+			win:SetStat(3, tostring(STATE.rebirths))
+			win:SetMaster(CONFIG.auto, CONFIG.auto and "Auto Farm laeuft" or "Gestoppt",
+				STATE.targetName ~= "-" and ("Ziel " .. STATE.targetName) or nil)
+		end)
+		task.wait(1)
+	end
+end)
+
 win:Refresh()
 startPin()
 

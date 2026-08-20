@@ -1441,7 +1441,9 @@ function UI.Window(options)
 			function card:Label(text)
 				local r = row(nil, nil, 0)
 				r.title:Destroy()
-				local l = label(r.inner, text or "", 10, UI.font.mono, UI.theme.dimmer)
+				-- Gotham, nicht Code: die Mono-Schrift franst bei 10px sichtbar aus.
+				-- Mono bleibt Zahlen vorbehalten (Readout, Stepper, Statuszeile).
+				local l = label(r.inner, text or "", 11, UI.font.body, UI.theme.dimmer)
 				l.Size = UDim2.new(1, 0, 0, 0)
 				l.AutomaticSize = Enum.AutomaticSize.Y
 				l.TextWrapped = true
@@ -1539,27 +1541,26 @@ function UI.Window(options)
 		card:Label("laedt ...")
 		local body2 = card.rowHolder
 
+		-- Deliberately does NOT repeat wins / rate / rebirths: those are already in
+		-- the status strip two centimetres above, and printing them twice on the
+		-- same screen is just noise. What is not up there is which page you are
+		-- on, how long this session has been running and where the script came
+		-- from - so that is what goes here.
 		local live = page:Card("LAEUFT GERADE", 2):Icon(UI.icon.loop)
 		local liveTitle = live:Label("-")
 		local liveSub = live:Label("")
-		local liveOut = live:Readout(4)
-		page.live = { title = liveTitle, sub = liveSub, out = liveOut }
+		local liveMeta = live:Label("")
+		page.live = { title = liveTitle, sub = liveSub, meta = liveMeta }
 
-		-- Mirrors whatever the script already tells the status strip, so a game
-		-- script gets this page for free without calling anything new.
+		local started = os.clock()
 		task.spawn(function()
 			while page.holder.Parent do
 				liveTitle.set(window.stripTitle.Text)
 				liveSub.set(window.stripSub.Text)
-				local lines = {}
-				for i2, st in ipairs(window.stats) do
-					if st.caption.Text ~= "" then
-						lines[#lines + 1] = string.format("%-9s %s", st.caption.Text, st.value.Text)
-					end
-				end
-				if #lines == 0 then lines[1] = "  keine Zahlen gemeldet" end
-				liveOut.set(nil, lines)
-				task.wait(1)
+				local mins = math.floor((os.clock() - started) / 60)
+				liveMeta.set(string.format("Sitzung %d min  ·  %d Seiten  ·  Selux v%s",
+					mins, #window.pages, UI.VERSION))
+				task.wait(5)
 			end
 		end)
 
@@ -1571,19 +1572,39 @@ function UI.Window(options)
 				card:Label(err or "keine Verbindung zu GitHub")
 				return
 			end
-			for _, entry in ipairs(list) do
-				local r = card.row(entry.game, entry.summary, 58)
+			-- A real timeline: the dots live in their own 18px gutter with a hairline
+			-- running through them, and the text starts after it. Dropped at a
+			-- negative offset next to the title - which is what this did first -
+			-- they read as specks stuck onto the text rather than as a rail.
+			local GUTTER = 18
+			for index, entry in ipairs(list) do
+				local r = card.row(entry.game, entry.summary, 54)
 				r.title.TextColor3 = UI.theme.text
 				r.title.Font = UI.font.heading
-				local dot = frame(r.inner, UDim2.fromOffset(6, 6),
-					UDim2.fromOffset(-11, 5),
-					entry == list[1] and UI.theme.accent or UI.theme.fainter)
-				dot.ZIndex = 5
-				corner(dot, 3)
-				if entry == list[1] then registerPulse(dot, 2.2, 0.6, 0) end
+				r.title.Position = UDim2.fromOffset(GUTTER, 0)
+				r.title.Size = UDim2.new(1, -GUTTER - 54, 0, 14)
+				if r.hint then
+					r.hint.Position = UDim2.fromOffset(GUTTER, 17)
+					r.hint.Size = UDim2.new(1, -GUTTER, 0, 0)
+				end
+
+				local newest = index == 1
+				-- the line runs the full row height, behind the dot
+				if index < #list then
+					local link = frame(r.inner, UDim2.new(0, 1, 1, -6),
+						UDim2.fromOffset(4, 12), UI.theme.band)
+					link.ZIndex = 4
+				end
+				local dot = frame(r.inner, UDim2.fromOffset(newest and 9 or 7,
+					newest and 9 or 7), UDim2.fromOffset(newest and 0 or 1, newest and 3 or 4),
+					newest and UI.theme.accent or UI.theme.fainter)
+				dot.ZIndex = 6
+				corner(dot, 5)
+				if newest then registerPulse(dot, 2.2, 0.55, 0) end
+
 				local age = label(r.inner, entry.when, 10, UI.font.mono, UI.theme.faint)
-				age.Position = UDim2.new(1, -54, 0, 0)
-				age.Size = UDim2.fromOffset(54, 14)
+				age.Position = UDim2.new(1, -50, 0, 0)
+				age.Size = UDim2.fromOffset(50, 14)
 				age.TextXAlignment = Enum.TextXAlignment.Right
 				age.ZIndex = 5
 			end
