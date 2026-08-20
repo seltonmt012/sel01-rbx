@@ -317,6 +317,16 @@ end
 -- that is already clear costs one dwell window while skipping one that is not
 -- costs the whole run.
 local function stageDone(stageNum)
+	-- A REBIRTH WIPES StagesUnlocked SERVER SIDE AND THE CLIENT CACHE DOES NOT
+	-- NOTICE. Measured live: right after two rebirths fired, maxUnlockedStage()
+	-- read 1 while StageClient.BrokenWalls[2] still said {true,true,true} from
+	-- before the reset. The script then declared "stage 2 cleared", ran the
+	-- collector, and every pickup failed silently because the server no longer
+	-- counts stage 2 as reached - the panel showed a cleared stage with zero
+	-- loot, which reads exactly like a broken pickup. It healed itself once real
+	-- BreakWall events refreshed the cache, but a whole cycle was wasted.
+	-- A stage past what the server says is reachable can never be done.
+	if stageNum > maxUnlockedStage() then return false end
 	local broken = StageClient.BrokenWalls
 	local record = broken and (broken[stageNum] or broken[tostring(stageNum)])
 	if type(record) ~= "table" then return false end
