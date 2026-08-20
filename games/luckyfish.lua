@@ -57,7 +57,9 @@ local GEN = _G.__LUCKYFISH
 local CONFIG = {
     autoFish       = false,  -- the cast loop
     accuracy       = 1.0,    -- 1.0 = PERFECT, server clamps anything above
-    collectDelay   = 8,      -- measured floor; 8/14/20 all landed a fish
+    collectDelay   = 8,      -- base wait; 8/14/20 all landed a fish at 105 studs
+    distancePerSecond = 40,  -- extra wait per stud of cast distance
+    maxCollectDelay   = 45,
     autoPlace      = true,   -- seat caught fish on free base slots
     autoCollect    = true,   -- collect each slot's earnings
     autoUpgrade    = true,   -- level placed fish
@@ -68,12 +70,26 @@ local CONFIG = {
     autoTool       = true,   -- buy + equip the best affordable training tool
     autoEquipBest  = true,   -- buy + use the game's own best-fish placer
     autoFreebies   = true,   -- free gift, daily login, offline money
-    autoRebirth    = false,  -- opt in
+    autoMilestones = true,   -- milestone + index rewards (cash and gems)
+    autoRebirth    = true,   -- only costs strength, so it is always worth taking
 
     trainRate      = 8,      -- Train calls per second while holding the dumbbell
-    trainSeconds   = 20,     -- training window before each cast (0 = never)
+    trainMode      = false,  -- train only, never fish
+    trainSeconds   = 25,     -- length of one training block
+    castsPerCycle  = 2,      -- casts between training blocks; a cast takes ~25s,
+                             -- so 4 meant the first training block only came
+                             -- after two minutes and looked like it never ran
+    trainDistance  = 250,    -- studs outside the zone; inside it tools are stripped
+    postRebirthTrain = 60,   -- a rebirth zeroes strength, so train hard before fishing
+    minStrengthToFish = 800, -- below this the catches are junk, so train instead
     keepMoney      = 0,
     keepBestFish   = 5,      -- surplus below this rank is sold
+    autoSwap       = true,   -- replace weak placed fish with better catches
+    swapFactor     = 1.5,    -- only swap on a clear win; a swap costs the levels
+    levelWeight    = 20,     -- how much a placed fish's level protects it
+    sellWhenFull   = 40,     -- sell everything once this many fish are waiting
+    rodReserve     = true,   -- keep cash for the next rod instead of burning it
+                             -- on fish levels (that starved the 50M rod)
 }
 
 -- -------------------------------------------------------------------- state
@@ -178,33 +194,90 @@ end
 --   2. Train:Fire() only credits OUTSIDE the fishing zone.
 -- Measured while holding it outside the zone: strength 138 -> 238 in one minute.
 -- Firing Train without the dumbbell held credits exactly 0.
+-- Equipping the dumbbell is the fiddly part. THREE ways fail:
+--   Humanoid:EquipTool()      - silently leaves the character holding nothing
+--   tool.Parent = Character   - same, something unequips it again immediately
+--   VirtualInputManager key 1 - works from the executor's own thread, but the
+--                               script's task.spawn threads lack the
+--                               RobloxScript capability and it throws
+-- What works everywhere is firing the hotbar slot button's own connection.
 local function equipDumbbell()
     local ch = character()
     if not ch then return false end
     local want = state().trainingTool
-    if want and ch:FindFirstChild(want) then return true end
+    if not want or want == "" then return false end
+    if ch:FindFirstChild(want) then return true end
+
     fire(Remotes.SetFishState, false)
     pcall(function()
         local S = require(ReplicatedStorage.client.Satchel)
         if S and S.SetEnabled then S.SetEnabled(true) end
     end)
-    local VIM = game:GetService("VirtualInputManager")
-    VIM:SendKeyEvent(true, Enum.KeyCode.One, false, game)
-    task.wait(0.15)
-    VIM:SendKeyEvent(false, Enum.KeyCode.One, false, game)
-    task.wait(0.6)
-    return ch:FindFirstChild(want or "") ~= nil
+
+    local bg = plr.PlayerGui:FindFirstChild("BackpackGui")
+    local hotbar = bg and bg:FindFirstChild("Backpack") and bg.Backpack:FindFirstChild("Hotbar")
+    if not hotbar then return false end
+    -- find the slot whose label names the training tool, not blindly slot 1
+    local target
+    for _, slot in ipairs(hotbar:GetChildren()) do
+        if slot:IsA("GuiButton") then
+            for _, t in ipairs(slot:GetDescendants()) do
+                if t:IsA("TextLabel") and t.Text == want then target = slot; break end
+            end
+        end
+        if target then break end
+    end
+    target = target or hotbar:FindFirstChild("1")
+    if not target then return false end
+
+    -- During a cast the game unequips everything and disables the backpack, so a
+    -- click right after one is swallowed. Let it settle, then retry.
+    for _ = 1, 3 do
+        for _, c in ipairs(getconnections(target.MouseButton1Click)) do pcall(function() c:Fire() end) end
+        task.wait(0.9)
+        if ch:FindFirstChild(want) then return true end
+        fire(Remotes.SetFishState, false)
+        task.wait(0.6)
+    end
+    return ch:FindFirstChild(want) ~= nil
 end
 
 local function trainPhase(seconds)
     local zone = throwZone()
     if not zone then return false end
+
+    -- ORDER MATTERS AND THIS COST HOURS: the game force-unequips any non-rod
+    -- tool while the character is inside the fishing zone. Equipping first and
+    -- walking out afterwards fails every single time - EquipTool, reparenting
+    -- and even RequiresHandle=false all leave the character holding nothing.
+    -- Leave the zone FIRST, then equip. Measured 250 studs out: equips on the
+    -- first try and Train gives +942 strength in 5 seconds.
+    STATE.phase = "leaving zone"
+    fire(Remotes.SetFishState, false)
+    STATE.pinTarget = zone.Position + Vector3.new(0, 4, CONFIG.trainDistance)
+
+    -- Do not just wait a fixed time: the game itself publishes whether we are in
+    -- the zone, and it refuses the dumbbell with "Can't equip training tools in
+    -- the fishing zone!" until that flag clears. Waiting on the flag is the only
+    -- reliable gate - a fixed sleep left us standing in the zone with the pin
+    -- still set from the previous cast.
+    local TZ
+    pcall(function() TZ = require(ReplicatedStorage.client.ThrowZoneState) end)
+    local waited = 0
+    while waited < 8 do
+        task.wait(0.4); waited = waited + 0.4
+        if not (TZ and TZ.InZone) then break end
+    end
+    if TZ and TZ.InZone then
+        note("still inside the fishing zone - cannot train")
+        STATE.pinTarget = nil
+        return false
+    end
+
     if not equipDumbbell() then note("dumbbell would not equip"); return false end
 
     STATE.phase = "training"
-    -- deliberately far outside the zone: in the zone Train credits nothing
-    STATE.pinTarget = zone.Position + Vector3.new(0, 4, 150)
-    task.wait(0.8)
+    task.wait(0.5)
     local before = state().strength
     local t0 = os.clock()
     while os.clock() - t0 < seconds do
@@ -245,12 +318,21 @@ local function castOnce()
     note(("cast %s studs -> %s"):format(fmt(STATE.lastDistance), tostring(info.FishDropName)))
 
     -- ONE collect call. Polling returns nil forever and loses the fish.
+    -- The wait has to SCALE WITH DISTANCE: 8s was fine at 105 studs, but once
+    -- training pushed casts to 566 studs the same 8s collected nothing at all -
+    -- 8 casts, 0 fish. The manual reference run was 25.7s at ~138 power.
     STATE.phase = "reeling"
-    task.wait(CONFIG.collectDelay)
+    local wait = CONFIG.collectDelay + (STATE.lastDistance / CONFIG.distancePerSecond)
+    wait = math.clamp(wait, CONFIG.collectDelay, CONFIG.maxCollectDelay)
+    STATE.lastWait = math.floor(wait * 10) / 10
+    task.wait(wait)
 
     local _, fish = callGuarded(Remotes.GetFishToRecive, 9)
     fire(Remotes.SetFishState, false)
+    -- release the pin unconditionally: leaving it set is what parked the
+    -- character inside the fishing zone, where tools cannot be equipped at all
     STATE.pinTarget = nil
+    task.wait(0.3)
 
     if type(fish) == "table" and fish.Fish then
         STATE.caught = STATE.caught + 1
@@ -338,6 +420,126 @@ local function placeAll()
         note(("placed %d fish"):format(n))
     end
     return n > 0
+end
+
+-- ------------------------------------------------------------------ swapping
+-- FishConfig[species].Earnings is the species' base income and the spread is
+-- brutal: Starfish 2, Tuna 7, Dory 10 against Tripod Fish 770 and Blobfish 695.
+-- The tutorial fish sitting on the plot were levelled into the thirties but a
+-- level never closes a 2-vs-770 gap, so they have to be swapped out.
+local MUTATION_MULT = {
+    Gold = 1.5, Diamond = 2, Molten = 2.5, Frozen = 2, Bloody = 2,
+    Rainbow = 3, Cat = 2, Neon = 2.5,
+}
+
+local fishBase
+local function baseEarnings(species)
+    if not fishBase then
+        fishBase = {}
+        local ok, FC = pcall(require, config.FishConfig)
+        if ok and type(FC) == "table" then
+            for name, data in pairs(FC) do
+                if type(data) == "table" then fishBase[name] = tonumber(data.Earnings) or 0 end
+            end
+        end
+    end
+    return fishBase[species] or 0
+end
+
+-- inventory keys are "Species@Level@Mutation"
+local function parseKey(key)
+    local species, level, mutation = key:match("^(.-)@(%d+)@(.+)$")
+    if not species then species, level = key:match("^(.-)@(%d+)$") end
+    return species or key, tonumber(level) or 1, mutation
+end
+
+local function scoreOf(species, mutation)
+    return baseEarnings(species) * (MUTATION_MULT[mutation or ""] or 1)
+end
+
+-- The fish Tools are all called "Tool"; the species is only readable off the
+-- billboard label the tool carries.
+local function toolSpecies(tool)
+    for _, t in ipairs(tool:GetDescendants()) do
+        if t:IsA("TextLabel") and t.Name == "DisplayName" and t.Text ~= "" then return t.Text end
+    end
+    return nil
+end
+
+-- Replace the weakest placed fish whenever a caught one clearly beats it.
+-- "Clearly" matters: swapping costs the placed fish's levels, so a marginal
+-- gain is not worth it - hence swapFactor.
+local function swapBetter()
+    local base = ourBase()
+    if not base then return false end
+    local ch = character()
+    local hum = ch and ch:FindFirstChildOfClass("Humanoid")
+    if not hum then return false end
+
+    local s = state()
+
+    -- weakest placed slot by species score
+    local worstSlot, worstScore
+    for slot, v in pairs(s.baseSlots or {}) do
+        if type(v) == "table" and v.FishPlaced then
+            local sc = scoreOf(v.FishPlaced, v.Mutation)
+            if not worstScore or sc < worstScore then worstSlot, worstScore = tostring(slot), sc end
+        end
+    end
+    if not worstSlot then return false end
+
+    -- best candidate still in the backpack
+    local bestTool, bestScore, bestName
+    for _, tool in ipairs(fishTools()) do
+        local sp = toolSpecies(tool)
+        if sp then
+            local sc = scoreOf(sp, nil)
+            if not bestScore or sc > bestScore then bestTool, bestScore, bestName = tool, sc, sp end
+        end
+    end
+    if not bestTool then return false end
+
+    -- A swap throws away the placed fish's LEVELS, and those are real money:
+    -- slot 7 held a base-140 Puff Fish at level 34 while the candidates were
+    -- level 5. So the bar rises with the level already invested - a raw base
+    -- comparison would happily trade a levelled fish for a fresh one.
+    local worstLevel = 1
+    local wv = s.baseSlots[worstSlot]
+    if type(wv) == "table" then worstLevel = tonumber(wv.Level) or 1 end
+    local bar = worstScore * CONFIG.swapFactor * (1 + worstLevel / CONFIG.levelWeight)
+    if bestScore <= bar then
+        return false
+    end
+
+    -- equip that exact fish, then use the slot's own Replace prompt
+    pcall(function() hum:EquipTool(bestTool) end)
+    task.wait(0.5)
+    local prompt
+    for _, d in ipairs(base:GetDescendants()) do
+        if d:IsA("ProximityPrompt") and d.Enabled
+           and (d.ActionText == "Replace" or d.ActionText == "Place") then
+            local holder = d.Parent
+            while holder and holder.Parent and holder.Parent.Name ~= "idleUnitPlacements" do holder = holder.Parent end
+            if holder and holder.Name == worstSlot then prompt = d; break end
+        end
+    end
+    if not prompt then return false end
+
+    local parent = prompt.Parent
+    local anchor = parent:IsA("BasePart") and parent.Position or parent:GetPivot().Position
+    STATE.pinTarget = anchor + Vector3.new(0, 3, 0)
+    task.wait(0.8)
+    pcall(fireproximityprompt, prompt)
+    task.wait(1.2)
+    STATE.pinTarget = nil
+
+    local after = state().baseSlots[worstSlot]
+    if type(after) == "table" and after.FishPlaced == bestName then
+        STATE.swaps = (STATE.swaps or 0) + 1
+        note(("swapped slot %s -> %s (base %s beats %s)"):format(worstSlot, bestName, fmt(bestScore), fmt(worstScore)))
+        return true
+    end
+    return false
 end
 
 -- ------------------------------------------------------------------ selling
@@ -524,10 +726,70 @@ local function redeemCode(code)
     note("redeemed " .. tostring(code))
 end
 
-local function rebirth()
+-- Milestones pay in cash AND gems and are simply sat on until claimed:
+-- claiming the three open ones gave +5.02M cash and +30 gems in one go.
+local MILESTONES = { "earnings", "fishCaught", "strength", "floatBoxesOpened" }
+
+local function claimMilestones()
+    local before, beforeGems = money(), state().gems or 0
+    for _, t in ipairs(MILESTONES) do
+        fire(Remotes.RequestClaimMilestone, t)
+        task.wait(0.4)
+    end
+    local gained, gems = money() - before, (state().gems or 0) - beforeGems
+    if gained > 0 or gems > 0 then
+        note(("milestones +%s cash, +%d gems"):format(fmt(gained), gems))
+        return true
+    end
+    return false
+end
+
+-- Every discovered fish in the index carries a one-off reward; 25 entries paid
+-- +57 gems. Claiming an already-claimed one is simply ignored.
+local function claimIndexRewards()
+    local s = state()
+    local beforeGems = s.gems or 0
+    local n = 0
+    for id in pairs(s.index or {}) do
+        if (s.claimedIndexRewards or {})[id] == nil then
+            fire(Remotes.RequestClaimIndexReward, tostring(id))
+            n = n + 1
+            task.wait(0.2)
+            if n >= 30 then break end
+        end
+    end
+    local gems = (state().gems or 0) - beforeGems
+    if gems > 0 then note(("index rewards +%d gems"):format(gems)); return true end
+    return false
+end
+
+-- Rebirth costs ONLY strength - measured 5,088 -> 0 while cash, the rod, the
+-- dumbbell, all ten placed fish, the whole inventory, every speed level, the
+-- gems and Equip Best were all kept, and the cash multiplier went to x2.
+-- So it is taken as soon as the ladder allows it.
+local function rebirthRequirement()
+    local ok, RB = pcall(require, config.RebirthConfig)
+    if not (ok and type(RB) == "table" and type(RB.Config) == "table") then return nil end
+    local next = (state().rebirthLevel or 0) + 1
+    local entry = RB.Config[next]
+    return entry and tonumber(entry.RequiredStrength) or nil, entry and entry.CashMultiplier
+end
+
+local function rebirth(force)
+    local need, mult = rebirthRequirement()
+    if not force then
+        if not need then return false end
+        if state().strength < need then return false end
+    end
+    local before = state().rebirthLevel or 0
     fire(Remotes.RequestRebirth)
-    task.wait(1.5)
-    note("rebirth fired")
+    task.wait(2.5)
+    local after = state().rebirthLevel or 0
+    if after > before then
+        note(("rebirth %d -> %d (cash x%s)"):format(before, after, tostring(mult or "?")))
+        return true
+    end
+    return false
 end
 
 -- ------------------------------------------------------------- loop driver
@@ -547,11 +809,34 @@ end
 -- positions: Train only credits outside the zone, casting only works inside it.
 task.spawn(function()
     while _G.__LUCKYFISH == GEN do
-        if STATE.running and CONFIG.autoFish and not STATE.busy then
+        -- TRAIN MODE runs on its own. Interleaving it with casting does not
+        -- work: a cast unequips everything and disables the backpack, so the
+        -- dumbbell click right after one is swallowed and strength never moves
+        -- (measured: 0 gain across a full fishing loop, while the same training
+        -- standalone gave +1050 in 6 seconds).
+        -- THE CYCLE: castsPerCycle casts, then one training block, then repeat.
+        -- Training and casting cannot be interleaved per cast - a cast unequips
+        -- everything and disables the backpack, so the dumbbell click right
+        -- after one is swallowed and strength never moves. Blocks give the
+        -- client time to settle in between.
+        -- A rebirth zeroes strength, and strength IS throw power IS cast distance
+        -- IS fish tier - so fishing straight after one only produces junk. Train
+        -- back up to minStrengthToFish before casting again.
+        local weak = CONFIG.autoTrain and state().strength < CONFIG.minStrengthToFish
+
+        if STATE.running and (CONFIG.trainMode or STATE.wantTrain or weak) and not STATE.busy then
             STATE.busy = true
-            if CONFIG.autoTrain and CONFIG.trainSeconds > 0 then
-                local ok, err = pcall(trainPhase, CONFIG.trainSeconds)
-                if not ok then note("train failed: " .. tostring(err)) end
+            local secs = weak and CONFIG.postRebirthTrain or CONFIG.trainSeconds
+            local ok, err = pcall(trainPhase, secs)
+            if not ok then note("train failed: " .. tostring(err)) end
+            STATE.wantTrain = false
+            STATE.cycleCasts = 0
+            STATE.busy = false
+        elseif STATE.running and CONFIG.autoFish and not STATE.busy then
+            STATE.busy = true
+            STATE.cycleCasts = (STATE.cycleCasts or 0) + 1
+            if CONFIG.autoTrain and STATE.cycleCasts > CONFIG.castsPerCycle then
+                STATE.wantTrain = true
             end
             local ok, err = pcall(castOnce)
             if not ok then note("cast failed: " .. tostring(err)); unstuck() end
@@ -567,7 +852,25 @@ task.spawn(function()
 end)
 
 loop(6,  "autoCollect", function() collectCash() end)
-loop(30, "autoSell",    function() sellSurplus(CONFIG.keepBestFish) end)
+-- Selling per key pays pennies (8 fish = 104), but a full inventory blocks
+-- nothing useful either, so the rule is: swap the good ones onto the plot
+-- FIRST, then dump the rest in one call. SellAllFish needs no position.
+loop(20, "autoSell", function()
+    local s = state()
+    local n = 0
+    for _, v in pairs(s.inventory or {}) do
+        if type(v) == "table" and v.Category == "Fish" then n = n + 1 end
+    end
+    if n < CONFIG.sellWhenFull then return end
+    for _ = 1, 6 do if not swapBetter() then break end; task.wait(0.4) end
+    local before = money()
+    fire(Remotes.SellAllFish)
+    task.wait(2)
+    note(("inventory full (%d) - swapped what was better, sold the rest for %s"):format(n, fmt(money() - before)))
+end)
+-- swap repeatedly: one call replaces one slot, so a backlog of good catches
+-- works its way in over successive passes
+loop(15, "autoSwap",    function() for _ = 1, 3 do if not swapBetter() then break end end end)
 
 -- The game's own "Equip Best" - 500,000 once, 10s cooldown - seats the best
 -- fish by itself, which beats reimplementing the ranking. Bought automatically
@@ -585,11 +888,49 @@ loop(12, "autoEquipBest", function()
     end
     fire(Remotes.RequestEquipBest)
 end)
-loop(15, "autoUpgrade", function() upgradeFish(money() - CONFIG.keepMoney) end)
+-- The next rod costs 50M while a fish level costs a few million, so without a
+-- reserve the levels drain exactly the balance the rod needs and the rod never
+-- arrives. Fish levels only get what the next rod does not need.
+local function nextUpgradeCost(cfgModule, current)
+    local ok, C = pcall(require, cfgModule)
+    if not ok then return nil end
+    local best
+    for id, data in pairs(C) do
+        if type(data) == "table" and id ~= current then
+            local cost = tonumber(data.Cost)
+            if cost and cost > 0 and cost > (tonumber((C[current] or {}).Cost) or 0) then
+                if not best or cost < best then best = cost end
+            end
+        end
+    end
+    return best
+end
+
+loop(15, "autoUpgrade", function()
+    local spare = money() - CONFIG.keepMoney
+    if CONFIG.rodReserve then
+        local s = state()
+        local rod = nextUpgradeCost(config.FishRodConfig, s.fishRod)
+        local tool = nextUpgradeCost(config.TrainToolConfig, s.trainingTool)
+        local reserve = math.max(rod or 0, tool or 0)
+        -- only reserve what income can actually reach, otherwise it freezes
+        -- every purchase forever
+        if reserve > 0 and reserve <= money() * 4 then
+            spare = money() - reserve
+            if spare <= 0 then
+                note(("saving %s for the next rod/dumbbell"):format(fmt(reserve)))
+                return
+            end
+        end
+    end
+    upgradeFish(spare)
+end)
 loop(20, "autoSpeed",   function() buySpeed(money() - CONFIG.keepMoney) end)
 loop(25, "autoRod",     function() buyRod() end)
 loop(25, "autoTool",    function() buyTool() end)
 loop(90, "autoFreebies", function() freebies() end)
+loop(60, "autoMilestones", function() claimMilestones(); claimIndexRewards() end)
+loop(20, "autoRebirth",   function() rebirth(false) end)
 
 task.spawn(function()
     while _G.__LUCKYFISH == GEN do
@@ -625,7 +966,10 @@ cCast:Toggle("Auto fish", CONFIG.autoFish, function(v)
 end, "full cast loop - no power bar, no reeling needed")
 cCast:Slider("Accuracy", 0.1, 1.0, CONFIG.accuracy, function(v) CONFIG.accuracy = v end)
 cCast:Slider("Collect delay (s)", 5, 30, CONFIG.collectDelay, function(v) CONFIG.collectDelay = v end)
-cCast:Slider("Train before cast (s)", 0, 60, CONFIG.trainSeconds, function(v) CONFIG.trainSeconds = math.floor(v) end)
+cCast:Toggle("TRAIN MODE", CONFIG.trainMode, function(v) CONFIG.trainMode = v end,
+    "trains throw power instead of fishing - hold the dumbbell OUTSIDE the zone", UI.theme.good)
+cCast:Slider("Train window (s)", 5, 60, CONFIG.trainSeconds, function(v) CONFIG.trainSeconds = math.floor(v) end)
+cCast:Slider("Casts per cycle", 1, 15, CONFIG.castsPerCycle, function(v) CONFIG.castsPerCycle = math.floor(v) end)
 cCast:Button("Cast once", function() task.spawn(function()
     if STATE.busy then return end
     STATE.busy = true; pcall(castOnce); pcall(placeAll); STATE.busy = false
@@ -637,6 +981,11 @@ cBase:Toggle("Auto place", CONFIG.autoPlace, function(v) CONFIG.autoPlace = v en
 cBase:Toggle("Auto collect", CONFIG.autoCollect, function(v) CONFIG.autoCollect = v end)
 cBase:Toggle("Auto upgrade fish", CONFIG.autoUpgrade, function(v) CONFIG.autoUpgrade = v end,
     "levels placed fish, cheapest slot first", UI.theme.good)
+cBase:Toggle("Auto swap better fish", CONFIG.autoSwap, function(v) CONFIG.autoSwap = v end,
+    "replaces the weakest placed fish when a catch clearly beats it", UI.theme.good)
+cBase:Button("Swap now", function() task.spawn(function()
+    for _ = 1, 5 do if not swapBetter() then break end end
+end) end)
 cBase:Button("Collect now", function() task.spawn(function() note("collected " .. fmt(collectCash())) end) end)
 
 local spend = win:Page("SPEND", UI.icon.coin)
@@ -652,7 +1001,14 @@ local cMisc = spend:Card("FREE / RESET", 2)
 cMisc:Toggle("Freebies", CONFIG.autoFreebies, function(v) CONFIG.autoFreebies = v end, "gift, daily login, offline money")
 cMisc:Toggle("Auto sell leftovers", CONFIG.autoSell, function(v) CONFIG.autoSell = v end,
     "off by default - selling is destructive", UI.theme.bad)
-cMisc:Button("Rebirth now", function() task.spawn(rebirth) end, UI.theme.warn)
+cMisc:Toggle("Milestones + index", CONFIG.autoMilestones, function(v) CONFIG.autoMilestones = v end,
+    "cash and gems that just sit there until claimed", UI.theme.good)
+cMisc:Toggle("Auto rebirth", CONFIG.autoRebirth, function(v) CONFIG.autoRebirth = v end,
+    "costs only strength - everything else is kept", UI.theme.good)
+cMisc:Button("Rebirth now", function() task.spawn(function() rebirth(true) end) end, UI.theme.warn)
+cMisc:Button("Claim everything", function() task.spawn(function()
+    freebies(); claimMilestones(); claimIndexRewards()
+end) end)
 
 local cOut = farm:Card("STATUS", 0)
 local out = cOut:Readout(10)
@@ -694,8 +1050,11 @@ _G.__LUCKYFISH_DBG = {
     trainPhase = trainPhase, equipDumbbell = equipDumbbell,
     upgradeFish = upgradeFish, buySpeed = buySpeed, buyRod = buyRod, buyTool = buyTool,
     freebies = freebies, redeemCode = redeemCode, rebirth = rebirth,
+    claimMilestones = claimMilestones, claimIndexRewards = claimIndexRewards,
+    rebirthRequirement = rebirthRequirement,
     unstuck = unstuck, bestAffordable = bestAffordable,
     ourBase = ourBase, fishTools = fishTools, sellSurplus = sellSurplus, fishValue = fishValue,
+    swapBetter = swapBetter, baseEarnings = baseEarnings, toolSpecies = toolSpecies, scoreOf = scoreOf,
 }
 
 print("[luckyfish] loaded - gen " .. GEN .. ", RightShift for the panel")

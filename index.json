@@ -224,6 +224,17 @@
       "detect": "local rs = game:GetService('ReplicatedStorage') local m = rs:FindFirstChild('Modules') local r = rs:FindFirstChild('Remotes') if not (m and r) then return false end return m:FindFirstChild('Spinjitsu') ~= nil and r:FindFirstChild('ToggleSpinjitsu', true) ~= nil and r:FindFirstChild('GetWallState', true) ~= nil"
     },
     {
+      "alias": "luckyfish",
+      "name": "Pull a Lucky Fish",
+      "file": "games/luckyfish.lua",
+      "places": [
+        112781315318195
+      ],
+      "status": "ok",
+      "note": "Red networking: ~170 events multiplexed through two RemoteEvents",
+      "detect": "local rs = game:GetService('ReplicatedStorage') local sh = rs:FindFirstChild('shared') local cl = rs:FindFirstChild('client') if not (sh and cl) then return false end return sh:FindFirstChild('Remotes') ~= nil and cl:FindFirstChild('ClientPlayerData') ~= nil and sh:FindFirstChild('Fish', true) ~= nil"
+    },
+    {
       "alias": "eggfarm",
       "name": "Grow a Chicken Fighter",
       "file": "games/eggfarm.lua",

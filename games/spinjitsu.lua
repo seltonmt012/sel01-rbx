@@ -72,6 +72,9 @@ local CONFIG = {
     autoAura    = true,   -- wins-priced auras, x1.5 up to x3.5 on wins
     autoItems   = true,   -- the restocking item shop, raises ItemJitsuMult
     itemShare   = 0.5,    -- of the balance per item
+    worldReach  = 3,      -- start saving for the next world at a third of its price
+    petKeep     = 40,     -- storage is 50; cull below this so hatching never jams
+    petCullBatch= 8,      -- extra room freed per cull
     autoRewards = true,   -- codes, playtime, streak, milestones, offline gain
     wallTimeout = 10,     -- give up on a wall that outgrew the Jitsu
     stuckWait   = 10,     -- and go shopping before trying it again
@@ -84,6 +87,7 @@ local STATE = {
     jitsu = 0, wins = 0, rebirths = 0, level = 0, needLevel = 0,
     world = 1, variant = "-", perSecond = 0, stage = "-", phase = "starting",
     walls = 0, plates = 0, rebirthsDone = 0, hatched = 0, note = "",
+    reached = 0, deepest = 0, inRun = false, deleted = 0,
 }
 
 _G.__SPINJITSU = (_G.__SPINJITSU or 0) + 1
@@ -222,6 +226,24 @@ end
 
 -- The pads are the shop. Skip the VIP / gamepass ones, take the best the
 -- balance covers, and only if it actually ticks faster than what is worn.
+-- The next world is the single biggest jump available (world 2 = Magma, 1,000,000
+-- wins, and its stage 16 alone pays 250,000 against the 100,000 of world 1's
+-- last stage).  Once it is within reach the wins stop going into variants and
+-- eggs, or the balance never gets there - the whole of world 1 is only worth
+-- 194,439 wins per rebirth cycle.
+local function worldReserve()
+    local nextWorld = attr("MaxWorld", 1) + 1
+    if nextWorld > (WorldCfg.Count or 3) then return 0 end
+    local cost = WorldCfg.Costs and WorldCfg.Costs[nextWorld]
+    if not cost then return 0 end
+    if wins() * CONFIG.worldReach >= cost then return cost end
+    return 0
+end
+
+local function spendable()
+    return math.max(0, wins() - worldReserve())
+end
+
 local function buyVariant()
     local folder = worldFolder()
     local pads = folder and folder:FindFirstChild("Pads")
@@ -235,7 +257,7 @@ local function buyVariant()
         if info and not info.GamepassId and not info.IsVIP then
             local cost = info.WinsCost or 0
             local rate = info.JitsuPerSecond or 0
-            if cost <= wins() and rate > currentPerSecond() and rate > (bestRate or 0) then
+            if cost <= spendable() and rate > currentPerSecond() and rate > (bestRate or 0) then
                 best, bestRate, bestPad = variant, rate, pad
             end
         end
@@ -294,7 +316,9 @@ end
 -- forever - measured: 92 walls broken for 23 plates, all of them shallow.
 local CLAIMED = {}
 
-local function runStage(stage)
+-- Break every wall of a stage. Returns true when the stage is open, false when
+-- a wall outlasted the timeout (i.e. it is above the current Jitsu).
+local function breakStage(stage)
     STATE.stage = "Stage" .. stage.number
     local walls = {}
     for _, child in ipairs(stage.folder:GetChildren()) do
@@ -331,26 +355,33 @@ local function runStage(stage)
         task.wait(CONFIG.hopDelay)
     end
 
-    local plate = not CLAIMED[stage.number] and winPlate(stage.folder) or nil
-    if plate then
-        STATE.phase = "plate of stage " .. stage.number
-        local before = wins()
-        withBody("stage", function()
-            holdAt(plate.Position + Vector3.new(0, 3, 0), 4, function() return wins() > before end)
-        end)
-        if wins() > before then
-            STATE.plates = STATE.plates + 1
-            note("stage %d cleared (+%s wins)", stage.number, abbreviate(wins() - before))
-        else
-            note("stage %d already paid, moving on", stage.number)
-        end
-    end
+    return true
+end
+
+-- Taking a plate ENDS the run - every wall comes back - and each plate pays
+-- exactly once.  Cashing stage 1 for its single win therefore throws a whole
+-- run away, which is what the first version did on every pass.  So: push as
+-- deep as the Jitsu allows, then cash the DEEPEST stage that is open and still
+-- unpaid.
+local function collectPlate(stage)
+    local plate = winPlate(stage.folder)
+    if not plate then return false end
+
+    STATE.phase = "plate of stage " .. stage.number
+    local before = wins()
+    withBody("stage", function()
+        holdAt(plate.Position + Vector3.new(0, 3, 0), 5, function() return wins() > before end)
+    end)
+
     CLAIMED[stage.number] = true
-    -- Taking a plate ENDS the run: the walls all come back, so whatever stands
-    -- further in cannot be attacked any more this pass.  Carrying on into the
-    -- next stage is what made it look like the script was hammering a wall it
-    -- had already earned - it walks back to stage 1 and works up again instead.
-    return "collected"
+    if wins() > before then
+        STATE.plates = STATE.plates + 1
+        STATE.deepest = math.max(STATE.deepest or 0, stage.number)
+        note("cashed stage %d for %s wins", stage.number, abbreviate(wins() - before))
+        return true
+    end
+    note("stage %d was already paid", stage.number)
+    return false
 end
 
 ----------------------------------------------------------------------------
@@ -364,15 +395,25 @@ local function levelNow()
     return level or 0
 end
 
+-- A rebirth makes every plate payable again. The whole of world 1 is worth only
+-- 194,439 wins if each plate paid once - the balance passed 420,000 across
+-- thirteen rebirths, so they clearly reset. Anything that remembers a plate as
+-- "done" therefore has to forget it here, or the script walks past its own
+-- income.
 local function doRebirth()
     local ok, required = pcall(RebirthCfg.GetRequiredLevel, rebirths())
     required = ok and required or math.huge
     STATE.needLevel = required
     if levelNow() < required then return end
+
+    local before = rebirths()
     fire("RequestRebirth")
     task.wait(1.5)
-    STATE.rebirthsDone = STATE.rebirthsDone + 1
-    note("rebirth %d (level %d needed)", rebirths(), required)
+    if rebirths() > before then
+        STATE.rebirthsDone = STATE.rebirthsDone + 1
+        for key in pairs(CLAIMED) do CLAIMED[key] = nil end
+        note("rebirth %d - plates are payable again", rebirths())
+    end
 end
 
 local function climbWorld()
@@ -434,7 +475,7 @@ end
 local function hatchEggs()
     local owned = LocalPlayer:FindFirstChild("Pets")
     local count = owned and #owned:GetChildren() or 0
-    local budget = wins() - (count < (PetConfig.EquippedLimit or 3) and 0 or CONFIG.eggReserve)
+    local budget = count < (PetConfig.EquippedLimit or 3) and wins() or spendable()
 
     for _, egg in ipairs(eggLadder()) do
         if egg.cost <= budget then
@@ -469,6 +510,44 @@ local function hatchEggs()
     end
 end
 
+-- A pet is a StringValue whose Value is the species and whose Variant attribute
+-- scales it: PetConfig.GetInfo(name).Multiplier times PetConfig.Variants[variant]
+-- (Normal 1, Golden 1.5, Rainbow 3, Shiny 5).
+local function petPower(pet)
+    local ok, info = pcall(PetConfig.GetInfo, pet.Value)
+    local base = (ok and type(info) == "table" and info.Multiplier) or 0
+    local variant = (PetConfig.Variants or {})[pet:GetAttribute("Variant") or "Normal"] or 1
+    return base * variant
+end
+
+-- Storage caps at 50 and hatching stops dead once it is full, which is what
+-- quietly ended the pet climb. Delete the weakest unequipped ones - the server
+-- takes a list of ids on PetSystem.DeleteMany (measured 50 -> 48 in one call).
+local function cullPets()
+    local folder = LocalPlayer:FindFirstChild("Pets")
+    if not folder then return end
+    local all = folder:GetChildren()
+    if #all < CONFIG.petKeep then return end
+
+    local spare = {}
+    for _, pet in ipairs(all) do
+        if not pet:GetAttribute("Equipped") then
+            spare[#spare + 1] = { id = pet.Name, power = petPower(pet) }
+        end
+    end
+    table.sort(spare, function(a, b) return a.power < b.power end)
+
+    local doomed = {}
+    local target = #all - CONFIG.petKeep + CONFIG.petCullBatch
+    for index = 1, math.min(target, #spare) do doomed[#doomed + 1] = spare[index].id end
+    if #doomed == 0 then return end
+
+    fire("PetSystem.DeleteMany", doomed)
+    task.wait(0.8)
+    STATE.deleted = STATE.deleted + #doomed
+    note("deleted %d weak pets (%d left)", #doomed, #folder:GetChildren())
+end
+
 local function pets()
     fire("PetSystem.SetAutoEquip", true)
     fire("PetSystem.EquipBest")
@@ -485,7 +564,7 @@ local function buyAura()
     for _, aura in pairs(AuraConfig.Auras or {}) do
         local cost = aura.WinsCost
         local mult = aura.GainMultiplier or 0
-        if cost and cost <= wins() and mult > (bestMult or attr("AuraWinsMult", 1)) then
+        if cost and cost <= spendable() and mult > (bestMult or attr("AuraWinsMult", 1)) then
             best, bestMult = aura, mult
         end
     end
@@ -537,20 +616,32 @@ loop("spin", 1, function()
     if CONFIG.autoSpin then keepSpinning() end
 end)
 
+local lastRebirths = rebirths()
+
 loop("stats", 0.5, function()
     STATE.jitsu, STATE.wins = jitsu(), wins()
     STATE.rebirths, STATE.world = rebirths(), world()
+    if STATE.rebirths ~= lastRebirths then
+        lastRebirths = STATE.rebirths
+        for key in pairs(CLAIMED) do CLAIMED[key] = nil end
+    end
     STATE.variant = attr("SpinjitsuVariant", "-")
     STATE.perSecond = currentPerSecond()
     STATE.level = levelNow()
 end)
 
 loop("shop", 8, function()
+    -- Never during a run. Every shop action walks the body somewhere else - the
+    -- egg, a pad - and a run that gets interrupted loses the walls it had
+    -- already opened, so the pass has to start from stage 1 again. Buying only
+    -- happens between runs, right after a plate has been cashed.
+    if STATE.inRun then return end
     -- Pets first while the team is not even full: a Grass Egg is 100 wins and
     -- the variant shop otherwise takes the balance to zero every single pass,
     -- which is why the first version owned no pets at all after an hour.
     local owned = LocalPlayer:FindFirstChild("Pets")
     local count = owned and #owned:GetChildren() or 0
+    if CONFIG.autoPets then cullPets() end
     if CONFIG.autoPets and count < (PetConfig.EquippedLimit or 3) then hatchEggs() end
     if CONFIG.autoVariant then buyVariant() end
     if CONFIG.autoPets and count >= (PetConfig.EquippedLimit or 3) then hatchEggs() end
@@ -580,13 +671,48 @@ task.spawn(function()
             -- 100 health wall in stage 2 did nothing at all while stage 1 was
             -- standing again.  So every pass walks the stages in order and
             -- stops at the first wall that outlasts the timeout.
-            local progressed = false
+            -- One run: walk the chain from stage 1 and break everything the
+            -- Jitsu can carry, remembering how far it got.  Only when the chain
+            -- stops - a wall that outlasts the timeout, or the last stage - is
+            -- a plate taken, and it is the deepest unpaid one, because taking
+            -- it resets every wall behind us.
+            STATE.inRun = true
+            local open = {}
             for _, stage in ipairs(stageFolders()) do
                 if not alive() or not CONFIG.autoStages then break end
-                local result = runStage(stage)
-                if not result then break end
-                progressed = true
-                if result == "collected" then break end   -- the run reset, start over
+                if not breakStage(stage) then break end
+                open[#open + 1] = stage
+                STATE.reached = stage.number
+            end
+
+            local progressed = false
+            for index = #open, 1, -1 do
+                local stage = open[index]
+                if not CLAIMED[stage.number] then
+                    progressed = collectPlate(stage)
+                    break
+                end
+            end
+            STATE.inRun = false
+
+            -- Straight after the cash-out, in this order: rebirth if the level
+            -- allows it (it makes every plate payable again and multiplies the
+            -- tick), then buy. The shop loop alone was not enough - it is gated
+            -- on "not in a run", and a run is almost always in progress, so with
+            -- level 1050 against a requirement of 823 the rebirth simply never
+            -- fired.
+            if progressed then
+                if CONFIG.autoRebirth then pcall(doRebirth) end
+                if CONFIG.autoWorld   then pcall(climbWorld) end
+                if CONFIG.autoPets    then pcall(cullPets) pcall(hatchEggs) end
+                if CONFIG.autoVariant then pcall(buyVariant) end
+                if CONFIG.autoAura    then pcall(buyAura) end
+            end
+
+            if not progressed and #open > 0 then
+                -- everything we can reach is already paid; the only way forward
+                -- is a deeper wall, so spend on the tick rate instead
+                progressed = false
             end
             if not progressed then
                 -- A wall that outlasts the timeout is not a bug, it is simply
@@ -594,9 +720,11 @@ task.spawn(function()
                 -- thing to do: go spend what the last stages paid instead - a
                 -- better variant or a pet raises the tick rate, which is the
                 -- only thing that gets through that wall.
-                STATE.phase = "stuck, spending instead"
+                STATE.phase = "between runs, spending"
+                STATE.inRun = false
                 if CONFIG.autoVariant then pcall(buyVariant) end
                 if CONFIG.autoPets    then pcall(hatchEggs) end
+                if CONFIG.autoAura    then pcall(buyAura) end
                 if CONFIG.autoRebirth then pcall(doRebirth) end
                 task.wait(CONFIG.stuckWait)
             end
@@ -644,14 +772,18 @@ spend:Toggle("Free rewards", CONFIG.autoRewards, function(v) CONFIG.autoRewards 
     "codes, playtime, streak, milestones, gifts, offline gain")
 
 local readout = page:Card("STATUS", 0)
-local out = readout:Readout(9)
+local out = readout:Readout(10)
 
 task.spawn(function()
     while alive() do
         out:set({
             "RUN",
             string.format("  world %d   %s   %s", STATE.world, STATE.stage, STATE.phase),
-            string.format("  walls %d   plates %d   rebirths %d", STATE.walls, STATE.plates, STATE.rebirthsDone),
+            string.format("  walls %d   plates %d   rebirths %d   pets -%d",
+                STATE.walls, STATE.plates, STATE.rebirthsDone, STATE.deleted),
+            string.format("  reached stage %d   best cashed %d%s", STATE.reached, STATE.deepest,
+                worldReserve() > 0 and string.format("   saving %s for world %d",
+                    abbreviate(worldReserve()), attr("MaxWorld", 1) + 1) or ""),
             "ECONOMY",
             string.format("  jitsu %s   wins %s", abbreviate(STATE.jitsu), abbreviate(STATE.wins)),
             string.format("  %s at %s jitsu/s", tostring(STATE.variant), tostring(STATE.perSecond)),
@@ -667,10 +799,12 @@ end)
 
 _G.__SPINJITSU_DBG = {
     CONFIG = CONFIG, STATE = STATE, fire = fire, invoke = invoke,
-    buyVariant = buyVariant, runStage = runStage, stageFolders = stageFolders,
+    buyVariant = buyVariant, breakStage = breakStage, collectPlate = collectPlate,
+    stageFolders = stageFolders,
     CLAIMED = CLAIMED, winPlate = winPlate,
     doRebirth = doRebirth, climbWorld = climbWorld, freeRewards = freeRewards,
     hatchEggs = hatchEggs, eggLadder = eggLadder, buyAura = buyAura, buyItems = buyItems,
+    cullPets = cullPets, petPower = petPower,
     MOVE = MOVE, withBody = withBody,
     levelNow = levelNow, currentPerSecond = currentPerSecond, holdAt = holdAt,
 }
