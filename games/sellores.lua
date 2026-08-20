@@ -320,7 +320,7 @@ end
 -- buying the cheap one - so the cheap ores are bought on sight and the expensive
 -- ones only when they are genuinely rare or part of an event.
 local ORES = select(2, pcall(function()
-	return require(ReplicatedStorage:WaitForChild("OreMetadata"))
+	return require(ReplicatedStorage:WaitForChild("OreMetadata", 10))
 end))
 if type(ORES) ~= "table" then ORES = {} end
 
@@ -1779,7 +1779,7 @@ end
 -- EXPENSIVE affordable gem, which is precisely backwards.
 local function buyGear()
 	local ok, metadata = pcall(function()
-		return require(ReplicatedStorage:WaitForChild("GearMetadata"))
+		return require(ReplicatedStorage:WaitForChild("GearMetadata", 10))
 	end)
 	if not ok or type(metadata) ~= "table" or type(metadata.List) ~= "function" then return end
 
@@ -2294,6 +2294,11 @@ local logOut = logCard:Readout(26, function(text)
 	if text:find("REROLL") then return UI.theme.warn end
 	return nil
 end)
+
+-- Der Home-Tab: das GitHub-Commit-Log als Changelog plus der aktuelle Lauf.
+-- Zuletzt deklariert, aber das Template schiebt ihn an den Anfang der Leiste -
+-- er ist immer das erste Icon und die Seite, auf der das Panel aufgeht.
+pcall(function() win:Home() end)
 
 win:Refresh()
 

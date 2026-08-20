@@ -48,8 +48,8 @@ if _G.__EGGFARM_GUI then
 end
 
 local touchFire = firetouchinterest
-local hatchRemote = ReplicatedStorage:WaitForChild("Remotes"):WaitForChild("HatchEgg")
-local nestFolder = workspace:WaitForChild("NestEggs")
+local hatchRemote = ReplicatedStorage:WaitForChild("Remotes", 10):WaitForChild("HatchEgg", 10)
+local nestFolder = workspace:WaitForChild("NestEggs", 10)
 
 -- Collecting -----------------------------------------------------------------
 
@@ -172,7 +172,7 @@ gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 pcall(function()
 	gui.Parent = (gethui and gethui()) or game:GetService("CoreGui")
 end)
-if not gui.Parent then gui.Parent = plr:WaitForChild("PlayerGui") end
+if not gui.Parent then gui.Parent = plr:WaitForChild("PlayerGui", 10) end
 _G.__EGGFARM_GUI = gui
 
 local frame = Instance.new("Frame")

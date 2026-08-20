@@ -320,7 +320,7 @@ gui.Name = "SkillPointLegends"
 gui.ResetOnSpawn = false
 gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 pcall(function() gui.Parent = (gethui and gethui()) or game:GetService("CoreGui") end)
-if not gui.Parent then gui.Parent = plr:WaitForChild("PlayerGui") end
+if not gui.Parent then gui.Parent = plr:WaitForChild("PlayerGui", 10) end
 _G.__SPL_GUI = gui
 
 local frame = Instance.new("Frame")

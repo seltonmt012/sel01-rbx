@@ -47,11 +47,11 @@ local VirtualInputManager = game:GetService("VirtualInputManager")
 
 local plr = Players.LocalPlayer
 
-local Remotes   = ReplicatedStorage:WaitForChild("Remotes")
-local Events    = ReplicatedStorage:WaitForChild("Events")
-local RemoteGUI = ReplicatedStorage:WaitForChild("RemoteGUI")
-local Functions = ReplicatedStorage:WaitForChild("Functions")
-local DashEvent = ReplicatedStorage:WaitForChild("DashEvent")
+local Remotes   = ReplicatedStorage:WaitForChild("Remotes", 10)
+local Events    = ReplicatedStorage:WaitForChild("Events", 10)
+local RemoteGUI = ReplicatedStorage:WaitForChild("RemoteGUI", 10)
+local Functions = ReplicatedStorage:WaitForChild("Functions", 10)
+local DashEvent = ReplicatedStorage:WaitForChild("DashEvent", 10)
 
 -- ---------------------------------------------------------------- generation
 _G.__BEFLASH = (_G.__BEFLASH or 0) + 1
@@ -614,5 +614,9 @@ _G.__BEFLASH_DBG = {
     myPlot = myPlot, stands = stands, myBrainrots = myBrainrots, brainrotTools = brainrotTools,
     chargeTrigger = chargeTrigger, safeInvoke = safeInvoke, fmt = fmt, RANKS = RANKS,
 }
+
+-- Der Home-Tab: das GitHub-Commit-Log als Changelog plus der aktuelle Lauf.
+-- Zuletzt deklariert, aber das Template schiebt ihn an den Anfang der Leiste.
+pcall(function() win:Home() end)
 
 print("[beflash] loaded - gen " .. GEN .. ", RightShift for the panel")

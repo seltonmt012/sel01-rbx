@@ -61,7 +61,7 @@ local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local plr = Players.LocalPlayer
-local Remotes = ReplicatedStorage:WaitForChild("Remotes")
+local Remotes = ReplicatedStorage:WaitForChild("Remotes", 10)
 local BigNum = require(ReplicatedStorage.Util.BigNum)
 local CfgMain = require(ReplicatedStorage.Config.Main)
 local CfgUpgrades = require(ReplicatedStorage.Config.Upgrades)
