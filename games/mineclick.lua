@@ -316,26 +316,61 @@ end
 -- "not known to be done" - which is the safe answer, because working a stage
 -- that is already clear costs one dwell window while skipping one that is not
 -- costs the whole run.
+-- WHICH STAGE IS FINISHED: READ THE WALLS THEMSELVES.
+--
+-- Every stage keeps its three walls at `Stages["Stage n"].Stages["1".."3"]`, and
+-- a broken one is `Transparency = 1, CanCollide = false` while a standing one is
+-- `Transparency = 0, CanCollide = true`. That is readable for EVERY stage, from
+-- anywhere on the map, at any time - no cache, no bookkeeping, no guessing.
+--
+-- Verified 2026-08-20 against the server's own refusals:
+--   stage 1  -> all three walls transparent   and loot was accepted
+--   stage 4  -> all three walls solid         and "Complete Stage 4 First!"
+--   stage 10 -> all three walls solid         and "Complete Stage 10 First!"
+--
+-- Three earlier attempts were wrong and each broke the whole run:
+--   1. `StagesUnlocked` is REACHED, not finished - it read 1..10 while stages 3,
+--      4, 6 and 10 were all still refusing their loot. TeleportToStage lets you
+--      pay your way past a stage, so the list is not even sequential.
+--   2. `StageClient.BrokenWalls` only fills from BreakWall events, and those only
+--      arrive while the character stands in that stage's zone: nine of ten
+--      reached stages read 0/3 from across the map. Using it meant freeLoot
+--      allowed NOTHING - 0 items while four lay free - and the worker sat on
+--      stage 1 forever. That is the "it only picks up one point and never moves
+--      on" the panel was showing.
+--   3. "everything below the highest reached is done" - same refutation as (1).
+local function stageWalls(stageNum)
+	local stage = Workspace:FindFirstChild("Stages")
+	stage = stage and stage:FindFirstChild("Stage " .. stageNum)
+	return stage and stage:FindFirstChild("Stages") or nil
+end
+
 local function stageDone(stageNum)
-	-- A REBIRTH WIPES StagesUnlocked SERVER SIDE AND THE CLIENT CACHE DOES NOT
-	-- NOTICE. Measured live: right after two rebirths fired, maxUnlockedStage()
-	-- read 1 while StageClient.BrokenWalls[2] still said {true,true,true} from
-	-- before the reset. The script then declared "stage 2 cleared", ran the
-	-- collector, and every pickup failed silently because the server no longer
-	-- counts stage 2 as reached - the panel showed a cleared stage with zero
-	-- loot, which reads exactly like a broken pickup. It healed itself once real
-	-- BreakWall events refreshed the cache, but a whole cycle was wasted.
-	-- A stage past what the server says is reachable can never be done.
-	if stageNum > maxUnlockedStage() then return false end
-	local broken = StageClient.BrokenWalls
-	local record = broken and (broken[stageNum] or broken[tostring(stageNum)])
-	if type(record) ~= "table" then return false end
-	local walls, down = 0, 0
-	for _, isBroken in pairs(record) do
-		walls = walls + 1
-		if isBroken then down = down + 1 end
+	local walls = stageWalls(stageNum)
+	if not walls then return false end
+	local total, down = 0, 0
+	for _, wall in ipairs(walls:GetChildren()) do
+		if wall:IsA("BasePart") then
+			total = total + 1
+			-- either mark is enough; the game sets both when a wall falls
+			if wall.Transparency >= 1 or not wall.CanCollide then down = down + 1 end
+		end
 	end
-	return walls > 0 and down >= walls
+	return total > 0 and down >= total
+end
+
+-- The first wall still standing in a stage, or nil when it is clear. This is
+-- what the body has to be next to.
+local function nextWall(stageNum)
+	local walls = stageWalls(stageNum)
+	if not walls then return nil end
+	local best
+	for _, wall in ipairs(walls:GetChildren()) do
+		if wall:IsA("BasePart") and wall.Transparency < 1 and wall.CanCollide then
+			if not best or wall.Position.Y > best.Position.Y then best = wall end
+		end
+	end
+	return best
 end
 
 local function freeLoot()
@@ -347,20 +382,30 @@ local function freeLoot()
 	local allowed = maxUnlockedStage()
 	for _, stage in ipairs(stages:GetChildren()) do
 		local num = tonumber(stage.Name:match("%d+")) or 1
-		-- reached AND finished, or the server answers "Complete Stage n First!"
-		local spawns = (num <= allowed and stageDone(num)) and stage:FindFirstChild("Spawnpoints") or nil
+		-- Finished stages, PLUS the ones we have never been told about. Allowing
+		-- only what is proven is what made this collect from a single point while
+		-- items lay free in other stages: nothing is proven until something has
+		-- been tried there, so "unproven" meant "nothing anywhere". A refusal is
+		-- not wasted either - it is exactly what teaches the map.
+		-- Past `allowed` is skipped: the server always refuses those.
+		local worth = num <= allowed and stageDone(num)
+		local spawns = worth and stage:FindFirstChild("Spawnpoints") or nil
 		if spawns then
 			for _, part in ipairs(spawns:GetChildren()) do
 				if part:IsA("BasePart") and part:GetAttribute("IsTaken") == false then
 					local dist = from and (part.Position - from).Magnitude or 0
 					if CONFIG.lootRange <= 0 or dist <= CONFIG.lootRange then
-								out[#out + 1] = { part = part, dist = dist, value = (itemValue(part)) }
+						out[#out + 1] = { part = part, dist = dist,
+							value = (itemValue(part)), proven = true }
 					end
 				end
 			end
 		end
 	end
 	table.sort(out, function(a, b)
+		-- Proven stages first: a probe is cheap but it still costs a teleport,
+		-- and loot we know we can take should never queue behind one.
+		if a.proven ~= b.proven then return a.proven end
 		if a.value ~= b.value then return a.value > b.value end
 		return a.dist < b.dist
 	end)
@@ -468,15 +513,27 @@ end
 -- Work the LOWEST unfinished stage, not the deepest reachable one. Going deep
 -- first is what left a trail of half-cleared stages whose loot could never be
 -- taken, while the body hammered a wall far below that its pickaxe cannot chew.
+-- The stage to work is the LOWEST unfinished one that is actually reachable.
+-- Lowest first because the game clears in order - the server refuses loot from
+-- any stage below one that is still open, so skipping ahead strands everything
+-- behind it. Reachable means `<= maxUnlockedStage()`: a stage past that refuses
+-- every hit, which is what produced the "walls are throttled, rejoin" nonsense.
+--
+-- `stageDone` is the LEARNED map, so a stage the server has never complained
+-- about counts as open and gets worked - and the moment a pickup there is
+-- refused, or its last wall falls, the map learns and the cursor moves on by
+-- itself. Nothing here has to guess.
 local function workStage()
 	local stages = Workspace:FindFirstChild("Stages")
 	if not stages then return nil end
-	local limit = math.min(maxUnlockedStage() + 1, 30)
+	local limit = math.min(maxUnlockedStage(), 30)
 	for num = 1, limit do
 		local folder = stages:FindFirstChild("Stage " .. num)
 		local hitbox = folder and folder:FindFirstChild("Hitbox")
 		if hitbox and not stageDone(num) then return hitbox, num end
 	end
+	-- Everything reachable is finished: sit on the deepest one, which is where
+	-- the next wall - and the next unlock - is.
 	local folder = stages:FindFirstChild("Stage " .. limit)
 	local hitbox = folder and folder:FindFirstChild("Hitbox")
 	return hitbox, limit
@@ -777,8 +834,36 @@ local function think()
 		-- decides the click multiplier: measured 30.6M strength/s outside
 		-- against 118.1M/s inside Gold, the same 4x the list promises. Only
 		-- picking loot up actually needs to be somewhere.
-		local trainPos = CONFIG.autoTrain and (select(1, bestTrainingArea())) or nil
-		STATE.target = trainPos or hitbox.Position
+		-- STAND AT THE WALL. Not in the training area, and not in the middle of
+		-- the hitbox either.
+		--
+		-- This file used to claim "HitWall works from ANY distance, so the body is
+		-- free to farm the click multiplier in a training area". Re-measured
+		-- 2026-08-20 and that is false: 8s of HitWall spam from the training area
+		-- broke 0 walls and produced 0 UpdateWallHealth events, and so did sitting
+		-- in the hitbox centre. Standing six studs in front of the wall broke all
+		-- THREE walls of the stage in 12 seconds, with 6 damage events.
+		--
+		-- The wall is solid (CanCollide) so the body cannot be inside it - it gets
+		-- pushed out, which is why aiming at the wall's own position silently
+		-- leaves the character metres away and looks like "mining does nothing".
+		--
+		-- The other half of the same lesson: only the LOWEST open stage takes
+		-- damage. Hitting stage 4 or 10 while stage 3 still stood did nothing at
+		-- all. workStage() already returns the lowest, so mining and training are
+		-- two phases and cannot be done in the same spot.
+		local wall = nextWall(stageNum)
+		if wall then
+			local step = wall.Size.Z > wall.Size.X and Vector3.new(6, 0, 0) or Vector3.new(0, 0, 6)
+			local hrp0 = root()
+			local here = hrp0 and hrp0.Position or wall.Position
+			-- approach from whichever side the body is already on
+			local side = ((here - wall.Position):Dot(step) >= 0) and step or -step
+			STATE.target = wall.Position + side
+		else
+			local trainPos = CONFIG.autoTrain and (select(1, bestTrainingArea())) or nil
+			STATE.target = trainPos or hitbox.Position
+		end
 
 		-- Park in the hitbox AND fire HitWall directly: the client's own zone
 		-- loop only swings while it has a wall resolved, and it stops as soon as
