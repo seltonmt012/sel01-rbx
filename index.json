@@ -214,6 +214,16 @@
       "detect": "local rs = game:GetService('ReplicatedStorage') local t = rs:FindFirstChild('Tables') return rs:FindFirstChild('Paper') ~= nil and t ~= nil and t:FindFirstChild('Pickaxes') ~= nil and t:FindFirstChild('Rebirths') ~= nil and rs:FindFirstChild('Stats') ~= nil"
     },
     {
+      "alias": "spinjitsu",
+      "name": "+1 Spinjitsu Escape",
+      "file": "games/spinjitsu.lua",
+      "places": [
+        131910189515331
+      ],
+      "status": "ok",
+      "detect": "local rs = game:GetService('ReplicatedStorage') local m = rs:FindFirstChild('Modules') local r = rs:FindFirstChild('Remotes') if not (m and r) then return false end return m:FindFirstChild('Spinjitsu') ~= nil and r:FindFirstChild('ToggleSpinjitsu', true) ~= nil and r:FindFirstChild('GetWallState', true) ~= nil"
+    },
+    {
       "alias": "eggfarm",
       "name": "Grow a Chicken Fighter",
       "file": "games/eggfarm.lua",
