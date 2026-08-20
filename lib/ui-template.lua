@@ -984,10 +984,15 @@ function UI.Window(options)
 	activeCount.ZIndex = 3
 	window.activeCount = activeCount
 
+	-- 20x20 is a mouse target. On a phone the panel is scaled to about half, so
+	-- the same button lands near 10 points across - smaller than a fingertip and
+	-- effectively unpressable. The background is transparent and the glyph is
+	-- centred, so growing the button only grows what can be hit.
+	local headHit = (UI.device == "mobile") and 30 or 20
 	local function headButton(text, offset, onClick)
 		local b = Instance.new("TextButton")
-		b.Size = UDim2.fromOffset(20, 20)
-		b.Position = UDim2.new(1, offset, 0, 9)
+		b.Size = UDim2.fromOffset(headHit, headHit)
+		b.Position = UDim2.new(1, offset - (headHit - 20) / 2, 0, 9 - (headHit - 20) / 2)
 		b.BackgroundColor3 = Color3.new(1, 1, 1)
 		b.BackgroundTransparency = 1
 		b.BorderSizePixel = 0
@@ -1295,7 +1300,17 @@ function UI.Window(options)
 		end
 		tween(root, EASE.slow, { Size = UDim2.fromOffset(width, target) })
 	end)
-	headButton("×", -24, function() window:Destroy() end)
+	-- On a phone × HIDES rather than destroys. There is no RightShift there, so a
+	-- destroyed panel is gone until the script is executed again - and × is
+	-- exactly the button somebody presses to get their screen back. Hiding puts
+	-- the pill up instead, which brings it straight back.
+	headButton("×", -24, function()
+		if UI.device == "mobile" then
+			root.Visible = false
+		else
+			window:Destroy()
+		end
+	end)
 
 	--------------------------------------------------------------- master toggle
 	--
