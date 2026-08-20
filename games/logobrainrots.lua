@@ -44,18 +44,29 @@
         ~1.65s and only reaches ~126s around level 50. It is by far the
         strongest sink in the game.
       * REBIRTH WIPES THE WHOLE BALANCE, not just its price: 326,019,684 -> 0.
-        It multiplies money by 1 + 0.5*rebirths, resets speed (30 -> 18) and in
-        the one measured run it also dropped a placed brainrot. Off by default.
+        It multiplies money by 1 + 0.5*rebirths and resets speed (30 -> 18), but
+        it KEEPS every placed brainrot - measured on a full plot, rebirth 2 -> 3,
+        all 21 seats byte-identical before and after and PerSecond 246.06B ->
+        307.57B, exactly x1.25. The balance regenerates in about two minutes at
+        that income, so it is on by default; the money is spent down into levels
+        and base upgrades first because those survive the reset.
       * leaderstats.Money is a StringValue ("2,490$") for display. The real
         numbers all live in plr.Data (Money, Rebirth, StandsUnlocked, Stands,
         StandsCash, BrainrotsBackpack).
       * Stands above Data.StandsUnlocked have no prompt and the server refuses
-        them. UnlockStand is a server -> client NOTIFICATION - firing it upward
-        in three argument shapes changed nothing. Nothing buys a stand: the
-        server hands one over every time the balance passes the next threshold
-        in Modules.unlock_stands (2.5M, 5M, 17.5M, 115M ... 100T). Measured
-        StandsUnlocked 8 -> 21 purely from farming to 14.7T. So the only way to
-        widen the plot is to earn, which the loop does anyway.
+        them, and UnlockStand is a server -> client NOTIFICATION - firing it
+        upward in three argument shapes changed nothing. What widens the plot is
+        the "Upgrade Base" screen standing on the plot (Plots.<n>.Upgrader), a
+        plain ClickDetector at 32 studs: it reads "15 >> 16 / 100.0T $" and each
+        base level is one more stand, so StandsUnlocked = 8 + base level and
+        level 16 is the ceiling at 24 stands. The price is
+        Modules.unlock_stands[nextLevel] (2.5M, 5M, 17.5M, 115M ... 100T) - take
+        it from there, never from the abbreviated label. Verified end to end:
+        saved to 103.57T, bought base level 16, 24 stands, then rebirthed.
+      * LEVELS STOP AT 100. level_upgrades_manager greys the button out and
+        answers "Max level reached!". Once the plot is maxed the base upgrade is
+        the only sink left, which is why it gets a reserve instead of being
+        outbid by levels forever.
 
     Panel: RightShift.  Console handle: _G.__LOGOBR_DBG
 ]]
@@ -76,11 +87,17 @@ _G.__LOGOBR = (_G.__LOGOBR or 0) + 1
 local GEN = _G.__LOGOBR
 
 -- ------------------------------------------------------------------ configs
-local LevelUpgrade, Brainrots, RebirthsMgr, SpeedMgr
+local LevelUpgrade, Brainrots, RebirthsMgr, SpeedMgr, UnlockStands
 pcall(function() LevelUpgrade = require(Modules:WaitForChild("brainrot_level_upgrade", 10)) end)
 pcall(function() Brainrots     = require(Modules:WaitForChild("brainrots", 10)) end)
 pcall(function() RebirthsMgr   = require(Modules:WaitForChild("rebirths_manager", 10)) end)
 pcall(function() SpeedMgr      = require(Modules:WaitForChild("speed_manager", 10)) end)
+pcall(function() UnlockStands  = require(Modules:WaitForChild("unlock_stands", 10)) end)
+
+-- Read off level_upgrades_manager: at 100 the button greys out and the client
+-- answers "Max level reached!". Without this the payback ranking keeps putting
+-- a maxed brainrot at the top of the list and the pass buys nothing forever.
+local MAX_LEVEL = 100
 
 local function levelIncome(cps, level)
     cps, level = tonumber(cps) or 0, tonumber(level) or 1
@@ -113,8 +130,10 @@ local CONFIG = {
 
     -- spending
     autoLevels    = true,   -- level placed brainrots - 1.65s payback at level 1
+    autoBase      = true,   -- Upgrade Base: one more stand, priced from
+                            -- unlock_stands; the only sink left once levels max
     autoSpeed     = false,  -- walking speed is pointless while we teleport
-    autoRebirth   = false,  -- WIPES THE WHOLE BALANCE - opt in only
+    autoRebirth   = true,   -- wipes the balance but keeps every brainrot
 
     -- freebies
     autoOffline   = true,
@@ -136,6 +155,9 @@ local CONFIG = {
     spendEvery    = 12,
     levelsPerPass = 12,
     maxPayback    = 600,    -- never buy a level slower than this many seconds
+    reserveWindow = 300,    -- a base upgrade is only reserved for when income
+                            -- reaches it inside this many seconds; an
+                            -- unreachable target is a wall, not a goal
     rebirthKeep   = 0.0,    -- fraction of the balance NOT spent before rebirth
 }
 
@@ -156,6 +178,7 @@ local STATE = {
     target      = "-",
     failedGrabs = 0,
     stuckDeliveries = 0,
+    baseUpgrades = 0,
     pinTarget   = nil,     -- Vector3 or nil; one shared Heartbeat honours it
     farmBusy    = false,   -- only one routine may drive the character
     uiOwner     = nil,
@@ -840,7 +863,7 @@ local function levelCandidates()
     for _, e in ipairs(used) do
         local price = levelPrice(e.cps, e.level)
         local gain  = (levelIncome(e.cps, e.level + 1) - e.income) * moneyMultiplier()
-        if gain > 0 then
+        if gain > 0 and e.level < MAX_LEVEL then
             out[#out + 1] = {
                 stand   = e.stand,
                 name    = e.name,
@@ -888,6 +911,69 @@ local function upgradeLevels(budget, maxCount)
     return bought
 end
 
+-- ------------------------------------------------------------ base upgrade
+-- The "Upgrade Base" screen on the plot. It reads "15 >> 16 / 100.0T $" and
+-- each level is one more stand, so StandsUnlocked = 8 + base level. The price
+-- comes from Modules.unlock_stands rather than the label, because the label is
+-- abbreviated and a hand-written suffix table is how these get misread.
+local function baseUpgrade()
+    local plot = myPlot()
+    local up = plot and plot:FindFirstChild("Upgrader")
+    local screen = up and up:FindFirstChild("Screen")
+    if not screen then return nil end
+    local cd = screen:FindFirstChildOfClass("ClickDetector")
+    if not cd then return nil end
+
+    local nextLevel
+    local gui = screen:FindFirstChildOfClass("SurfaceGui")
+    local buy = gui and gui:FindFirstChild("Buy")
+    local levels = buy and buy:FindFirstChild("Levels")
+    if levels then
+        local _, b = tostring(levels.Text):match("(%d+)%s*>>%s*(%d+)")
+        nextLevel = tonumber(b)
+    end
+    nextLevel = nextLevel or (unlocked() - 8 + 1)
+
+    local price = UnlockStands and tonumber(UnlockStands[nextLevel])
+    if not price then return nil end
+    return { detector = cd, part = screen, nextLevel = nextLevel, price = price }
+end
+
+-- What one more stand is worth: it ends up holding at least what the weakest
+-- seat holds, because anything better than that is what the carry loop brings
+-- home next.
+local function baseUpgradePayback()
+    local info = baseUpgrade()
+    if not (info and info.price > 0) then return nil end
+    local _, used = census()
+    local worst = worstOf(used)
+    local gain = (worst and rank(worst) or 0) * moneyMultiplier()
+    if gain <= 0 then return nil, info end
+    return info.price / gain, info
+end
+
+local function tryBaseUpgrade()
+    local payback, info = baseUpgradePayback()
+    if not info then return false end
+    if money() < info.price then return false end
+    -- The ClickDetector is 32 studs, so this is the one purchase that has to
+    -- happen at the plot.
+    if not atHome() then return false end
+    if type(fireclickdetector) ~= "function" then return false end
+
+    local before = unlocked()
+    pcall(function() fireclickdetector(info.detector) end)
+    task.wait(1.5)
+    if unlocked() > before then
+        STATE.baseUpgrades = STATE.baseUpgrades + 1
+        note(("base level %d bought for %s - %d stands, payback %s"):format(
+            info.nextLevel, fmt(info.price), unlocked(),
+            payback and (("%.0fs"):format(payback)) or "?"))
+        return true
+    end
+    return false
+end
+
 -- ----------------------------------------------------------------- rebirth
 local function rebirthCost()
     if RebirthsMgr and RebirthsMgr.getRebirthCost then
@@ -907,7 +993,29 @@ local function tryRebirth()
     collectAll()
     if money() < cost then return false end
 
+    -- A rebirth is cheap and wipes the balance; a base level is expensive and
+    -- permanent. So a reachable base level always goes first, or the cheap
+    -- early rebirths quietly reset the savings every twenty seconds and the
+    -- plot never gets wider. This cannot stall: unlock_stands ends at level 16
+    -- and rebirth costs only climb x5 a tier.
+    if CONFIG.autoBase then
+        local _, info = baseUpgradePayback()
+        if info and info.price and money() < info.price
+           and info.price <= money() + perSecond() * CONFIG.reserveWindow then
+            note(("saving %s for base level %d before rebirthing"):format(
+                fmt(info.price), info.nextLevel))
+            return false
+        end
+    end
+
+    -- The rebirth wipes the balance, so anything permanent has to be bought
+    -- first. The base upgrade outlives the reset; the money does not.
     local keep = math.floor(money() * CONFIG.rebirthKeep)
+    if CONFIG.autoBase then
+        for _ = 1, 3 do
+            if not tryBaseUpgrade() then break end
+        end
+    end
     upgradeLevels(math.max(0, money() - math.max(cost, keep)), 40)
 
     if money() < cost then return false end
@@ -971,18 +1079,31 @@ loop(0.5, "autoFarm", farmCycle)
 loop(CONFIG.collectEvery, "autoCollect", function() collectAll() end)
 
 loop(CONFIG.spendEvery, "autoLevels", function()
-    -- Never spend the money a pending rebirth needs out from under it.
     local budget = money()
-    if CONFIG.autoRebirth then
-        local cost = rebirthCost()
-        if cost < math.huge and budget >= cost then
-            -- A rebirth is affordable, so the balance is going to be wiped
-            -- anyway: spend it all rather than hold any back.
-            budget = money()
+
+    -- Levels stop at 100, and then the base upgrade is the only sink left. Hold
+    -- its price back so the level pass cannot starve it - but only while it is
+    -- actually reachable, because reserving for an unaffordable wall is what
+    -- froze the balance in Sell Ores and Power Blast.
+    -- Ranking it against a level payback would mean never buying it at all: a
+    -- level pays back in seconds and a stand in days. But levels are capped at
+    -- 100 and every swap resets one to 1, so a payback race against them never
+    -- ends - and the plot would stay the width it started at. Reachability is
+    -- the only gate: if income closes the gap inside the window, hold the price
+    -- back; if it does not, it is a wall and must not freeze the balance.
+    if CONFIG.autoBase then
+        local _, info = baseUpgradePayback()
+        if info and info.price then
+            if info.price <= money() + perSecond() * CONFIG.reserveWindow then
+                budget = math.max(0, money() - info.price)
+            end
         end
     end
+
     upgradeLevels(budget, CONFIG.levelsPerPass)
 end)
+
+loop(8, "autoBase", function() tryBaseUpgrade() end)
 
 loop(20, "autoRebirth", function() tryRebirth() end)
 loop(15, "autoSpeed", function()
@@ -1065,9 +1186,17 @@ cLevels:Button("Level now", function()
     task.spawn(function() note("bought " .. upgradeLevels(money(), 25) .. " levels") end)
 end)
 
+local cBase = spend:Card("BASE", 0)
+cBase:Toggle("Upgrade base", CONFIG.autoBase, function(v) CONFIG.autoBase = v end,
+    "one more stand per level, priced from unlock_stands - the sink after level 100",
+    UI.theme.good)
+cBase:Slider("Reserve window (s)", 60, 1800, CONFIG.reserveWindow,
+    function(v) CONFIG.reserveWindow = math.floor(v) end)
+cBase:Button("Upgrade base now", function() task.spawn(tryBaseUpgrade) end)
+
 local cReb = spend:Card("REBIRTH", 2)
 cReb:Toggle("Auto rebirth", CONFIG.autoRebirth, function(v) CONFIG.autoRebirth = v end,
-    "WIPES THE WHOLE BALANCE, resets speed and dropped a placed brainrot once", UI.theme.bad)
+    "wipes the balance, keeps every brainrot; x1.5 -> x2 -> x2.5 money", UI.theme.warn)
 cReb:Toggle("Buy speed", CONFIG.autoSpeed, function(v) CONFIG.autoSpeed = v end,
     "pointless while the route is flown")
 cReb:Button("Rebirth now", function() task.spawn(tryRebirth) end, UI.theme.warn)
@@ -1120,9 +1249,17 @@ task.spawn(function()
                     nextLevel.stand, nextLevel.name, nextLevel.level,
                     fmt(nextLevel.price), nextLevel.payback)
                 or  "  next level: -"),
-            ("  rebirth %d costs %s (%s)"):format(
+            ("  rebirth %d costs %s (%s)   done %d"):format(
                 rebirths() + 1, cost < math.huge and fmt(cost) or "?",
-                (cost < math.huge and money() >= cost) and "affordable" or "not yet"),
+                (cost < math.huge and money() >= cost) and "affordable" or "not yet",
+                STATE.rebirths),
+            (function()
+                local pb, info = baseUpgradePayback()
+                if not info then return "  base upgrade: -" end
+                return ("  base level %d for %s, payback %s   bought %d"):format(
+                    info.nextLevel, fmt(info.price),
+                    pb and (("%.0fs"):format(pb)) or "?", STATE.baseUpgrades)
+            end)(),
             "NOTE",
             "  " .. tostring(STATE.note),
         })
@@ -1156,6 +1293,8 @@ _G.__LOGOBR_DBG = {
     levelCandidates = levelCandidates, upgradeLevels = upgradeLevels,
     levelIncome = levelIncome, levelPrice = levelPrice,
     tryRebirth = tryRebirth, rebirthCost = rebirthCost,
+    baseUpgrade = baseUpgrade, baseUpgradePayback = baseUpgradePayback,
+    tryBaseUpgrade = tryBaseUpgrade, MAX_LEVEL = MAX_LEVEL,
     buySpeed = buySpeed, speedCost = speedCost,
     claimOffline = claimOffline, claimQuests = claimQuests,
     money = money, perSecond = perSecond, rebirths = rebirths, fmt = fmt,
