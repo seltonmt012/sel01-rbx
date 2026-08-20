@@ -420,6 +420,11 @@ UI.DEVICES = { "pc", "mobile" }
 -- has no workspace and no camera at all, and a template that cannot be loaded
 -- outside the game loses its only test harness.
 function UI.viewport()
+	-- Test hook: there is no way to give a desktop client a phone's viewport, so
+	-- _G.__SEL_VIEWPORT forces one and the panel can be looked at at the size it
+	-- would really have on a 844x390 phone. Never set in normal use.
+	local forced = _G.__SEL_VIEWPORT
+	if typeof and typeof(forced) == "Vector2" then return forced end
 	local ok, size = pcall(function()
 		local cam = workspace and workspace.CurrentCamera
 		return cam and cam.ViewportSize

@@ -216,13 +216,21 @@ local function fmt(n)
     return string.format("%.3e", n)
 end
 
+-- The labels are inconsistent about case ("$5.7k" next to "$26.7De") and the
+-- first rung of every ladder reads "$Free" with no digits at all. Both of those
+-- returned nil in the first version, which read as "the shop has no price" and
+-- froze every purchase.
 local function parsePrice(txt)
     if type(txt) ~= "string" then return nil end
-    local num, suf = txt:match("%$?%s*([%d%.]+)%s*(%a*)")
+    if txt:lower():find("free") then return 0 end
+    local num, suf = txt:match("%$?%s*([%d%.,]+)%s*(%a*)")
     if not num then return nil end
-    local n = tonumber(num)
-    local m = SUFFIX[suf or ""]
-    if not n or not m then return nil end
+    local n = tonumber((num:gsub(",", "")))
+    if not n then return nil end
+    suf = suf or ""
+    if suf ~= "" then suf = suf:sub(1, 1):upper() .. suf:sub(2):lower() end
+    local m = SUFFIX[suf]
+    if not m then return nil end
     return n * m
 end
 
