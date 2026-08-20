@@ -8,7 +8,7 @@
 -- they are - they keep passing "Auto rebirth" and only this file decides what
 -- the player reads.
 --
--- 697 entries.
+-- 698 entries.
 
 return {
 	["%d Min"] = "%d min",
@@ -18,6 +18,7 @@ return {
 	["%s aktiv"] = "%s active",
 	["AN"] = "ON",
 	["AUS"] = "OFF",
+	["An: das Panel kommt in jedem Spiel, das Selux kennt."] = "On: the panel comes up in every game Selux knows.",
 	["Angekommen. Nummer #%s - die kannst du im Support-Forum nennen."] = "Arrived. Number #%s - quote it in the support forum.",
 	["Aus: das Panel kommt nur in dem Spiel, in dem du den Loader ausfuehrst."] = "Off: the panel only comes up in the game you run the loader in.",
 	["Auto Farm laeuft"] = "Auto farm running",
