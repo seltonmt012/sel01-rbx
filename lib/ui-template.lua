@@ -1737,12 +1737,30 @@ function UI.Window(options)
 			-- Locked afterwards: the same person pressing twenty times tells us
 			-- nothing more than pressing once, and it is the whole spam surface.
 			sent = true
-			reportBtn.Text = "GEMELDET - DANKE  #" .. r.id
-			reportBtn.BackgroundColor3 = UI.theme.good
-			if how == "clipboard" then
+			if how == "limit" then
+				-- Not delivered. Say so, and give the user the way round it.
+				reportBtn.Text = "LIMIT ERREICHT"
+				reportBtn.BackgroundColor3 = UI.theme.warn
+				pcall(function()
+					(setclipboard or toclipboard or set_clipboard)(r.text)
+				end)
+				reportHint.set("Von dieser Verbindung kamen zuletzt zu viele Meldungen, "
+					.. "diese wurde NICHT zugestellt. Sie liegt in der Zwischenablage - "
+					.. "fueg sie im Discord unter #support ein, oder probier es in einer "
+					.. "Stunde nochmal.")
+			elseif how == "doppelt" then
+				reportBtn.Text = "SCHON GEMELDET  #" .. r.id
+				reportBtn.BackgroundColor3 = UI.theme.warn
+				reportHint.set("Dieses Problem wurde fuer dieses Spiel gerade schon "
+					.. "gemeldet - es ist angekommen, aber nicht doppelt.")
+			elseif how == "clipboard" then
+				reportBtn.Text = "KOPIERT  #" .. r.id
+				reportBtn.BackgroundColor3 = UI.theme.good
 				reportHint.set("In die Zwischenablage kopiert - bitte im Discord "
 					.. "unter #support einfuegen. Nummer #" .. r.id)
 			else
+				reportBtn.Text = "GEMELDET - DANKE  #" .. r.id
+				reportBtn.BackgroundColor3 = UI.theme.good
 				reportHint.set("Angekommen. Nummer #" .. r.id
 					.. " - die kannst du im Support-Forum nennen.")
 			end
@@ -1975,6 +1993,20 @@ function UI.sendReport(report)
 				Body = HttpService:JSONEncode(report),
 			})
 			if ok and response and (response.StatusCode or 0) < 400 then
+				-- READ THE BODY, NOT JUST THE STATUS. The relay answers 200 for
+				-- three different outcomes on purpose - delivered, dropped by the
+				-- rate limit, dropped as a duplicate - because the panel has
+				-- already thanked the user and a spammer should not learn which
+				-- gate they hit. But telling the user "Angekommen" when it was
+				-- silently discarded is a lie, and it cost a whole debugging
+				-- round: the panel said it arrived, Discord was empty, and the
+				-- only trace was a counter sitting at its cap in KV.
+				local body = tostring(response.Body or "")
+				if string.find(body, "limit", 1, true) then
+					return true, "limit"
+				elseif string.find(body, "dup", 1, true) then
+					return true, "doppelt"
+				end
 				return true, "relay"
 			end
 		end
