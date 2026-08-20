@@ -401,6 +401,108 @@ function UI.setLang(code)
 	return true
 end
 
+--------------------------------------------------------------------------------
+-- device and scale
+--------------------------------------------------------------------------------
+--
+-- The panel is 820x582 and that is a comfortable window on a monitor and the
+-- ENTIRE SCREEN on a phone - people run these scripts on mobile executors and
+-- the game underneath is then completely covered. So every window carries a
+-- UIScale, the scale comes from the viewport, and the device is asked once and
+-- remembered in selux-device.txt next to selux-lang.txt.
+--
+-- PC is deliberately left alone: the formula caps at 1, so a monitor of any
+-- normal size renders exactly what it rendered before this existed.
+local DEVICE_FILE = "selux-device.txt"
+UI.DEVICES = { "pc", "mobile" }
+
+-- Guarded to the last line: uitest.lua runs this file against a fake Roblox that
+-- has no workspace and no camera at all, and a template that cannot be loaded
+-- outside the game loses its only test harness.
+function UI.viewport()
+	local ok, size = pcall(function()
+		local cam = workspace and workspace.CurrentCamera
+		return cam and cam.ViewportSize
+	end)
+	if ok and size and size.X and size.X > 1 and size.Y > 1 then return size end
+	return Vector2.new(1280, 720)
+end
+
+-- Touch WITHOUT a keyboard is a phone or a tablet; a touchscreen laptop reports
+-- both and is a PC. The viewport is the second opinion, because an emulator or
+-- a mobile executor that lies about TouchEnabled still cannot fake being 1080p.
+function UI.detectDevice()
+	local touch, keyboard, mouse = false, true, true
+	pcall(function()
+		local uis = game:GetService("UserInputService")
+		touch, keyboard, mouse = uis.TouchEnabled, uis.KeyboardEnabled, uis.MouseEnabled
+	end)
+	local vp = UI.viewport()
+	local vx = tonumber(vp.X) or 1280
+	local vy = tonumber(vp.Y) or 720
+	local size = math.floor(vx) .. "x" .. math.floor(vy)
+	-- ORDER MATTERS, and getting it wrong is not theoretical: the viewport test
+	-- came first in the first version and called a WINDOWED desktop client
+	-- (958x599 here) a phone. A keyboard and a mouse together are a PC whatever
+	-- the window size is, and the viewport is only the tie-breaker for a client
+	-- that reports neither.
+	if touch and not keyboard then return "mobile", "touch, no keyboard" end
+	if keyboard and mouse then return "pc", "keyboard + mouse, " .. size end
+	if vx < 900 or vy < 500 then return "mobile", "viewport " .. size end
+	return "pc", size
+end
+
+UI.device = _G.__SEL_DEVICE
+UI.deviceAsked = _G.__SEL_DEVICE_ASKED or false
+if not UI.device and isfile and isfile(DEVICE_FILE) then
+	local ok, saved = pcall(readfile, DEVICE_FILE)
+	if ok and type(saved) == "string" then
+		saved = string.lower((string.gsub(saved, "%s", "")))
+		if saved == "pc" or saved == "mobile" then
+			UI.device = saved
+			UI.deviceAsked = true
+		end
+	end
+end
+local detected, detectWhy = UI.detectDevice()
+UI.device = UI.device or detected
+UI.detected, UI.detectWhy = detected, detectWhy
+_G.__SEL_DEVICE = UI.device
+_G.__SEL_DEVICE_ASKED = UI.deviceAsked
+
+-- How much of the screen a panel is allowed to take. On a phone the point is
+-- that the GAME stays visible, so it is capped well below the full height; on a
+-- desktop the cap of 1 means nothing changes at all.
+UI.deviceFill = { pc = 0.98, mobile = 0.80 }
+
+function UI.scaleFor(width, height)
+	local vp = UI.viewport()
+	local vx = tonumber(vp.X) or 1280
+	local vy = tonumber(vp.Y) or 720
+	local fill = UI.deviceFill[UI.device] or 0.98
+	local s = math.min(vx * fill / math.max(width, 1), vy * fill / math.max(height, 1), 1)
+	return math.max(s, 0.3)
+end
+
+-- Live windows register a rescale hook, so switching the device moves every open
+-- panel at once - exactly like the language switch does.
+local liveScales = setmetatable({}, { __mode = "k" })
+
+function UI.setDevice(code, remember)
+	if code ~= "pc" and code ~= "mobile" then return false end
+	UI.device = code
+	_G.__SEL_DEVICE = code
+	if remember ~= false then
+		UI.deviceAsked = true
+		_G.__SEL_DEVICE_ASKED = true
+		pcall(function() writefile(DEVICE_FILE, code) end)
+	end
+	for window in pairs(liveScales) do
+		pcall(function() window.applyScale() end)
+	end
+	return true
+end
+
 -- The flag itself: the repo copy for everybody, the workspace copy while
 -- developing, and the two letters when neither is reachable. A panel must never
 -- lose its language switch because an image did not load.
@@ -602,6 +704,106 @@ local function press(button, color)
 end
 
 --------------------------------------------------------------------------------
+-- the device question
+--------------------------------------------------------------------------------
+--
+-- Asked ONCE, the first time any panel is built on this executor, and then never
+-- again - the answer lives in selux-device.txt. It is deliberately a tiny card
+-- and not a full-screen dialog: the whole point of the question is that a
+-- full-screen anything is unusable on a phone, so the question itself must not
+-- be one. The detected answer is pre-selected, so on a desktop it is one click
+-- (or no click at all - the panel is already correct behind it).
+function UI.askDevice(onDone)
+	if UI.deviceGui and UI.deviceGui.Parent then return UI.deviceGui end
+
+	local W, H = 300, 186
+	local gui = Instance.new("ScreenGui")
+	gui.Name = "SeluxDevice"
+	gui.ResetOnSpawn = false
+	gui.IgnoreGuiInset = true
+	gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+	gui.DisplayOrder = 1000
+	pcall(function() gui.Parent = game:GetService("CoreGui") end)
+	if not gui.Parent then gui.Parent = plr:WaitForChild("PlayerGui") end
+	UI.deviceGui = gui
+
+	local card = frame(gui, UDim2.fromOffset(W, H), nil, UI.theme.window)
+	card.AnchorPoint = Vector2.new(0.5, 0.5)
+	card.Position = UDim2.fromScale(0.5, 0.5)
+	card.Active = true
+	card.Draggable = true
+	corner(card, 13)
+	stroke(card, UI.theme.accent, 0.4)
+	local cardScale = Instance.new("UIScale")
+	cardScale.Scale = UI.scaleFor(W, H)
+	cardScale.Parent = card
+
+	local title = label(card, UI.BRAND, 13, UI.font.heading, UI.theme.accentSoft)
+	title.Position = UDim2.fromOffset(16, 12)
+	title.Size = UDim2.fromOffset(120, 16)
+
+	local question = label(card, "Panel-Groesse: PC oder Handy?", 14, UI.font.heading, UI.theme.text)
+	question.Position = UDim2.fromOffset(16, 34)
+	question.Size = UDim2.new(1, -32, 0, 20)
+
+	local hint = label(card, "Auf dem Handy wird das Panel kleiner skaliert, damit das Spiel sichtbar bleibt.",
+		11, UI.font.body, UI.theme.muted)
+	hint.Position = UDim2.fromOffset(16, 56)
+	hint.Size = UDim2.new(1, -32, 0, 30)
+	hint.TextWrapped = true
+	hint.TextYAlignment = Enum.TextYAlignment.Top
+
+	local found = label(card, "", 10, UI.font.body, UI.theme.faint)
+	found.Position = UDim2.fromOffset(16, H - 26)
+	found.Size = UDim2.new(1, -32, 0, 14)
+	setText(found, "erkannt: " .. UI.detected .. " (" .. tostring(UI.detectWhy) .. ")")
+
+	local buttons = {}
+	local function paint()
+		for code, b in pairs(buttons) do
+			local on = (code == UI.device)
+			tween(b.button, EASE.quick, {
+				BackgroundColor3 = on and UI.theme.accent or UI.theme.input,
+				BackgroundTransparency = on and 0 or 0.25,
+			})
+			tween(b.text, EASE.quick, { TextColor3 = on and UI.theme.window or UI.theme.textSoft })
+		end
+	end
+
+	local labels = { pc = "PC", mobile = "Handy" }
+	for i, code in ipairs(UI.DEVICES) do
+		-- 128x40 is a finger, not a mouse pointer: anything smaller is a miss on a
+		-- phone, which is precisely the device this question exists for.
+		local b = Instance.new("TextButton")
+		b.Size = UDim2.fromOffset(128, 40)
+		b.Position = UDim2.fromOffset(16 + (i - 1) * 140, 96)
+		b.BackgroundColor3 = UI.theme.input
+		b.BorderSizePixel = 0
+		b.Text = ""
+		b.AutoButtonColor = false
+		b.Parent = card
+		corner(b, 9)
+		local text = label(b, labels[code] or code, 14, UI.font.heading, UI.theme.textSoft)
+		text.Size = UDim2.fromScale(1, 1)
+		text.TextXAlignment = Enum.TextXAlignment.Center
+		buttons[code] = { button = b, text = text }
+		-- task.delay rather than task.wait: the handler must not yield. A real tap
+		-- would survive it, but a synthetic con:Fire() runs the body inline and
+		-- died on "thread is not yieldable", which left the card on screen with
+		-- the choice already saved - the one state that looks broken to a user.
+		b.MouseButton1Click:Connect(function()
+			UI.setDevice(code)
+			paint()
+			UI.deviceGui = nil
+			task.delay(0.15, function() pcall(function() gui:Destroy() end) end)
+			if onDone then pcall(onDone, code) end
+		end)
+	end
+	paint()
+	return gui
+end
+
+--------------------------------------------------------------------------------
 -- window
 --------------------------------------------------------------------------------
 
@@ -624,6 +826,22 @@ function UI.Window(options)
 	local root = Instance.new("Frame")
 	root.Size = UDim2.fromOffset(width, height)
 	root.Position = UDim2.new(0.5, -width / 2, 0.5, -height / 2)
+	-- Everything below is laid out in offsets against 820x582, and rewriting all
+	-- of it in scale units would break every measured position in this file. One
+	-- UIScale on the root does the whole job instead: it multiplies the rendered
+	-- size of the frame and every descendant, about the AnchorPoint - which is
+	-- (0,0) here, so the position has to be recentred by hand whenever it changes.
+	local rootScale = Instance.new("UIScale")
+	rootScale.Scale = 1
+	rootScale.Parent = root
+
+	-- THE QUESTION COMES FIRST. Building the panel and showing the card on top of
+	-- it means a phone sees the full-screen panel it was about to fix, so the
+	-- window is built - the script keeps adding pages to it as usual - and simply
+	-- stays hidden until the device is known. It is revealed at the right scale,
+	-- so a phone never renders a desktop-sized panel for even one frame.
+	local pendingDevice = not UI.deviceAsked
+	if pendingDevice then root.Visible = false end
 	root.BackgroundColor3 = UI.theme.window
 	root.BorderSizePixel = 0
 	root.Active = true
@@ -676,6 +894,21 @@ function UI.Window(options)
 		badgeText.TextXAlignment = Enum.TextXAlignment.Center
 		badgeText.ZIndex = 4
 	end
+
+	-- The device question has to be reachable again after it has been answered -
+	-- a phone that was answered "PC" by accident would otherwise be stuck with a
+	-- panel covering the whole screen and no way back. The mark in the rail is
+	-- the button; there is no room in the header for another chip and the mark is
+	-- the one element every panel has in the same place.
+	local badgeHit = Instance.new("TextButton")
+	badgeHit.Size = UDim2.fromOffset(34, 34)
+	badgeHit.Position = UDim2.fromOffset(6, 7)
+	badgeHit.BackgroundTransparency = 1
+	badgeHit.Text = ""
+	badgeHit.AutoButtonColor = false
+	badgeHit.ZIndex = 5
+	badgeHit.Parent = rail
+	badgeHit.MouseButton1Click:Connect(function() pcall(UI.askDevice) end)
 
 	local railList = frame(rail, UDim2.new(1, 0, 1, -100), UDim2.fromOffset(0, 46), UI.theme.rail, 1)
 	railList.ZIndex = 3
@@ -857,6 +1090,48 @@ function UI.Window(options)
 	-- registers itself and UI.setLang calls back into it.
 	window.onLang = paintFlags
 	liveWindows[window] = true
+
+	----------------------------------------------------------------- scale
+	-- Recentres as well as resizes: with AnchorPoint (0,0) a UIScale shrinks the
+	-- panel towards its top-left corner, so a scaled window left at the old
+	-- position sits high and to the left of centre instead of in the middle.
+	function window.applyScale(value)
+		local s = value or UI.scaleFor(width, height)
+		rootScale.Scale = s
+		root.Position = UDim2.new(0.5, -(width * s) / 2, 0.5, -(height * s) / 2)
+		window.scale = s
+		return s
+	end
+	liveScales[window] = true
+	window.applyScale()
+	-- A phone has no RightShift, so the hotkey below cannot bring a hidden panel
+	-- back. The pill does, and it only exists where it is needed.
+	local reopen = Instance.new("TextButton")
+	reopen.Name = "SeluxReopen"
+	reopen.Size = UDim2.fromOffset(74, 30)
+	reopen.Position = UDim2.new(0, 12, 0, 12)
+	reopen.BackgroundColor3 = UI.theme.accent
+	reopen.BorderSizePixel = 0
+	reopen.Text = ""
+	reopen.AutoButtonColor = false
+	reopen.Visible = false
+	reopen.Active = true
+	reopen.Draggable = true
+	reopen.ZIndex = 50
+	reopen.Parent = gui
+	corner(reopen, 9)
+	local reopenText = label(reopen, UI.BRAND, 12, UI.font.heading, UI.theme.window)
+	reopenText.Size = UDim2.fromScale(1, 1)
+	reopenText.TextXAlignment = Enum.TextXAlignment.Center
+	reopenText.ZIndex = 51
+	reopen.MouseButton1Click:Connect(function()
+		root.Visible = true
+		reopen.Visible = false
+	end)
+	window.reopen = reopen
+	root:GetPropertyChangedSignal("Visible"):Connect(function()
+		reopen.Visible = (not root.Visible) and UI.device == "mobile"
+	end)
 
 	----------------------------------------------------------------- status strip
 	local strip = frame(content, UDim2.new(1, 0, 0, 52), UDim2.fromOffset(0, 38), UI.theme.accent, 0.95)
@@ -2136,6 +2411,29 @@ function UI.Window(options)
 			root.Visible = not root.Visible
 		end
 	end)
+
+	--------------------------------------------------------------- the question
+	-- Once per executor: the card goes up, the panel waits behind it, and the
+	-- panel is revealed at the chosen scale the moment the question is answered.
+	-- The wait is polled rather than wired to a callback because askDevice builds
+	-- ONE card for however many panels are open, and every one of them has to be
+	-- released by that single answer.
+	--
+	-- The 45s ceiling is the safety net: a card that is lost (a game that wipes
+	-- the PlayerGui, an executor that refuses the ScreenGui) must not leave a
+	-- running panel invisible forever.
+	if pendingDevice then
+		task.defer(function()
+			pcall(UI.askDevice)
+			local waited = 0
+			while not UI.deviceAsked and waited < 45 do
+				task.wait(0.2)
+				waited = waited + 0.2
+			end
+			window.applyScale()
+			root.Visible = true
+		end)
+	end
 
 	return window
 end
