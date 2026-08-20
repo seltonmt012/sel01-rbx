@@ -90,6 +90,9 @@ local CONFIG = {
 	-- through; higher values hold more back.
 	rebirthReserve = 1.0,
 	cheapShare = 0.25,      -- ...unless it costs under this share of the next wall
+	worldPushSeconds = 300, -- bank looks for the next world once it is this close
+	mogBank = true,         -- pause rebirths when no NPC is reachable and gear is unpaid
+	mogBankSeconds = 180,   -- ...but never longer than this, so it cannot stall
 }
 
 local STATE = {
@@ -102,6 +105,7 @@ local STATE = {
 	world = 1, zone = "-",
 	npc = "-", npcPays = 0, mogs = 0,
 	rebirthNeed = 0, pets = 0, petsEquipped = 0, petMul = 0, aura = "-", auraMul = 0,
+	worldNeed = 0, mogNeed = 0, holding = false, mogHoldStart = nil,
 	busy = false, bodyOwner = nil,
 }
 
@@ -109,6 +113,13 @@ local STATE = {
 -- gear rung costs so it can stop mogging the moment that is funded, and a local
 -- is invisible above its own definition
 local nextGear
+-- same reason: the spend guards and the rebirth both have to ask whether a world
+-- wall is currently being banked for, and that is defined with the portal
+local pushingForWorld
+-- ...and whether the looks have to be banked to reach ANY mog-able NPC, which is
+-- what world 2 turns into: its cheapest NPC wants 35B looks while the rebirth
+-- keeps spending the balance down at 4B
+local cheapestNPCNeed
 
 --------------------------------------------------------------------------------
 -- helpers
@@ -321,6 +332,10 @@ local function bestTrainer()
 end
 
 local function trainPhase()
+	-- once the bank is full there is nothing to train FOR; go and spend it
+	if STATE.holding == "mog" and STATE.mogNeed > 0 and STATE.looks >= STATE.mogNeed then
+		return
+	end
 	local model, mul = bestTrainer()
 	if not model then return end
 	local pos = pivotOf(model)
@@ -359,6 +374,27 @@ local function bestZone()
 		end
 	end
 	return best, bestNeed
+end
+
+-- The cheapest NPC this world offers, read from the config rather than from what
+-- happens to be streamed in. Wins come from nowhere else, so if the balance is
+-- under this figure the farm has nothing to mog at all.
+function cheapestNPCNeed()
+	local npcs = conf("NPCsConfig")
+	local zones = conf("NPCZoneConfig")
+	local zoneCfg = conf("ZoneConfig")
+	if not (npcs and zones and zoneCfg) then return nil end
+	local best
+	for name, entry in pairs(npcs) do
+		local need = tonumber(entry and entry.Looks)
+		local ground = zones[name]
+		local zoneName = ground and tostring(ground):match("^(Zone%d+)")
+		local zone = zoneName and zoneCfg[zoneName]
+		if need and zone and tonumber(zone.World) == (STATE.world or 1) then
+			if not best or need < best then best = need end
+		end
+	end
+	return best
 end
 
 -- Strongest NPC in reach that our Looks actually beat. Ranking on the payout
@@ -454,20 +490,41 @@ end
 -- while the very next rung above the worn gear went through immediately. So the
 -- only thing worth asking for is the cheapest entry whose Multiplier beats what
 -- is worn - never the best affordable one.
+-- The ladder spans EVERY world reached so far, not just the current one. Moving to
+-- world 2 left the farm standing on rung 15 while world 2's shop starts at 17, and
+-- the skipped rung 16 is back in world 1 - the shop only ever answers for the rung
+-- directly above what is worn, so the ladder has to be able to walk back.
+_G.__LOOKSCLICK_GEAR = _G.__LOOKSCLICK_GEAR or {}
+
 local function gearLadder()
 	local cfg = conf("GearConfig") or {}
-	local shop = worldFolder()
-	shop = shop and shop:FindFirstChild("GearShop")
-	if not shop then return {} end
 	local rungs = {}
-	for _, model in ipairs(shop:GetChildren()) do
-		local entry = cfg[model.Name]
-		local cost = entry and tonumber(entry.Cost)
-		local mul = entry and tonumber(entry.Multiplier)
-		local order = entry and tonumber(entry.Order)
+	for id, entry in pairs(cfg) do
+		local cost = tonumber(entry and entry.Cost)
+		local mul = tonumber(entry and entry.Multiplier)
+		local order = tonumber(entry and entry.Order)
+		local world = tonumber(entry and entry.World) or 1
 		-- entries with no numeric Cost/Order are the Robux ones (God Crown)
-		if cost and mul and order and not entry.Premium then
-			rungs[#rungs + 1] = { model = model, entry = entry, cost = cost, mul = mul, order = order }
+		if cost and mul and order and not entry.Premium and world <= (STATE.world or 1) then
+			local folder = workspace:FindFirstChild("World" .. world)
+			local shop = folder and folder:FindFirstChild("GearShop")
+			local model = shop and shop:FindFirstChild(id)
+			local button
+			if model then
+				for _, d in ipairs(model:GetDescendants()) do
+					if d:IsA("BasePart") and d.Name == "ButtonTop" then button = d break end
+				end
+				-- another world's shop is streamed out, so remember where it was
+				if button then _G.__LOOKSCLICK_GEAR[id] = button.Position end
+			end
+			rungs[#rungs + 1] = {
+				id = id, model = model, button = button, entry = entry, cost = cost,
+				mul = mul, order = order, world = world,
+				-- with the shop streamed out the model is still there but its parts
+				-- are not, so fall back to the model pivot as a travel target
+				pos = button and button.Position or _G.__LOOKSCLICK_GEAR[id]
+					or (model and pivotOf(model)),
+			}
 		end
 	end
 	table.sort(rungs, function(a, b) return a.order < b.order end)
@@ -481,6 +538,15 @@ function nextGear()
 	return nil
 end
 
+-- Returns the rung itself even when its model is streamed out, so gearPass knows
+-- where to travel; nextGear's first return stays the model for the old callers.
+local function nextRung()
+	for _, rung in ipairs(gearLadder()) do
+		if rung.mul > (STATE.gearMul or 0) then return rung end
+	end
+	return nil
+end
+
 -- Gear is a best-only ladder and the shop model's ButtonTop is a TouchInterest
 -- that answers from 108 studs, so this never moves the character.
 local function gearPass()
@@ -489,18 +555,27 @@ local function gearPass()
 	-- climb as many rungs as the balance carries in one visit
 	for _ = 1, 12 do
 		refresh()
-		local model, cost, rung = nextGear()
-		if not (model and cost and cost <= STATE.wins) then return end
-		local button
-		for _, d in ipairs(model:GetDescendants()) do
-			if d:IsA("BasePart") and d.Name == "ButtonTop" then button = d break end
+		local rung = nextRung()
+		if not (rung and rung.cost <= STATE.wins) then return end
+		local stop
+		-- the rung may live in a world we are not standing in, and that shop is
+		-- streamed out - travel to the remembered position and let it load
+		if not rung.button and rung.pos then
+			pcall(function() plr:RequestStreamingAround(rung.pos) end)
+			local target = CFrame.new(rung.pos + Vector3.new(0, 3, 0))
+			stop = pin(function() return target end)
+			task.wait(2)
+			rung = nextRung() or rung
 		end
-		if not button then return end
+		local button = rung.button
+		if not button then
+			if stop then stop() end
+			return
+		end
 		local before = plr:GetAttribute("BestGearMultiplier") or 0
 		-- the touch answers from about a hundred studs, but the trainer and the
 		-- shop are a thousand apart, so park on the button when it is out of range
-		local stop
-		if (hrp.Position - button.Position).Magnitude > 80 then
+		if not stop and (hrp.Position - button.Position).Magnitude > 80 then
 			local target = CFrame.new(button.Position + Vector3.new(0, 3, 0))
 			stop = pin(function() return target end)
 			task.wait(0.8)
@@ -514,9 +589,10 @@ local function gearPass()
 		if stop then stop() end
 		local after = plr:GetAttribute("BestGearMultiplier") or before
 		if after <= before then return end
-		STATE.gear = (rung.entry.Name) or model.Name
+		STATE.gear = rung.entry.Name or rung.id
 		STATE.gearMul = after
-		note(string.format("gear %s x%s (%s wins)", STATE.gear, short(after), short(cost)))
+		note(string.format("gear %s x%s (%s wins, W%d)", STATE.gear, short(after),
+			short(rung.cost), rung.world))
 	end
 end
 
@@ -546,6 +622,8 @@ end
 -- which collapses to nothing right after every rebirth.
 local function canSpendLooks(cost)
 	if not cost or cost > STATE.looks then return false end
+	-- while banking for a world wall nothing else touches the looks
+	if pushingForWorld and pushingForWorld() then return false end
 	if cost <= spendableLooks() then return true end
 	local need = rebirthNeed()
 	return need ~= nil and cost <= need * CONFIG.cheapShare
@@ -553,6 +631,41 @@ end
 
 local function rebirthPass()
 	if CONFIG.rebirthUntil > 0 and STATE.rebirths >= CONFIG.rebirthUntil then return end
+	if pushingForWorld and pushingForWorld() then
+		STATE.holding = "world"
+		return
+	end
+	-- Hold for a mog too: wins buy the gear rung, gear is what a click is worth,
+	-- and in world 2 the cheapest NPC wants 6B looks against a 4.5B rebirth wall.
+	-- The hold has to last until the gear is actually PAID, not just until the
+	-- looks are banked - releasing on the looks alone let the rebirth fire in the
+	-- same second the bank filled, over and over, and no win was ever earned.
+	-- A wall-clock cap keeps it from stalling forever if mogging cannot proceed.
+	-- ...and once the wins are actually THERE, wait for the rung to be bought:
+	-- a rebirth zeroes the balance, and it fired in the same second the third mog
+	-- landed, wiping 600M wins one cycle-step before the shop trip.
+	do
+		local _, rungCost = nextGear()
+		if rungCost and STATE.wins >= rungCost then
+			STATE.holding = "gear"
+			return
+		end
+	end
+	if CONFIG.mog and CONFIG.mogBank then
+		local _, rungCost = nextGear()
+		local need = cheapestNPCNeed and cheapestNPCNeed()
+		if rungCost and need and STATE.wins < rungCost then
+			STATE.mogNeed = need
+			if not STATE.mogHoldStart then STATE.mogHoldStart = os.clock() end
+			if os.clock() - STATE.mogHoldStart < CONFIG.mogBankSeconds then
+				STATE.holding = "mog"
+				return
+			end
+		else
+			STATE.mogHoldStart = nil
+		end
+	end
+	STATE.holding = false
 	local need = rebirthNeed()
 	STATE.rebirthNeed = need or 0
 	if need and STATE.looks < need then return end
@@ -566,30 +679,59 @@ local function rebirthPass()
 	end
 end
 
--- Worlds are walls of Looks, and the portal is a model in this world's
--- TravelPortals folder. UsePortal takes the world NUMBER.
-local function portalPass()
-	local cfg = conf("WorldConfig") or {}
+-- Worlds are walls of LOOKS and the wall is a gate, not a price - crossing it
+-- charged nothing at all (103.62B before, 103.70B after). Everything on the far
+-- side is a different scale: world 2's gear runs to x212B against world 1's x14K
+-- and its NPCs pay 200M against 1.25M, so the crossing outranks anything else the
+-- looks could have been spent on.
+local function worldNeed()
+	local cfg = conf("WorldConfig")
 	local nextWorld = (STATE.world or 1) + 1
-	if nextWorld > 8 then return end
-	local need = tonumber(cfg["World" .. nextWorld .. "Requirement"])
+	if not cfg or nextWorld > 8 then return nil, nextWorld end
+	return tonumber(cfg["World" .. nextWorld .. "Requirement"]), nextWorld
+end
+
+-- Rebirth spends looks every few seconds, so a world wall would never be reached
+-- while it keeps firing. Once the wall is within a few minutes of income the
+-- rebirths pause and the looks are banked for the crossing instead.
+function pushingForWorld()
+	if not CONFIG.portals then return false end
+	local need = worldNeed()
+	STATE.worldNeed = need or 0
+	if not need or STATE.looks >= need then return need ~= nil end
+	return need <= STATE.looks + (STATE.looksRate or 0) * CONFIG.worldPushSeconds
+end
+
+local function portalPass()
+	local need, nextWorld = worldNeed()
 	if not need or STATE.looks < need then return end
 	local folder = worldFolder()
 	folder = folder and folder:FindFirstChild("TravelPortals")
 	local model = folder and folder:FindFirstChild("World" .. nextWorld .. "Portal")
 	local pos = pivotOf(model)
 	if not pos then return end
-	withBody("portal", function()
-		STATE.phase = "portal to world " .. nextWorld
-		local target = CFrame.new(pos)
-		local stop = pin(function() return target end)
-		task.wait(1)
-		fire("UsePortal", true, nextWorld)
-		task.wait(2)
-		stop()
-		refresh()
-		note("world " .. tostring(STATE.world))
-	end)
+	STATE.phase = "portal to world " .. nextWorld
+	local target = CFrame.new(pos)
+	local stop = pin(function() return target end)
+	task.wait(1.2)
+	fire("UsePortal", true, nextWorld)
+	task.wait(2.5)
+	stop()
+	refresh()
+	if STATE.world ~= nextWorld then return end
+	-- the portal only flips the attribute; the body stays at the old hub and the
+	-- new world's shop, zones and trainers are all streamed out until we go there
+	local spawn = worldFolder()
+	spawn = spawn and spawn:FindFirstChild("Spawn" .. nextWorld)
+	local spawnPos = pivotOf(spawn)
+	if spawnPos then
+		pcall(function() plr:RequestStreamingAround(spawnPos) end)
+		local aim = CFrame.new(spawnPos + Vector3.new(0, 6, 0))
+		local hold = pin(function() return aim end)
+		task.wait(4)
+		hold()
+	end
+	note("world " .. tostring(STATE.world) .. " unlocked")
 end
 
 --------------------------------------------------------------------------------
@@ -649,11 +791,21 @@ end
 local function eggPass()
 	local cfg = conf("PetConfig")
 	if not (cfg and cfg.Eggs) then return end
+	-- Only buy an egg that can still beat the pet we already wear; otherwise the
+	-- cheapest world-1 egg gets re-bought forever for commons we already have.
+	local worn = tonumber(plr:GetAttribute("PetLooksMultiplier")) or 0
+	local topOf = {}
+	for _, pet in pairs(cfg.Pets or {}) do
+		local eggId = pet.Egg
+		local mul = tonumber(pet.Multiplier) or 0
+		if eggId and mul > (topOf[eggId] or 0) then topOf[eggId] = mul end
+	end
 	local best, bestCost
 	for id, egg in pairs(cfg.Eggs) do
 		local cost = tonumber(egg.Cost)
 		local world = tonumber(egg.World) or 1
-		if cost and world <= (STATE.world or 1) and canSpendLooks(cost) then
+		if cost and world <= (STATE.world or 1) and (topOf[id] or 0) > worn
+			and canSpendLooks(cost) then
 			if not bestCost or cost > bestCost then best, bestCost = id, cost end
 		end
 	end
@@ -746,8 +898,7 @@ local function freePass()
 end
 
 local function spendPass()
-	-- gear runs inside the cycle instead, because buying it may need the body
-	if CONFIG.portals then portalPass() end
+	-- gear and the portal run inside the cycle instead: both need the body
 	if CONFIG.tokens then tokenPass() end
 	if CONFIG.eggs then eggPass() end
 	if CONFIG.auras then auraPass() end
@@ -762,9 +913,15 @@ end
 local function cyclePass()
 	if STATE.bodyOwner then return end
 	withBody("cycle", function()
+		-- the portal wants the body too, and behind the cycle's own lock it never
+		-- got it: world 2 sat unlocked and unentered with 46B looks against a 6B wall
+		if CONFIG.portals then portalPass() end
 		if CONFIG.gear then gearPass() end
 		if CONFIG.trainer then trainPhase() end
 		if CONFIG.mog then mogPhase() end
+		-- straight back to the shop with whatever the mogging just earned, before
+		-- the rebirth timer gets a chance at the balance
+		if CONFIG.gear then gearPass() end
 	end)
 end
 
@@ -877,6 +1034,9 @@ task.spawn(function()
 			"  gear      " .. tostring(STATE.gear),
 			"  trainer   " .. tostring(STATE.trainer) .. "   x" .. tostring(STATE.trainerMul),
 			"  world     " .. tostring(STATE.world) .. "   " .. tostring(STATE.zone),
+			"  banking   " .. (STATE.holding and (tostring(STATE.holding) .. " -> "
+				.. short(STATE.holding == "world" and STATE.worldNeed or STATE.mogNeed)) or "no"),
+			"  next world at " .. short(STATE.worldNeed or 0),
 			"  npc       " .. tostring(STATE.npc) .. "   pays " .. short(STATE.npcPays),
 			"  mogs      " .. STATE.mogs .. "   pets " .. STATE.petsEquipped .. "/" .. STATE.pets
 				.. " x" .. short(STATE.petMul),
@@ -905,8 +1065,10 @@ _G.__LOOKSCLICK_DBG = {
 	channel = channel, fire = fire, asGame = asGame,
 	bestTrainer = bestTrainer, trainPhase = trainPhase,
 	bestZone = bestZone, bestNPC = bestNPC, mogOnce = mogOnce, mogPhase = mogPhase,
+	cheapestNPCNeed = cheapestNPCNeed,
 	gearPass = gearPass, rebirthPass = rebirthPass, portalPass = portalPass,
 	nextGear = nextGear, gearLadder = gearLadder,
+	worldNeed = worldNeed, pushingForWorld = pushingForWorld,
 	rebirthNeed = rebirthNeed, spendableLooks = spendableLooks, canSpendLooks = canSpendLooks,
 	askInventory = askInventory, petPass = petPass, eggPass = eggPass,
 	auraPass = auraPass, boostPass = boostPass, tokenPass = tokenPass,
