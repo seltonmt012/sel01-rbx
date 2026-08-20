@@ -35,13 +35,29 @@
 --     which is the x1.5 from TrainingList, dead on. The ladder is Coal x1.5 at 0
 --     rebirths up to Demonite x10 at 15. Azurite x100, Emerald x25 and Amethyst
 --     x15 carry a GamepassId and are never touched.
---   * `HitWall:FireServer(stageId, wallIndex)` works from ANY distance - stage 1
---     walls 1-3 broke while the character stood in the training area. But the
---     client does it by itself and better: `StageClient` puts a ZonePlus zone on
---     `workspace.Stages["Stage n"].Hitbox`, and entering it sets CurrentStageId,
---     resolves the next unbroken wall and runs its own punching loop. Standing
---     in the hitbox broke all three walls of stage 1 in one 10s window
---     (BreakWall(1,1), (1,2), (1,3)), so the script only has to stand there.
+--   * **MINING NEEDS THE BODY AT THE WALL, and only at the LOWEST OPEN STAGE.**
+--     Re-measured 2026-08-20 and this replaces the old claim that HitWall works
+--     from any distance so the body was free to farm the click multiplier in a
+--     training area. It does not:
+--       - 8s of HitWall spam from the training area: 0 walls, 0 damage events.
+--       - sitting in the hitbox centre: 0 walls, 0 damage events.
+--       - standing SIX STUDS IN FRONT of the wall: all three walls of the stage
+--         in 12s, 6 damage events.
+--     The wall is CanCollide, so aiming at its own position pushes the body out
+--     and leaves it metres away - which looks exactly like "mining does nothing".
+--     And only the lowest open stage takes damage at all: hammering stage 4 or
+--     10 while stage 3 still stood produced nothing whatsoever. Mining and
+--     training are therefore two phases and cannot share a spot.
+--   * **A STAGE IS FINISHED WHEN ITS WALLS ARE TRANSPARENT.** Every stage keeps
+--     three walls at `Stages["Stage n"].Stages["1".."3"]`; a broken one reads
+--     `Transparency = 1, CanCollide = false`. That is readable for every stage
+--     from anywhere, which is what makes a global loot ranking possible. The two
+--     signals tried before it were both wrong: `StagesUnlocked` is REACHED, not
+--     finished (it read 1..10 while stages 3, 4, 6 and 10 all answered "Complete
+--     Stage N First!" - TeleportToStage lets you pay past a stage, so it is not
+--     even sequential), and `StageClient.BrokenWalls` only fills while you stand
+--     in that stage's zone (nine of ten reached stages read 0/3 from across the
+--     map, which made the collector allow nothing at all).
 --   * **The loot cycle has three gates and missing any one of them looks exactly
 --     like a broken script.** The loot itself lies at
 --     `Stages["Stage n"].Spawnpoints.<GUID>` with `ItemId` / `StageId` /
@@ -50,10 +66,9 @@
 --          a DESCENDANT of the spawn part (under the item model) and only exists
 --          once the client has built it, so it has to be searched recursively
 --          and waited for.
---       2. The stage has to be FINISHED. An unfinished one answers every pickup
---          with "Complete Stage 12 First!" - and reaching a stage is not
---          finishing it: StagesUnlocked read 1..12 while stages 3, 10 and 12
---          still refused their loot. Hence stages are cleared lowest-first.
+--       2. The stage has to be FINISHED - see the wall test above. An unfinished
+--          one answers every pickup with "Complete Stage N First!" on
+--          `Remotes.Client.Notification`, which is a usable signal in itself.
 --       3. The backpack has to have room. At 5/5 every prompt answers "Backpack
 --          is full! (Goto Surface)" and pays nothing - the state that had this
 --          script teleporting onto loot all day for zero cash.
@@ -67,7 +82,17 @@
 --   * The loot is a RACE. 223 spawn points exist and with 14 players on the
 --     server only 0-9 are free at any moment - they refill on a cycle, they are
 --     not created fresh (zero new instances in 20s). A teleporting bot wins that
---     race, which is the whole reason this script is worth running.
+--     race, which is the whole reason this script is worth running. Because it
+--     is a race, the collector re-ranks after EVERY pickup instead of walking a
+--     list it took once.
+--   * **The ItemId IS the value.** A free spawn point carries only IsTaken,
+--     ItemId and StageId and has no children at all until the client builds the
+--     item next to you - so the "Revenue" billboard is unreadable from anywhere
+--     that matters and the old code's billboard-first ranking silently collapsed
+--     to "whatever is nearest". `ItemsList[id].Revenue` is the real figure and it
+--     already carries the rarity: Rock 8, Crate 1.2M (Mythic), Alien Head 150M
+--     (Godly), Whitehole 10.5B (Celestial), Jupiter 15B. That billion-fold spread
+--     is why a good item three cleared stages away beats a Rock underfoot.
 --   * Formulas out of the helpers, not guessed: level curve starts at 45 with
 --     growth 1.095, rebirth needs level `25 + rebirths * 25`, cash multiplier is
 --     `1 + rebirths * 0.2`, strength multiplier `1 + rebirths * 0.5`, backpack
@@ -273,16 +298,33 @@ local function parseMoney(text)
 	return num
 end
 
+-- THE DATABASE IS THE VALUE, and it is the only thing readable from a distance.
+--
+-- This used to scan the part's descendants for a "Revenue" billboard first and
+-- treat the database as a rough fallback, on the belief that "the same ItemId
+-- shows up at different rarities and the database Revenue is only the base".
+-- Measured 2026-08-20: a free spawn point carries exactly three attributes -
+-- IsTaken, ItemId, StageId - and NO children at all until the client builds the
+-- item next to you. So the scan found nothing on every item that was not already
+-- underfoot, and the ranking silently collapsed to "whatever is nearest".
+--
+-- The ItemId already carries the rarity: ItemsList.Whitehole is Celestial at
+-- 10.5B, ItemsList.Crate is Mythic at 1.2M, ItemsList.Rock is 8. That is a
+-- billion-fold spread across 69 items, so ranking on it is the whole game - a
+-- Crown worth 56,000 two stages away beats a Rock underfoot by 7,000x.
 local function itemValue(part)
 	local id = part:GetAttribute("ItemId")
+	local entry = id and ItemsList[id]
+	if entry and tonumber(entry.Revenue) then return tonumber(entry.Revenue), id end
+	-- only reachable for an item the database does not know; the billboard is
+	-- then the last resort and it only exists up close.
 	for _, label in ipairs(part:GetDescendants()) do
 		if label:IsA("TextLabel") and label.Name == "Revenue" then
 			local value = parseMoney(label.Text)
 			if value then return value, id end
 		end
 	end
-	local entry = id and ItemsList[id]
-	return (entry and entry.Revenue) or 0, id
+	return 0, id
 end
 
 -- A stage counts as DONE when it has no unbroken wall left, and that is what the
@@ -395,7 +437,7 @@ local function freeLoot()
 				if part:IsA("BasePart") and part:GetAttribute("IsTaken") == false then
 					local dist = from and (part.Position - from).Magnitude or 0
 					if CONFIG.lootRange <= 0 or dist <= CONFIG.lootRange then
-						out[#out + 1] = { part = part, dist = dist,
+						out[#out + 1] = { part = part, dist = dist, stage = num,
 							value = (itemValue(part)), proven = true }
 					end
 				end
@@ -806,18 +848,39 @@ local function think()
 	end
 
 	if CONFIG.autoLoot then
-		local loot = freeLoot()
-		if #loot > 0 then
+		-- RE-RANK AFTER EVERY PICKUP, never work down a stale list.
+		--
+		-- 223 spawn points, fourteen players, and items appear and vanish
+		-- constantly - a list taken once and walked to the end is a plan for a
+		-- world that no longer exists, and it makes the bot chase items other
+		-- people already took while a Jupiter pops up behind it. Taking the best
+		-- item, looking again, and taking the best again is what "always grab the
+		-- best" actually requires.
+		--
+		-- The whole map is searched every time, not just the stage underfoot: the
+		-- value spread runs from 8 to 15,000,000,000, so a good item three
+		-- cleared stages away is worth far more than a walk.
+		local taken, misses = 0, 0
+		while taken < 12 and misses < 3 do
+			if not CONFIG.auto or GEN ~= _G.__MINECLICK then return end
+			if backpackFull() then break end
+			local loot = freeLoot()
+			if #loot == 0 then break end
+			local best = loot[1]
 			STATE.mode = "loot"
-			for i = 1, math.min(#loot, 6) do
-				if not CONFIG.auto or GEN ~= _G.__MINECLICK then return end
-				local entry = loot[i]
-				if entry.part.Parent and entry.part:GetAttribute("IsTaken") == false then
-					grab(entry.part)
-				end
+			STATE.targetName = string.format("%s (%s) aus Stufe %d",
+				tostring(best.part:GetAttribute("ItemId")), short(best.value or 0),
+				best.stage or 0)
+			if best.part.Parent and best.part:GetAttribute("IsTaken") == false
+				and grab(best.part) then
+				taken = taken + 1
+				misses = 0
+			else
+				-- somebody else got there first, or the stage refused it
+				misses = misses + 1
 			end
-			return
 		end
+		if taken > 0 then return end
 	end
 
 	-- Nothing free right now. That is the NORMAL state, not a reason to run off:
