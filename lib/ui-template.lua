@@ -289,6 +289,17 @@ end
 -- with the glyph if it is not. Returns the instance plus a tint(colour) function,
 -- so the caller does not have to care which of the two it got - the rail tints
 -- the active page and the card bands tint themselves the same way.
+-- Scripts call these setters with a COLON (weaponLabel:set(x), out:set(lines)),
+-- which passes the wrapper table as the first argument and the real value as the
+-- second. Written as set(value) the value silently becomes the table and the
+-- control either shows nothing or errors - it cost a blank read-out in every
+-- panel and a broken weapon line in lootevo. arg() takes both call styles.
+local function arg(a, b)
+	if b ~= nil then return b end
+	if type(a) == "table" and (a.set ~= nil or a.get ~= nil) then return nil end
+	return a
+end
+
 local function iconNode(parent, glyph, size, colour)
 	local file = UI.iconFile[glyph]
 	local id = file and UI.image("icons/selux-" .. file .. ".png") or nil
@@ -1182,7 +1193,11 @@ function UI.Window(options)
 				end)
 
 				return {
-					set = function(v) state = v and true or false paint(true) end,
+					set = function(a, b)
+						local v = arg(a, b)
+						state = v and true or false
+						paint(true)
+					end,
 					get = function() return state end,
 				}
 			end
@@ -1245,8 +1260,9 @@ function UI.Window(options)
 					apply(a, true)
 				end)
 
-				return { set = function(v)
-					apply((v - minValue) / math.max(1, maxValue - minValue), false)
+				return { set = function(a, b)
+					local v = arg(a, b)
+					if v then apply((v - minValue) / math.max(1, maxValue - minValue), false) end
 				end }
 			end
 
@@ -1400,7 +1416,10 @@ function UI.Window(options)
 					arrow.Text = "▼"
 				end)
 
-				return { set = function(v) value = v boxText.Text = tostring(v) end }
+				return { set = function(a, b)
+					local v = arg(a, b)
+					if v ~= nil then value = v boxText.Text = tostring(v) end
+				end }
 			end
 
 			---------------------------------------------------------- Button
@@ -1449,7 +1468,10 @@ function UI.Window(options)
 				l.TextWrapped = true
 				l.TextYAlignment = Enum.TextYAlignment.Top
 				l.ZIndex = 5
-				return { set = function(t) l.Text = t or "" end, label = l }
+				return {
+					set = function(a, b) l.Text = arg(a, b) or "" end,
+					label = l,
+				}
 			end
 
 			---------------------------------------------------------- Readout
@@ -1484,10 +1506,7 @@ function UI.Window(options)
 					-- set(list) the whole read-out silently stayed blank - which is
 					-- exactly what v3 shipped with for one build. Accept both forms.
 					set = function(a, b)
-						local list = b
-						if list == nil and type(a) == "table" and a[1] ~= nil then
-							list = a
-						end
+						local list = arg(a, b)
 						for i, l in ipairs(rowLabels) do
 							local text = list and list[i] or ""
 							l.Text = text
