@@ -1666,10 +1666,62 @@ function UI.Window(options)
 			counter.Text = #msgInput.Text .. " / " .. MAX_MESSAGE
 		end)
 
+		-- THREE GATES, because a bright button that costs nothing gets pressed out
+		-- of curiosity. Measured on the live relay: the reports arriving carried
+		-- notes like "Bereit" and "Gestoppt" and statuses like "0 wins lvl 0 reb 0"
+		-- - panels that had just been loaded. Nobody had a problem; they had a
+		-- button. A report from a panel that has not run yet says nothing and
+		-- buries the real ones.
+		local READY_AFTER = 60          -- seconds the script must have run
+		local openedAt = os.clock()
 		local reportBtn
-		local sent = false
+		local sent, armed = false, false
+
+		-- Gate 1: is there anything to report yet? Either the script has been
+		-- running a while, or it has already parked a real complaint in the
+		-- status strip - STATE.blocked and the error notes both land there.
+		local function haveSomethingToSay()
+			if os.clock() - openedAt >= READY_AFTER then return true end
+			if msgInput.Text ~= "" then return true end
+			local note = (window.stripTitle and window.stripTitle.Text or "") .. " "
+				.. (window.stripSub and window.stripSub.Text or "")
+			note = string.lower(note)
+			for _, word in ipairs({ "fail", "error", "refus", "blocked", "stuck",
+				"stall", "nicht", "kein", "fehler" }) do
+				if string.find(note, word, 1, true) then return true end
+			end
+			return false
+		end
+
 		reportBtn = report:Button("MELDEN", function()
 			if sent then return end
+
+			if not haveSomethingToSay() then
+				local left = math.ceil(READY_AFTER - (os.clock() - openedAt))
+				reportHint.set("Das Panel laeuft erst " .. (READY_AFTER - left) ..
+					"s. Lass es kurz laufen (noch " .. left .. "s) - oder schreib "
+					.. "oben rein, was nicht geht, dann geht es sofort.")
+				return
+			end
+
+			-- Gate 2: a second press confirms. Anyone who typed something has
+			-- already shown intent, so they skip it.
+			if not armed and msgInput.Text == "" then
+				armed = true
+				reportBtn.Text = "WIRKLICH MELDEN?"
+				reportBtn.BackgroundColor3 = UI.theme.bad
+				reportHint.set("Nochmal druecken zum Senden. Besser: schreib kurz "
+					.. "rein, was nicht geht - dann kann ich es auch beheben.")
+				task.delay(8, function()
+					if not sent and armed then
+						armed = false
+						reportBtn.Text = "MELDEN"
+						reportBtn.BackgroundColor3 = UI.theme.warn
+					end
+				end)
+				return
+			end
+
 			local r = UI.buildReport(window)
 			r.message = msgInput.Text
 			-- The clipboard fallback wants it on one line; the relay gets the
