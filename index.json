@@ -14,6 +14,16 @@
 			"detect": "local rs = game:GetService('ReplicatedStorage') return rs:FindFirstChild('ClickRequest', true) ~= nil and rs:FindFirstChild('RebirthRequest', true) ~= nil"
 		},
 		{
+			"alias": "selllemons",
+			"name": "Sell Lemons",
+			"file": "games/selllemons.lua",
+			"places": [
+				79268393072444
+			],
+			"status": "ok",
+			"detect": "local rs = game:GetService('ReplicatedStorage') local m = rs:FindFirstChild('Modules') return m ~= nil and m:FindFirstChild('Huge') ~= nil and rs:FindFirstChild('Tycoon', true) ~= nil and rs:FindFirstChild('TycoonAnalyzer', true) ~= nil"
+		},
+		{
 			"alias": "sellores",
 			"name": "Sell Ores",
 			"file": "games/sellores.lua",
@@ -292,6 +302,18 @@
 			],
 			"status": "ok",
 			"detect": "local st = workspace:FindFirstChild('Status') return st ~= nil and st:FindFirstChild('HasBomb') ~= nil and st:FindFirstChild('MapName') ~= nil"
+		},
+		{
+			"alias": "trainclimb",
+			"name": "Training To Climb",
+			"file": "games/trainclimb.lua",
+			"places": [
+				98001626946868,
+				101836932554047
+			],
+			"status": "ok",
+			"note": "world 1 and world 2 are separate places with identical layouts; world 2 pays ~295,000x per finish-battle call",
+			"detect": "local rs = game:GetService('ReplicatedStorage') local fw = rs:FindFirstChild('FrameWork_Shared') local rem = fw and fw:FindFirstChild('Remotes') local tr = rem and rem:FindFirstChild('Train') local ba = rem and rem:FindFirstChild('Battle') return tr ~= nil and tr:FindFirstChild('RE_ApplyOnceTrain') ~= nil and ba ~= nil and ba:FindFirstChild('RE_PlayerFinishBattle') ~= nil"
 		}
 	]
 }
