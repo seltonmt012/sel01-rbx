@@ -25,6 +25,28 @@
 -- Nothing matched? A small panel lists every game in the registry and lets you
 -- force one, and _G.__SEL.load("lootevo") does the same from the console.
 
+-- EXECUTOR GATE -----------------------------------------------------------
+--
+-- Solara and Xeno are missing too many of the functions the scripts rely on
+-- (hookmetamethod, getconnections, queue_on_teleport among them), and a script
+-- half-running there generates bug reports we cannot fix. Detect and stop
+-- before anything else runs. identifyexecutor can be absent or throw on some
+-- executors, so both are guarded; no answer means no block.
+do
+    local getName = identifyexecutor or getexecutorname
+    if getName then
+        local ok, name = pcall(getName)
+        if ok and name then
+            local execName = tostring(name):lower()
+            if execName:find("solara") or execName:find("xeno") then
+                game:GetService("Players").LocalPlayer:Kick(
+                    "EXECUTOR NOT SUPPORTED [PLEASE DON'T GET MAD THIS IS SOLARA/XENO'S FAULT]")
+                return
+            end
+        end
+    end
+end
+
 local BASE = "https://raw.githubusercontent.com/seltonmt012/sel01-rbx/main/"
 local CACHE = "sel01/"
 
