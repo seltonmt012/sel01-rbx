@@ -18,7 +18,6 @@ lobby that sends you into a separate map place keeps the automation.
 | `index.json` | the registry: place ids, detection snippets, file names |
 | `lib/ui-template.lua` | the panel every script builds its UI from |
 | `games/*.lua` | one automation script per game |
-| `vendor/` | third-party files, not loaded by anything |
 
 ## How a game is matched
 
