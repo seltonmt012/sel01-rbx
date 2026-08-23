@@ -8,7 +8,7 @@
 -- they are - they keep passing "Auto rebirth" and only this file decides what
 -- the player reads.
 --
--- 986 entries.
+-- 990 entries.
 
 return {
 	["0 = highest stage of the current world"] = "0 = hoechste Stage der aktuellen Welt",
@@ -156,6 +156,7 @@ return {
 	["Charge hold (s)"] = "Ladung halten (s)",
 	["Charm slots"] = "Charm-Slots",
 	["Chase range"] = "Verfolgungsradius",
+	["Claim achievements"] = "Erfolge abholen",
 	["Claim daily"] = "Taeglich abholen",
 	["Claim every"] = "Abholen alle",
 	["Claim every (s)"] = "Abholen alle (s)",
@@ -192,6 +193,7 @@ return {
 	["CollectSlot per slot, works at any distance"] = "CollectSlot pro Slot, funktioniert aus jeder Entfernung",
 	["Colour by health"] = "Farbe nach Leben",
 	["Common"] = "Normal",
+	["Craft golden and rainbow pets"] = "Goldene und Regenbogen-Haustiere fusionieren",
 	["Crosshair"] = "Fadenkreuz",
 	["Cycle wait"] = "Zykluspause",
 	["DECISIONS"] = "ENTSCHEIDUNGEN",
@@ -640,6 +642,7 @@ return {
 	["full bag = every pickup fails, so it surfaces and sells"] = "volle Tasche = jedes Aufheben scheitert, also hoch und verkaufen",
 	["full cast loop - no power bar, no reeling needed"] = "kompletter Wurf-Loop - keine Kraftleiste, kein Einholen",
 	["full plot pulls its worst one out for a better one"] = "volles Grundstueck wirft das schlechteste fuer ein besseres raus",
+	["fuses four of a kind and clears the weakest when storage fills up"] = "fusioniert vier gleiche und raeumt die schwaechsten weg, wenn der Platz knapp wird",
 	["gift, daily login, offline money"] = "Geschenk, taeglicher Login, Offline-Geld",
 	["give up and go train when a stage takes longer than this"] = "aufgeben und trainieren wenn eine Stage laenger braucht",
 	["glide between piles instead of snapping"] = "zwischen Haufen gleiten statt springen",
@@ -817,6 +820,7 @@ return {
 	["swim / throw / roll"] = "schwimmen / werfen / rollen",
 	["teleports tree to tree - the single biggest earner in the game"] = "teleportiert von Baum zu Baum - die groesste Einnahmequelle im Spiel",
 	["ten fruit tiers, x42 each - wipes more than a rebirth"] = "zehn Fruchtstufen, je x42 - loescht mehr als ein Rebirth",
+	["ten ladders of permanent percentages, claimed tier by tier"] = "zehn Leitern mit dauerhaften Prozenten, Stufe fuer Stufe abgeholt",
 	["the Step ladder - sequential pads, paid in wins"] = "die Step-Leiter - Pads der Reihe nach, in Wins bezahlt",
 	["the bare number in the info line"] = "die nackte Zahl in der Infozeile",
 	["the cheapest power costs 100 investors"] = "die guenstigste Kraft kostet 100 Investoren",

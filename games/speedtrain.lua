@@ -112,6 +112,8 @@ local RebirthTiers = require(waitFor(TablesF, "Rebirths"))
 local SharedF    = waitFor(ModulesF, "Shared")
 local TreadmillLib = require(waitFor(SharedF, "TreadmillLib"))
 local RebirthLib   = require(waitFor(SharedF, "Rebirths"))
+local PetLib       = require(waitFor(SharedF, "PetLib"))
+local Achievements = require(waitFor(TablesF, "Achievements"))
 
 local plr    = Players.LocalPlayer
 local Values = waitFor(ReplicatedStorage, "Values")
@@ -144,6 +146,8 @@ local CONFIG = {
     autoEgg       = true,
     eggShare      = 0.25,    -- share of the balance an egg batch may cost
     autoPets      = true,
+    autoCraft     = true,    -- fuse four of a kind into golden / rainbow
+    autoAchieve   = true,
     autoUpgrade   = true,
     autoWorld     = true,
 
@@ -617,6 +621,85 @@ local function doWorld()
     return false
 end
 
+-- Ten achievement ladders, ten tiers each, and every tier is a permanent
+-- percentage.  `Stat` is the counter the tier is measured against and
+-- `AchievementStat` is how many tiers have already been taken, so the next
+-- claimable tier is always `AchievementStat + 1` - the claim wants the
+-- category NAME and that tier INDEX.
+local function doAchievements()
+    if not CONFIG.autoAchieve then return false end
+    for name, cat in pairs(Achievements) do
+        if type(cat) == "table" and cat.Rewards and cat.Stat and cat.AchievementStat then
+            local have   = num(cat.Stat)
+            local claimed = num(cat.AchievementStat)
+            local tier   = cat.Rewards[claimed + 1]
+            if tier and type(tier.Requirement) == "number" and have >= tier.Requirement then
+                local ok = invoke("Claim Achievement", name, claimed + 1)
+                task.wait(0.3)
+                if num(cat.AchievementStat) > claimed then
+                    note("achievement %s tier %d (%s)", name, claimed + 1,
+                        tostring(tier.Boost or ""))
+                    return true
+                end
+                if not ok then return false end
+            end
+        end
+    end
+    return false
+end
+
+-- Pets are a straight multiplier and the inventory caps at `PetStorage`;
+-- hatching stops in silence once it is full, which reads exactly like an egg
+-- that cannot be afforded.  Power comes from the game's own
+-- `PetLib.CalculatePetPower`, never from a rarity guess.
+local function petPower(id, entry)
+    local ok, p = pcall(PetLib.CalculatePetPower, plr, id)
+    if ok and type(p) == "number" then return p end
+    -- Fallback while the lib is unhappy: the variant tier and the size are
+    -- what the game itself multiplies by.
+    return (entry and ((entry.Tier or 1) * 10 + (entry.Size or 1))) or 0
+end
+
+local function doPets()
+    if not CONFIG.autoPets then return false end
+    invoke("Pet", { Action = "EquipBest" })
+
+    local pets = V("Pets")
+    if type(pets) ~= "table" then return false end
+    local count = 0
+    local ranked = {}
+    for id, entry in pairs(pets) do
+        count = count + 1
+        ranked[#ranked + 1] = { id = id, power = petPower(id, entry) }
+    end
+    local storage = num("PetStorage", 50)
+    if count < storage - 3 then return false end
+
+    table.sort(ranked, function(a, b) return a.power < b.power end)
+    local cull = {}
+    for i = 1, math.min(#ranked, math.max(1, math.floor(storage * 0.4))) do
+        cull[#cull + 1] = ranked[i].id
+    end
+    if #cull == 0 then return false end
+    invoke("Pet", { Action = "Delete", Pets = cull })
+    task.wait(0.5)
+    note("pet storage %d/%d - deleted %d of the weakest", count, storage, #cull)
+    return true
+end
+
+local function craftPets()
+    if not CONFIG.autoCraft then return end
+    local pets = V("Pets")
+    if type(pets) ~= "table" then return end
+    local ids = {}
+    for id in pairs(pets) do ids[#ids + 1] = id end
+    if #ids < 4 then return end
+    -- Both machines take the whole candidate list and work out the groups
+    -- themselves; a refusal simply means nothing had four of a kind yet.
+    invoke("Pet", { Action = "CraftAllGolden",  Pets = ids })
+    invoke("Pet", { Action = "CraftAllRainbow", Pets = ids })
+end
+
 local claimedOnce = false
 local function freebies()
     if not CONFIG.autoClaim then return end
@@ -738,13 +821,15 @@ loop(4, function()
         "Buy Trail", "Equip Trail",
         function(e) return e.Cost or 0 end, "trail") then return end
     if doUpgrades() then return end
+    if doAchievements() then return end
     if doEggs() then return end
 end)
 
 loop(30, freebies)
 
-loop(20, function()
-    if CONFIG.autoPets then invoke("Pet", { Action = "EquipBest" }) end
+loop(15, function()
+    doPets()
+    craftPets()
 end)
 
 ----------------------------------------------------------------------------
@@ -797,6 +882,11 @@ spend:Slider("Egg budget (% of wins)", 5, 75, math.floor(CONFIG.eggShare * 100),
     function(v) CONFIG.eggShare = v / 100 end)
 spend:Toggle("Gem upgrades", CONFIG.autoUpgrade, function(v) CONFIG.autoUpgrade = v end,
     "more wins, top speed, more speed - in that order")
+spend:Toggle("Craft golden and rainbow pets", CONFIG.autoCraft,
+    function(v) CONFIG.autoCraft = v end,
+    "fuses four of a kind and clears the weakest when storage fills up")
+spend:Toggle("Claim achievements", CONFIG.autoAchieve, function(v) CONFIG.autoAchieve = v end,
+    "ten ladders of permanent percentages, claimed tier by tier")
 spend:Toggle("Follow world unlocks", CONFIG.autoWorld, function(v) CONFIG.autoWorld = v end,
     "each world multiplies the whole milestone ladder")
 spend:Toggle("Free rewards and codes", CONFIG.autoClaim, function(v) CONFIG.autoClaim = v end)
@@ -852,6 +942,7 @@ _G.__SPEEDTRAIN_DBG = {
     train = train, dismount = dismount, bestTreadmill = bestTreadmill,
     doRebirth = doRebirth, doUpgrades = doUpgrades, doEggs = doEggs,
     doWorld = doWorld, freebies = freebies, shopStep = shopStep,
+    doAchievements = doAchievements, doPets = doPets, craftPets = craftPets,
     pinAt = pinAt, unpin = unpin,
 }
 

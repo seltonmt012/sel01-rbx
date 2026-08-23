@@ -116,6 +116,7 @@ local CONFIG = {
     autoRoll      = true,   -- Roll costs nothing, so keep the podium stocked
     autoBuy       = true,   -- buy a rolled gnome when it earns more than we have
     autoPlace     = true,   -- equip + Place whatever is in the inventory
+    autoPets      = true,   -- same again for pets, capped by max_equipped_pets
     autoUpgrade   = true,   -- the hex tree, cheapest useful node first
     autoExpand    = true,   -- ExpandPlot when it is comfortably affordable
     autoFreeGnome = true,   -- the free gnome timer
@@ -139,6 +140,7 @@ local STATE = {
     rollLuck = 1, bestGnome = "-", weakest = "-", target = "-",
     placeFails = 0, plotFull = false, gnomeCap = 0, swaps = 0,
     rate = 0, reserve = 0, observed = 0,
+    pets = 0, petsPlaced = 0, petCap = 3,
 }
 
 _G.__ROLLGNOME = (_G.__ROLLGNOME or 0) + 1
@@ -480,13 +482,18 @@ local function buyFromPodium()
 
     if not bestModel then return false end
 
-    local before = money()
+    -- Confirming a purchase by the balance dropping does NOT work here: the
+    -- garden pays several hundred a second into the same number, so a $10
+    -- gnome is invisible in it.  The honest signals are the inventory growing
+    -- by a farmer and the podium model going away.
+    local _, farmersBefore = inventoryCounts()
     fire("BuyFarmer", bestModel)
     task.wait(1.0)
-    if money() < before then
+    local _, farmersAfter = inventoryCounts()
+    if farmersAfter > farmersBefore or bestModel.Parent == nil then
         STATE.bought = STATE.bought + 1
         STATE.bestGnome = bestName
-        note("bought %s ($%d, %.2f/s)", bestName, before - money(), bestRate)
+        note("bought %s ($%s, %.2f/s)", bestName, tostring(gnomePrice(bestName)), bestRate)
         return true
     end
     return false
@@ -587,6 +594,92 @@ local function placeGnomes()
     -- Put the hand back to empty so nothing else trips over a held gnome.
     pcall(function() humanoid:UnequipTools() end)
     return placed
+end
+
+----------------------------------------------------------------------------
+-- pets
+--
+-- Pets follow the SAME rule as the gnomes: the Tool has to be in the hand.
+-- The client asks the server first with `CanPlacePet(tool)` and only fires
+-- `PlacePet(tool, cframe)` when that comes back true, which is worth copying -
+-- it turns a silent refusal into an answer.  Three may stand at once
+-- (`max_equipped_pets`), they sit in `Plot.ClientPets`, and `PickupPet(uid)`
+-- takes one back.
+--
+-- Where pets COME FROM is not verified.  The podium rolls out of `Farmer RNG`
+-- during the day, there is a matching `Pet RNG` and a `Night RNG`, and the RNG
+-- controller branches on `ReplicatedStorage.IsDay` - so the machine very
+-- likely hands out pets after dark.  This account has never owned one, so the
+-- script only places what turns up and claims nothing about how it got there.
+----------------------------------------------------------------------------
+
+local function maxPets()
+    return tonumber(data().max_equipped_pets) or 3
+end
+
+local function placedPets()
+    local folder = folderOf("ClientPets")
+    if not folder then return 0 end
+    local n = 0
+    for _, child in ipairs(folder:GetChildren()) do
+        if child:IsA("Model") then n = n + 1 end
+    end
+    return n
+end
+
+local function heldPetTools()
+    local backpack = LocalPlayer:FindFirstChild("Backpack")
+    if not backpack then return {} end
+    local tools = {}
+    for _, tool in ipairs(backpack:GetChildren()) do
+        if tool:IsA("Tool") and tool:GetAttribute("type") == "Pet" then
+            tools[#tools + 1] = tool
+        end
+    end
+    return tools
+end
+
+local function placePets()
+    local character = LocalPlayer.Character
+    local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+    if not humanoid then return 0 end
+
+    local tools = heldPetTools()
+    if #tools == 0 then return 0 end
+
+    local seated = 0
+    for _, tool in ipairs(tools) do
+        if not alive() or placedPets() >= maxPets() then break end
+
+        humanoid:EquipTool(tool)
+        task.wait(0.35)
+        -- The tool has to be in the character before the server will even
+        -- answer the question, which is why the equip comes first.
+        local allowed = invoke("CanPlacePet", 6, tool)
+        if not allowed then
+            note("pet %s: server says it cannot be placed", tool.Name)
+            break
+        end
+
+        local spots = placementSpots(CONFIG.placeTries)
+        local placedOne = false
+        for _, spot in ipairs(spots) do
+            local before = placedPets()
+            fire("PlacePet", tool, CFrame.new(spot))
+            task.wait(0.8)
+            if placedPets() > before then
+                placedOne = true
+                seated = seated + 1
+                STATE.petsPlaced = STATE.petsPlaced + 1
+                note("placed pet %s", tool.Name)
+                break
+            end
+        end
+        if not placedOne then break end
+    end
+
+    pcall(function() humanoid:UnequipTools() end)
+    return seated
 end
 
 ----------------------------------------------------------------------------
@@ -704,12 +797,13 @@ local function buyTreeNode()
 
     if not bestKey then return false end
 
-    local before = money()
     local result = invoke("Upgrade", 8, bestBranch, bestKey)
     task.wait(0.5)
-    if money() < before then
+    -- The tree writes the node into upgrade_tree, which is a fact; the balance
+    -- is not, because income lands in it at the same time.
+    if ownedNodes()[bestKey] then
         STATE.upgrades = STATE.upgrades + 1
-        note("upgrade %s ($%d)", bestNode.Name or bestKey, before - money())
+        note("upgrade %s ($%s)", bestNode.Name or bestKey, tostring(bestPrice))
         return true
     end
     if result == "Not Enough" or result == "Maxed" or result == "Invalid" then
@@ -722,30 +816,55 @@ end
 -- plot expansion, free gnome, rebirth
 ----------------------------------------------------------------------------
 
-local function expandPlot()
+-- The expansion squares are NOT the children of Plot.ExpandPlot - that holds
+-- one wrapper model.  The client finds them by walking for a part called
+-- `BoundaryPart` and taking its PARENT, and that parent's name ("1", "2",
+-- "1_L", "4_R", ...) is the key into the Expand config.  Looking the price up
+-- under the wrapper's name returns nil, which reads as "no expansion for sale"
+-- and quietly skips every one of them - that is what the first version did
+-- while a $250 square sat there ready to buy.
+local function expansionSquares()
     local p = plot()
     local holder = p and p:FindFirstChild("ExpandPlot")
-    if not holder then return false end
-    for _, model in ipairs(holder:GetChildren()) do
-        if model:IsA("Model") then
-            -- The price lives in the game's Expand config keyed by the model
-            -- name; the sign itself is decoration.
-            local price = tonumber(CfgExpand[model.Name])
-            if price and money() >= price * CONFIG.expandKeep
-                and spendable() >= price then
-                local before = money()
-                fire("ExpandPlot", model)
-                task.wait(1.2)
-                if money() < before then
-                    STATE.expansions = STATE.expansions + 1
-                    -- More space means a bigger gnome cap, and the cap is
-                    -- learned rather than known, so forget it and re-measure.
-                    STATE.gnomeCap = 0
-                    STATE.plotFull = false
-                    STATE.placeFails = 0
-                    note("expanded plot ($%d)", before - money())
-                    return true
-                end
+    if not holder then return {} end
+    local seen, out = {}, {}
+    for _, descendant in ipairs(holder:GetDescendants()) do
+        if descendant.Name == "BoundaryPart" and descendant:IsA("BasePart") then
+            local parent = descendant.Parent
+            if parent and parent.Name ~= "Highlight" and not seen[parent] then
+                seen[parent] = true
+                local price = tonumber(CfgExpand[parent.Name])
+                if price then out[#out + 1] = { model = parent, price = price } end
+            end
+        end
+    end
+    table.sort(out, function(a, b) return a.price < b.price end)
+    return out
+end
+
+local function expansionCount()
+    local owned = data().plot_expansions
+    local n = 0
+    if type(owned) == "table" then for _ in pairs(owned) do n = n + 1 end end
+    return n
+end
+
+local function expandPlot()
+    for _, square in ipairs(expansionSquares()) do
+        local model, price = square.model, square.price
+        if money() >= price * CONFIG.expandKeep and spendable() >= price then
+            local before = expansionCount()
+            fire("ExpandPlot", model)
+            task.wait(1.2)
+            if expansionCount() > before then
+                STATE.expansions = STATE.expansions + 1
+                -- More space means a bigger gnome cap, and the cap is
+                -- learned rather than known, so forget it and re-measure.
+                STATE.gnomeCap = 0
+                STATE.plotFull = false
+                STATE.placeFails = 0
+                note("expanded plot: %s ($%s)", model.Name, tostring(price))
+                return true
             end
         end
     end
@@ -824,6 +943,8 @@ local function census()
     sampleRate()
     STATE.rate = plotRate()
     STATE.reserve = gnomeReserve()
+    STATE.pets = placedPets()
+    STATE.petCap = maxPets()
     return plants, farmers
 end
 
@@ -870,6 +991,11 @@ task.spawn(function()
             if CONFIG.autoPlace then
                 STATE.phase = "placing"
                 placeGnomes()
+            end
+
+            if CONFIG.autoPets and placedPets() < maxPets() and #heldPetTools() > 0 then
+                STATE.phase = "pets"
+                placePets()
             end
 
             if CONFIG.autoBuy then
@@ -929,6 +1055,8 @@ engine:Toggle("Auto sell", CONFIG.autoSell, function(v) CONFIG.autoSell = v end,
     "sells the crops once the inventory fills up, gnomes are never sold")
 engine:Toggle("Auto place", CONFIG.autoPlace, function(v) CONFIG.autoPlace = v end,
     "equips a bought gnome and seats it in the garden")
+engine:Toggle("Auto place pets", CONFIG.autoPets, function(v) CONFIG.autoPets = v end,
+    "seats pets the same way, up to the three the game allows")
 
 local rng = page:Card("ROLLING", 2)
 rng:Toggle("Auto roll", CONFIG.autoRoll, function(v) CONFIG.autoRoll = v end,
@@ -979,9 +1107,10 @@ task.spawn(function()
         local plants, farmers = inventoryCounts()
         out:set({
             "RUN",
-            string.format("  phase %s   gnomes %d/%s   roll luck x%.2f",
+            string.format("  phase %s   gnomes %d/%s   pets %d/%d   roll luck x%.2f",
                 STATE.phase, STATE.gnomes,
-                STATE.gnomeCap > 0 and tostring(STATE.gnomeCap) or "?", STATE.rollLuck),
+                STATE.gnomeCap > 0 and tostring(STATE.gnomeCap) or "?",
+                STATE.pets, STATE.petCap, STATE.rollLuck),
             string.format("  ready %d   growing %d   inventory %d / %d",
                 STATE.ready, STATE.growing, STATE.invUsed, STATE.invMax),
             string.format("  crops held %d   gnomes held %d", plants, farmers),
@@ -1023,6 +1152,9 @@ _G.__ROLLGNOME_DBG = {
     collectReady = collectReady, sellPlants = sellPlants,
     rollOnce = rollOnce, buyFromPodium = buyFromPodium, placeGnomes = placeGnomes,
     buyTreeNode = buyTreeNode, expandPlot = expandPlot,
+    expansionSquares = expansionSquares, placePets = placePets,
+    heldPetTools = heldPetTools, placedPets = placedPets, maxPets = maxPets,
+    plotRate = plotRate, observedRate = observedRate, income = income,
     claimFreeGnome = claimFreeGnome, rebirthOnce = rebirthOnce,
     gnomeRate = gnomeRate, gnomePrice = gnomePrice, weakestPlaced = weakestPlaced,
     gardenFull = gardenFull, heldGnomeTools = heldGnomeTools, seatTool = seatTool,

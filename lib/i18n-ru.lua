@@ -8,7 +8,7 @@
 -- they are - they keep passing "Auto rebirth" and only this file decides what
 -- the player reads.
 --
--- 986 entries.
+-- 990 entries.
 
 return {
 	["%d Min"] = "%d мин",
@@ -184,6 +184,7 @@ return {
 	["Charge hold (s)"] = "Удержание заряда (с)",
 	["Charm slots"] = "Слоты чармов",
 	["Chase range"] = "Радиус погони",
+	["Claim achievements"] = "Забирать достижения",
 	["Claim daily"] = "Забрать ежедневное",
 	["Claim every"] = "Забирать каждые",
 	["Claim every (s)"] = "Забирать каждые (с)",
@@ -221,6 +222,7 @@ return {
 	["CollectSlot per slot, works at any distance"] = "CollectSlot на слот, работает с любой дистанции",
 	["Colour by health"] = "Цвет по здоровью",
 	["Common"] = "Обычный",
+	["Craft golden and rainbow pets"] = "Крафт золотых и радужных питомцев",
 	["Crosshair"] = "Прицел",
 	["Cycle wait"] = "Пауза цикла",
 	["DASH"] = "РЫВОК",
@@ -735,6 +737,7 @@ return {
 	["full bag = every pickup fails, so it surfaces and sells"] = "полный рюкзак = подбор не работает, поэтому наверх и продавать",
 	["full cast loop - no power bar, no reeling needed"] = "полный цикл заброса - без шкалы и вытягивания",
 	["full plot pulls its worst one out for a better one"] = "полный участок меняет худшего на лучшего",
+	["fuses four of a kind and clears the weakest when storage fills up"] = "объединяет четырёх одинаковых и убирает слабейших, когда место кончается",
 	["gemeldet - es ist angekommen, aber nicht doppelt."] = "уже отправлено - дошло, но не дважды.",
 	["gerade eben"] = "только что",
 	["gift, daily login, offline money"] = "подарок, ежедневный вход, офлайн-деньги",
@@ -919,6 +922,7 @@ return {
 	["swim / throw / roll"] = "плавать / бросать / катиться",
 	["teleports tree to tree - the single biggest earner in the game"] = "телепортирует от дерева к дереву - самый крупный доход в игре",
 	["ten fruit tiers, x42 each - wipes more than a rebirth"] = "десять ступеней фруктов, x42 каждая - стирает больше, чем ребёрн",
+	["ten ladders of permanent percentages, claimed tier by tier"] = "десять лестниц с постоянными процентами, ступень за ступенью",
 	["the Step ladder - sequential pads, paid in wins"] = "лестница Step - плиты по порядку, оплата победами",
 	["the bare number in the info line"] = "голое число в строке информации",
 	["the cheapest power costs 100 investors"] = "самая дешёвая способность стоит 100 инвесторов",
