@@ -1555,6 +1555,86 @@ local function curveFactor(progress)
 	return 1
 end
 
+--------------------------------------------------------------------------------
+-- moving the view
+--------------------------------------------------------------------------------
+--
+-- THE ASSIST MOVES THE MOUSE, NOT THE CAMERA, and that is the whole reason it
+-- used to shake instead of tracking.
+--
+-- BloxStrike runs CameraType.Custom, so the game's own camera controller rebuilds
+-- camera.CFrame every frame out of angles it keeps ITSELF. A CFrame written by us
+-- is thrown away on the very next frame. Measured on a live round: the game moved
+-- the camera 1.45 deg per frame on average, peak 2.5, straight back against the
+-- correction; the pixel error to the target sat at ~220 px across 2183 frames and
+-- never once converged, while the assist reported 325 deg/s of work. What that
+-- looks like on screen is a vibration whose amplitude GROWS with the distance to
+-- the target, because the correction does - which is exactly how it was reported.
+--
+-- Mouse input lands in the same angles the controller integrates, so nothing
+-- fights it. Measured: mousemoverel(60, 0) turned -3.72 deg and it STAYED;
+-- mousemoverel(0, 30) turned -1.51 deg of pitch. Positive x turns right and
+-- LOWERS yaw, positive y looks down and LOWERS pitch - hence the minus signs.
+--
+-- The sensitivity is the player's own and unknowable from here, so it is LEARNED
+-- rather than assumed: each frame records what it asked the mouse for, the next
+-- one measures what actually happened and folds it into a running estimate. A
+-- wrong starting value costs a few frames of under- or overshoot, nothing more.
+local mouseMove = mousemoverel or (Input and Input.mousemoverel)
+	or (syn and syn.mousemoverel)
+
+local look = {
+	degPerPxX = 0.06, degPerPxY = 0.05,   -- measured on this account, only a seed
+	sentX = 0, sentY = 0, yaw = 0, pitch = 0,
+}
+
+local function learnSensitivity(curYaw, curPitch)
+	if look.sentX ~= 0 and math.abs(look.sentX) >= 2 then
+		local got = math.deg(angleDelta(look.yaw, curYaw))
+		-- Only when the view moved the way we asked. Anything else is the player's
+		-- own wrist landing in the same frame, and learning from that would teach
+		-- the estimate their mouse instead of their sensitivity.
+		if got ~= 0 and (got < 0) == (look.sentX > 0) then
+			local est = math.abs(got / look.sentX)
+			if est > 0.005 and est < 1 then
+				look.degPerPxX = look.degPerPxX + (est - look.degPerPxX) * 0.25
+			end
+		end
+	end
+	if look.sentY ~= 0 and math.abs(look.sentY) >= 2 then
+		local got = math.deg(curPitch - look.pitch)
+		if got ~= 0 and (got < 0) == (look.sentY > 0) then
+			local est = math.abs(got / look.sentY)
+			if est > 0.005 and est < 1 then
+				look.degPerPxY = look.degPerPxY + (est - look.degPerPxY) * 0.25
+			end
+		end
+	end
+	look.sentX, look.sentY = 0, 0
+end
+
+-- Returns true when the view was actually moved, which is what the recoil pass
+-- reads to tell our own correction apart from the player's input.
+local function moveLook(stepYaw, stepPitch, curYaw, curPitch, pos)
+	if mouseMove then
+		local dx = -math.deg(stepYaw) / math.max(look.degPerPxX, 0.002)
+		local dy = -math.deg(stepPitch) / math.max(look.degPerPxY, 0.002)
+		-- A sub-pixel request is rounded away by the OS, so sending it would teach
+		-- the estimate from a move that never happened.
+		if math.abs(dx) < 1 and math.abs(dy) < 1 then return false end
+		dx, dy = math.floor(dx + 0.5), math.floor(dy + 0.5)
+		look.sentX, look.sentY = dx, dy
+		look.yaw, look.pitch = curYaw, curPitch
+		if pcall(mouseMove, dx, dy) then return true end
+		look.sentX, look.sentY = 0, 0
+	end
+	-- No mouse function on this executor. The camera write is what shook, but an
+	-- assist that pulls badly still beats one that does nothing at all.
+	camera.CFrame = CFrame.new(pos)
+		* CFrame.fromOrientation(curPitch + stepPitch, curYaw + stepYaw, 0)
+	return true
+end
+
 local function aimPass(dt)
 	if _G.__BSTRIKE ~= GEN then return end
 	aimWroteCamera = false
@@ -1689,6 +1769,9 @@ local function aimPass(dt)
 	end
 
 	local curPitch, curYaw = cf:ToOrientation()
+	-- Before anything is asked for this frame, see what last frame's request
+	-- actually did. This is the whole calibration.
+	learnSensitivity(curYaw, curPitch)
 	local want = CFrame.lookAt(pos, aimAt)
 	local wantPitch, wantYaw = want:ToOrientation()
 
@@ -1735,9 +1818,7 @@ local function aimPass(dt)
 	STATE.aimDps = applied / math.max(dt, 1e-4)
 	if STATE.aimDps > STATE.aimDpsPeak then STATE.aimDpsPeak = STATE.aimDps end
 
-	camera.CFrame = CFrame.new(pos)
-		* CFrame.fromOrientation(curPitch + stepPitch, curYaw + stepYaw, 0)
-	aimWroteCamera = true
+	aimWroteCamera = moveLook(stepYaw, stepPitch, curYaw, curPitch, pos)
 end
 
 --------------------------------------------------------------------------------
@@ -1937,8 +2018,12 @@ local function rcsPass(dt)
 	corrPitch = math.clamp(corrPitch, -cap, cap)
 	if math.abs(corrYaw) < 1e-5 and math.abs(corrPitch) < 1e-5 then return end
 
-	camera.CFrame = CFrame.new(cf.Position)
-		* CFrame.fromOrientation(pitch + corrPitch, yaw + corrYaw, 0)
+	-- Through the mouse, exactly like the aim and for exactly the same reason: a
+	-- CFrame written here is rebuilt away by the game's own camera controller on
+	-- the next frame, so the pull would fight itself instead of holding the spray
+	-- down. rcsPass never runs in a frame the aim already moved, so the two can
+	-- never both be teaching the sensitivity estimate at once.
+	moveLook(corrYaw, corrPitch, yaw, pitch, cf.Position)
 	lastPitch, lastYaw = pitch + corrPitch, yaw + corrYaw
 end
 
