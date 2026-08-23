@@ -1168,6 +1168,15 @@ end
 local function iconNode(parent, glyph, size, colour)
 	local file = UI.iconFile[glyph]
 	local id = file and UI.image("icons/selux-" .. file .. ".png") or nil
+	-- ...and if the workspace has no copy, fetch it from the repo, exactly like
+	-- the flags do. Only `icons/discord.png` used to be published, so the whole
+	-- icon set existed on the DEVELOPMENT machine and nowhere else: every panel in
+	-- the wild fell through to the Unicode glyph, which is the tofu box this file
+	-- warns about three screens up. Cached after the first download.
+	if not id and file then
+		id = UI.imageFromUrl(UI.RAW .. "icons/" .. file .. ".png",
+			"selux-cache/icon-" .. file .. ".png")
+	end
 	if id then
 		local img = Instance.new("ImageLabel")
 		img.BackgroundTransparency = 1
