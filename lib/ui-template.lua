@@ -154,8 +154,11 @@ UI.iconFile = {
 	["▲"] = "home", ["⚡"] = "bolt", ["○"] = "clock", ["▦"] = "chart",
 	["●"] = "coin", ["★"] = "star", ["⚙"] = "gear", ["→"] = "loop",
 	["▤"] = "list", ["■"] = "bag", ["◇"] = "shield", ["◆"] = "sword",
-	["⛏"] = "pickaxe", ["◊"] = "flask", ["◈"] = "map", ["◉"] = "shield",
-	["◎"] = "shield",
+	["⛏"] = "pickaxe", ["◊"] = "flask", ["◈"] = "map",
+	-- The eye and the crosshair used to point at shield.png, so ESP, AIM and
+	-- HUMANISER all drew the same picture and the rail told you nothing. The
+	-- recoil page had no entry at all and fell through to the raw glyph.
+	["◉"] = "eye", ["◎"] = "target", ["≈"] = "wave",
 }
 
 -- Real images, not glyphs ------------------------------------------------------

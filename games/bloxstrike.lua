@@ -172,6 +172,12 @@ local CONFIG = {
 
 	-- recoil -------------------------------------------------------------------
 	rcs        = false,
+	-- misc ---------------------------------------------------------------------
+	bhop       = false,    -- re-press jump the moment you land
+	bhopKey    = "Space",  -- hold this and it keeps hopping
+	airStrafe  = false,    -- A/D in sync with the mouse while airborne
+	airStrafeStrength = 100,
+
 	rcsCurve   = false,       -- set once the spray-curve defaults have been applied
 	rcsStrength = 70,         -- the ONE number: drives rcsPitch and rcsYaw
 	-- Both, not Measured: the measured residual carries the vertical kick well
@@ -2439,6 +2445,102 @@ Players.PlayerRemoving:Connect(function(p)
 end)
 
 --------------------------------------------------------------------------------
+-- misc movement
+--------------------------------------------------------------------------------
+--
+-- This game does NOT use a Humanoid: movement is its own networked simulation
+-- (ReplicatedStorage.MovementV2 - Simulation, RuntimeKinematics, CommandCodec,
+-- and a button bitmask where Jump = 1, Duck = 2, Walk = 4). Setting velocity or
+-- CFrame by hand is therefore corrected away by the server on the next snapshot.
+--
+-- So both of these work at the INPUT layer, the same way the trigger fires a real
+-- mouse click: the game's own simulation reads the key and does the jump, which
+-- is also the only version that behaves identically for everyone.
+--
+-- There is no "grounded" attribute anywhere on the character, so it is a short
+-- ray straight down out of the root part.
+local VIM = game:GetService("VirtualInputManager")
+
+local function tapKey(keyCode, holdFor)
+	local pressed = false
+	if keypress and keyrelease and keyCode.Value then
+		pressed = pcall(keypress, keyCode.Value)
+		if pressed then
+			task.delay(holdFor or 0.03, function() pcall(keyrelease, keyCode.Value) end)
+		end
+	end
+	if not pressed then
+		pcall(function()
+			VIM:SendKeyEvent(true, keyCode, false, game)
+			task.delay(holdFor or 0.03, function()
+				pcall(function() VIM:SendKeyEvent(false, keyCode, false, game) end)
+			end)
+		end)
+	end
+end
+
+local function grounded()
+	local char = alive(plr)
+	local root = char and char:FindFirstChild("HumanoidRootPart")
+	if not root then return false end
+	local params = RaycastParams.new()
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	params.IgnoreWater = true
+	params.FilterDescendantsInstances = { charFolder, workspace:FindFirstChild("Debris") }
+	-- 4.5 studs: the root sits about 3 above the floor, and anything longer starts
+	-- reporting "grounded" while still clearly in the air over a ledge.
+	local hit = workspace:Raycast(root.Position, Vector3.new(0, -4.5, 0), params)
+	return hit ~= nil
+end
+
+STATE.bhops = 0
+
+task.spawn(function()
+	while _G.__BSTRIKE == GEN do
+		if CONFIG.bhop and keyHeld(CONFIG.bhopKey) and alive(plr) and grounded() then
+			tapKey(Enum.KeyCode.Space, 0.04)
+			STATE.bhops = STATE.bhops + 1
+			-- One hop per landing. Without this the loop keeps tapping while the
+			-- character is still on the floor of the same jump and the simulation
+			-- swallows every one of them.
+			task.wait(0.12)
+		else
+			task.wait(0.03)
+		end
+	end
+end)
+
+-- Air strafe. UNVERIFIED against a real jump at the time of writing: it presses
+-- A or D to match the way the mouse is turning while you are off the ground,
+-- which is what a hand does on a strafe jump. It is OFF by default and says so on
+-- the page, because an unproven movement feature that fights the player is worse
+-- than none - that is exactly how the aim assist ended up shaking for days.
+task.spawn(function()
+	local held = nil
+	while _G.__BSTRIKE == GEN do
+		local want = nil
+		if CONFIG.airStrafe and alive(plr) and not grounded() then
+			local turn = mouseDX
+			local threshold = 3 * (100 / math.max(CONFIG.airStrafeStrength, 1))
+			if turn > threshold then want = Enum.KeyCode.D
+			elseif turn < -threshold then want = Enum.KeyCode.A end
+		end
+		if want ~= held then
+			if held then pcall(function()
+				if keyrelease and held.Value then keyrelease(held.Value)
+				else VIM:SendKeyEvent(false, held, false, game) end
+			end) end
+			if want then pcall(function()
+				if keypress and want.Value then keypress(want.Value)
+				else VIM:SendKeyEvent(true, want, false, game) end
+			end) end
+			held = want
+		end
+		task.wait(0.03)
+	end
+end)
+
+--------------------------------------------------------------------------------
 -- panel
 --------------------------------------------------------------------------------
 
@@ -2983,6 +3085,26 @@ local humOut = humPage:Card("STATUS", 1):Readout(7)
 
 -- ROUND ------------------------------------------------------------------------
 
+-- MISC ---------------------------------------------------------------------------
+
+local miscPage = win:Page("MISC", UI.icon.loop)
+
+local moveCard = miscPage:Card("MOVEMENT", 1):Accent()
+moveCard:Toggle("Bunny hop", CONFIG.bhop, function(v) CONFIG.bhop = v end,
+	"hold the jump key and it re-jumps the moment you touch the ground",
+	UI.theme.good)
+moveCard:Dropdown("Hop key", { "Space", "LeftControl", "LeftShift", "V", "C" },
+	CONFIG.bhopKey, function(v) CONFIG.bhopKey = v end)
+moveCard:Toggle("Air strafe", CONFIG.airStrafe, function(v) CONFIG.airStrafe = v end,
+	"UNTESTED - presses A/D to follow the mouse while you are in the air",
+	UI.theme.warn)
+moveCard:Slider("Air strafe reaction", 20, 100, CONFIG.airStrafeStrength, function(v)
+	CONFIG.airStrafeStrength = v
+end, "higher reacts to smaller mouse movements")
+moveCard:Label("This game has no Humanoid - movement is its own networked simulation, so both of these press the real key and let the game do the jump. Nothing here touches your velocity.")
+
+local miscOut = miscPage:Card("STATUS", 2):Readout(5)
+
 local infoPage = win:Page("ROUND", UI.icon.list)
 local roundOut = infoPage:Card("ROUND", 0):Readout(5, function(text)
 	if text:find("BOMB PLANTED") then return UI.theme.bad end
@@ -3235,6 +3357,16 @@ task.spawn(function()
 				})
 			end)
 
+
+			pcall(function()
+				miscOut:set({
+					"  MISC",
+					"  bunny hop  " .. (CONFIG.bhop and ("on, key " .. tostring(CONFIG.bhopKey)) or "off"),
+					"  hops       " .. tostring(STATE.bhops),
+					"  air strafe " .. (CONFIG.airStrafe and "on" or "off"),
+					"  on ground  " .. tostring(grounded()),
+				})
+			end)
 
 			pcall(function()
 				humOut:set({
