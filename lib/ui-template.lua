@@ -51,7 +51,7 @@ local plr = Players.LocalPlayer
 
 local UI = {}
 
-UI.VERSION = "3.1"
+UI.VERSION = "3.2"
 UI.BRAND = "SELUX"
 UI.DISCORD = "discord.gg/ARdpzFuKMm"
 UI.REPO = "seltonmt012/sel01-rbx"
@@ -210,6 +210,56 @@ function UI.imageFromUrl(url, name)
 end
 
 UI.LOGO = "selux-mark.png"
+
+-- Stopping the script, not just the window ---------------------------------------
+--
+-- Closing the panel used to destroy the ScreenGui and nothing else: every loop
+-- kept running, the character kept farming, and there was no way to stop it short
+-- of rejoining. Reported by a user as "not letting me close out script", and they
+-- were right - the button says close and only hid the evidence.
+--
+-- The stop is CONTENT-ADDRESSED, never guessed from the alias: `minemountain`
+-- keeps its state in `_G.__MINEMTN`, `cleanleaves` in `_G.__LEAVES_DBG`. Deriving
+-- a global from a name is the same trap as index-based name mapping. So this
+-- walks the globals for the debug table every script exposes - `__<NAME>_DBG`
+-- holding CONFIG and STATE - and works from what it finds:
+--
+--   * every boolean master switch in CONFIG goes false, so nothing restarts
+--   * the generation counter beside it (`__<NAME>`, the same name without _DBG)
+--     is bumped, which is exactly what every guarded loop in every script checks
+--
+-- Re-running the script starts a fresh generation and everything works again.
+function UI.stopScript()
+	local envs = { _G }
+	if getgenv then
+		local ok, shared = pcall(getgenv)
+		if ok and type(shared) == "table" and shared ~= _G then envs[#envs + 1] = shared end
+	end
+
+	local stopped = {}
+	for _, env in ipairs(envs) do
+		for key, value in pairs(env) do
+			if type(key) == "string" and type(value) == "table"
+				and string.match(key, "^__.+_DBG$") and type(value.CONFIG) == "table" then
+				for _, switch in ipairs({ "auto", "enabled", "run", "running", "master" }) do
+					if type(value.CONFIG[switch]) == "boolean" then
+						value.CONFIG[switch] = false
+					end
+				end
+				local counter = string.sub(key, 1, #key - 4)
+				if type(env[counter]) == "number" then
+					env[counter] = env[counter] + 1
+					stopped[#stopped + 1] = counter
+				end
+			end
+		end
+	end
+	if #stopped > 0 then
+		print("[selux] stopped: " .. table.concat(stopped, ", ") ..
+			" - run the loader again to start it back up")
+	end
+	return #stopped
+end
 
 -- Open a link, for real ---------------------------------------------------------
 --
@@ -1567,11 +1617,16 @@ function UI.Window(options)
 	-- destroyed panel is gone until the script is executed again - and × is
 	-- exactly the button somebody presses to get their screen back. Hiding puts
 	-- the pill up instead, which brings it straight back.
+	-- × CLOSES THE SCRIPT, not just the picture of it. window:Destroy() stays
+	-- GUI-only on purpose - every game script calls it on its own old window when
+	-- it is re-executed, and a Destroy that stopped scripts would have the fresh
+	-- run kill itself one line after starting. The stop belongs to the button.
 	headButton("×", -24, function()
 		if UI.device == "mobile" then
 			root.Visible = false
 		else
 			window:Destroy()
+			pcall(UI.stopScript)
 		end
 	end)
 

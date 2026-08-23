@@ -102,9 +102,57 @@ local GEN = ((PREV and PREV.gen) or 0) + 1
 -- unreadable - which would refuse the one case that has to keep working, a
 -- script following its own game from a lobby into a map. The queued string is
 -- something this loader writes itself, so it is available wherever the queue is.
-local VIA_QUEUE = type(_G.__SEL_TP) == "string"
-local FROM = VIA_QUEUE and _G.__SEL_TP or nil
-_G.__SEL_TP = nil
+-- ...and it is written in THREE places, because one of them is not reliable
+-- everywhere. `_G` inside an executed script is not always the same table the
+-- next execution sees - several executors sandbox each run and keep the shared
+-- table behind getgenv() instead - and when the marker does not survive, the
+-- loader reads "a human typed this" and starts a script in every game the client
+-- joins. That is exactly what a user on Delta reported: "keeps loading in every
+-- game". So the queued payload sets `_G.__SEL_TP`, `getgenv().__SEL_TP` and a
+-- one-line file, and any of the three is enough.
+--
+-- The FILE is written by the queued payload itself, in the new place, and is
+-- deleted here the moment it is read. That is what keeps it free of false
+-- positives: a hand-typed loader line never writes it, so its presence means the
+-- queue ran and nothing else. A stale copy left behind by a crash costs one
+-- refusal and is gone afterwards.
+--
+-- Defined ABOVE the executor-global shims below on purpose, and reading the raw
+-- globals rather than those locals: a local is invisible above its own
+-- definition, so `isfile` in here is the executor's own function, guarded by the
+-- pcall around it. Do not "tidy" this by moving the shims - moving the read
+-- itself below them is the safe direction.
+local QUEUE_FILE = "selux-queue.txt"
+
+local function readQueueMarker()
+    local mark = _G.__SEL_TP
+    if type(mark) ~= "string" and getgenv then
+        local ok, shared = pcall(getgenv)
+        if ok and type(shared) == "table" then mark = shared.__SEL_TP end
+    end
+    if type(mark) == "string" then return mark end
+
+    local ok, body = pcall(function()
+        if not (isfile and readfile and isfile(QUEUE_FILE)) then return nil end
+        return readfile(QUEUE_FILE)
+    end)
+    if ok and type(body) == "string" then
+        return (string.gsub(body, "%s", ""))
+    end
+    return nil
+end
+
+local function clearQueueMarker()
+    _G.__SEL_TP = nil
+    if getgenv then
+        pcall(function() getgenv().__SEL_TP = nil end)
+    end
+    -- delfile where it exists, an empty file everywhere else: what matters is
+    -- that the NEXT run does not read this one again.
+    pcall(function()
+        if delfile then delfile(QUEUE_FILE) elseif writefile then writefile(QUEUE_FILE, "") end
+    end)
+end
 
 -- Executor globals differ per executor; every optional one degrades to a no-op.
 local writefile   = writefile or function() end
@@ -114,6 +162,13 @@ local isfolder    = isfolder or function() return true end
 local makefolder  = makefolder or function() end
 local queueTp     = queue_on_teleport or queueonteleport
     or (syn and syn.queue_on_teleport) or (fluxus and fluxus.queue_on_teleport)
+
+-- Read once, cleared immediately: whatever the queue left behind must not be
+-- read a second time by a later hand-started run.
+local FROM = readQueueMarker()
+if FROM == "" then FROM = nil end
+local VIA_QUEUE = FROM ~= nil
+clearQueueMarker()
 
 local function notify(text, duration)
     print("[sel01] " .. text)
@@ -212,9 +267,22 @@ local armed = false
 local function arm(alias)
     if armed or not queueTp then return end
     armed = true
-    local tag = type(alias) == "string" and alias or ""
-    pcall(queueTp, string.format('_G.__SEL_TP = %q; loadstring(game:HttpGet(%q))()',
-        tag, BASE .. "loader.lua"))
+    -- "*" rather than "" for "the queue armed this, but no script was running
+    -- yet" (auto-start on, armed before the registry is even fetched). An empty
+    -- string is indistinguishable from a marker that failed to arrive, and it
+    -- would make the run read as hand-started.
+    local tag = type(alias) == "string" and alias ~= "" and alias or "*"
+    -- Three markers, one payload. Each line is wrapped so a missing function
+    -- (getgenv, writefile) cannot stop the loader from running on the other side -
+    -- the point of the redundancy is that ANY of them getting through is enough,
+    -- not that all of them do.
+    local payload = string.format(
+        '_G.__SEL_TP = %q; ' ..
+        'pcall(function() getgenv().__SEL_TP = %q end); ' ..
+        'pcall(function() writefile(%q, %q) end); ' ..
+        'loadstring(game:HttpGet(%q))()',
+        tag, tag, QUEUE_FILE, tag, BASE .. "loader.lua")
+    pcall(queueTp, payload)
 end
 
 -- With auto-start ON this is armed before anything else can fail: a lobby with
