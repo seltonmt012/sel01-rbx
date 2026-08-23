@@ -511,6 +511,12 @@ for _, gui in ipairs(game:GetService("CoreGui"):GetChildren()) do
     if gui.Name == "PICKAXESIM" then pcall(function() gui:Destroy() end) end
 end
 
+-- Every switch on this panel survives a rejoin. UI.config merges the saved file
+-- into CONFIG HERE, before the panel is built - the controls read their initial
+-- value out of CONFIG when they are created, so they come up on the saved state
+-- by themselves and nothing below had to be told about any of this.
+UI.config("pickaxesim", CONFIG)
+
 local win = UI.Window({
     title = "PICKAXE", accentTitle = "SIM", subtitle = "seltonmt",
     badge = "\226\155\143", width = 920, height = 580,

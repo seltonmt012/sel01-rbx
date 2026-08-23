@@ -1894,6 +1894,15 @@ if not okUI or type(UI) ~= "table" then
     return
 end
 
+-- Every switch on this panel survives a rejoin. UI.config merges the saved file
+-- into CONFIG HERE, before the panel is built - the controls read their initial
+-- value out of CONFIG when they are created, so they come up on the saved state
+-- by themselves and nothing below had to be told about any of this.
+-- lobbyGroup is skipped: the script switches it off by itself the moment the
+-- group reward is not claimable, and saved that would stay off for good - a
+-- player who joins the group later would never see it try again.
+UI.config("cleanleaves", CONFIG, { skip = { lobbyGroup = true } })
+
 local win = UI.Window({
     name = "CleanLeaves", title = "CLEAN", accentTitle = "LEAVES",
     subtitle = "seltonmt", badge = "🍂", width = 900, height = 560,

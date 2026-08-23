@@ -1621,6 +1621,12 @@ do
 	UI = result
 end
 
+-- Every switch on this panel survives a rejoin. UI.config merges the saved file
+-- into CONFIG HERE, before the panel is built - the controls read their initial
+-- value out of CONFIG when they are created, so they come up on the saved state
+-- by themselves and nothing below had to be told about any of this.
+UI.config("lootevo", CONFIG)
+
 local win = UI.Window({
 	name = "LootEvo",
 	title = "LOOT",

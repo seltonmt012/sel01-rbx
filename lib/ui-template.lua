@@ -51,7 +51,7 @@ local plr = Players.LocalPlayer
 
 local UI = {}
 
-UI.VERSION = "3.2"
+UI.VERSION = "3.3"
 UI.BRAND = "SELUX"
 UI.DISCORD = "discord.gg/ARdpzFuKMm"
 UI.REPO = "seltonmt012/sel01-rbx"
@@ -394,22 +394,56 @@ _G.__SEL_LANG = UI.lang
 _G.__SEL_I18N = _G.__SEL_I18N or {}
 local dicts = _G.__SEL_I18N
 
+-- bridge.py sync drops this next to the dictionaries it mirrors, and it is never
+-- published - so it is present on the machine where translations are being
+-- EDITED and nowhere else. That one bit decides whether the workspace copy of a
+-- dictionary is a fresh edit (dev: it wins) or a stale download (everybody else:
+-- it is ignored and deleted).
+UI.dev = false
+pcall(function() UI.dev = (isfile and isfile("selux-dev.txt")) and true or false end)
+
+local function dictRead(file)
+	if not (isfile and readfile and isfile(file)) then return nil end
+	local ok, disk = pcall(readfile, file)
+	if ok and type(disk) == "string" and #disk > 64 then return disk end
+	return nil
+end
+
 local function dictionary(lang)
 	lang = lang or UI.lang
 	if dicts[lang] ~= nil then return dicts[lang] or nil end
 	local name = "i18n-" .. lang .. ".lua"
+	-- The download is cached under the TEMPLATE VERSION, and that is a fix, not
+	-- tidiness. It used to be cached as i18n-<lang>.lua and that file then won
+	-- over the network on every later run - so a dictionary that gained strings
+	-- never reached anybody who had loaded a panel once, and their new controls
+	-- came up in German. A release changes UI.VERSION and the old cache is simply
+	-- not looked at again.
+	local cache = "selux-cache/i18n-" .. lang .. "-" .. UI.VERSION .. ".lua"
 	local body
-	if isfile and isfile(name) then
-		local ok, disk = pcall(readfile, name)
-		if ok then body = disk end
-	end
+	if UI.dev then body = dictRead(name) end
+	if not body then body = dictRead(cache) end
 	if not body then
 		local ok, web = pcall(function() return game:HttpGet(UI.RAW .. "lib/" .. name) end)
 		if ok and type(web) == "string" and #web > 64 then
 			body = web
-			pcall(function() writefile(name, web) end)
+			pcall(function()
+				if makefolder and isfolder and not isfolder("selux-cache") then
+					makefolder("selux-cache")
+				end
+				writefile(cache, web)
+			end)
+			-- Drop the old unversioned copy once there is a versioned one. Left
+			-- behind it is 78 KB of dead weight per language and it would be read
+			-- as a dev edit by the branch above.
+			if not UI.dev and delfile and isfile and isfile(name) then
+				pcall(delfile, name)
+			end
 		end
 	end
+	-- Offline with only the old cache left: an outdated dictionary still reads
+	-- better than a panel that falls through to German keys.
+	if not body then body = dictRead(name) end
 	if body then
 		local chunk = loadstring and loadstring(body, "=" .. name)
 		local ok, loaded = pcall(chunk or function() end)
@@ -712,6 +746,307 @@ function UI.setAutoload(on)
 end
 
 UI.autoload = UI.getAutoload()
+
+--------------------------------------------------------------------------------
+-- saved settings
+--------------------------------------------------------------------------------
+--
+-- Every panel had exactly three things that survived a rejoin - the language, the
+-- device and the auto-start switch - and NOT ONE of the settings a player
+-- actually touches. Every toggle, slider and dropdown in all 22 scripts was back
+-- at its default on the next join. Reported from the wild twice in the same
+-- message ("config section missing (save config)" and "cannot pick the
+-- difficulty" - the difficulty dropdown was there, it just never stayed).
+--
+-- One line per script does the whole job:
+--
+--   UI.config("cleanleaves", CONFIG)     -- right after the UI is loaded
+--
+-- and the reason it needs no other change anywhere is the ORDER. Controls read
+-- their initial value out of CONFIG when they are BUILT, so merging the saved
+-- values into CONFIG *before* the panel is built makes every control come up
+-- showing the saved state by itself. Nothing has to be told what it is bound to.
+--
+-- Saving is the other half and is deliberately not a button the user has to
+-- remember: a 4s loop serialises the table and writes only when the text
+-- changed. Sorted keys make that comparison stable, so an unchanged panel never
+-- touches the disk.
+--
+-- Format is Lua source, not JSON. HttpService:JSONEncode cannot round-trip a
+-- table with mixed keys and turns an empty one into `[]`, and the dictionaries
+-- already prove that loading a table with loadstring works on every executor.
+-- The chunk is loaded with an EMPTY environment, so a corrupted or tampered file
+-- can define values and nothing else - `{[1]=os.exit()}` indexes nil and is
+-- caught by the pcall around it.
+local SAVE_FILE = "selux-save.txt"
+UI.SAVE_FILE = SAVE_FILE
+
+-- Unlike the auto-start switch this FAILS OPEN: no file means ON. Auto-start
+-- fails closed because being wrong there puts a panel over unrelated games;
+-- being wrong here only keeps the switches somebody already set. The one hard
+-- requirement is a working file API - an executor without writefile can never
+-- save, and the switch must say so rather than pretend.
+function UI.canSave()
+	return type(isfile) == "function" and type(readfile) == "function"
+		and type(writefile) == "function"
+end
+
+function UI.getSave()
+	if not UI.canSave() then return false end
+	local ok, on = pcall(function()
+		if not isfile(SAVE_FILE) then return true end
+		local saved = readfile(SAVE_FILE)
+		if type(saved) ~= "string" then return true end
+		saved = string.lower((string.gsub(saved, "%s", "")))
+		return not (saved == "0" or saved == "off" or saved == "false")
+	end)
+	if not ok then return false end
+	return on == true
+end
+
+-- Writes, then READS THE ANSWER BACK, exactly like the auto-start switch: an
+-- executor whose writefile silently does nothing would otherwise leave a switch
+-- reading ON while nothing is ever stored.
+function UI.setSave(on)
+	on = on and true or false
+	pcall(function() writefile(SAVE_FILE, on and "1" or "0") end)
+	UI.saveOn = UI.getSave()
+	return UI.saveOn
+end
+
+UI.saveOn = UI.getSave()
+
+-- Only these four types are stored. A Color3, an Instance or a function in a
+-- CONFIG table is dropped rather than guessed at, and dropping is safe: a value
+-- that is not written is simply left at whatever the script's own default is.
+local function cfgLiteral(v)
+	local t = type(v)
+	if t == "boolean" then return tostring(v) end
+	if t == "number" then
+		-- NaN and the infinities do not survive the round trip, and a file that
+		-- does not parse takes every setting in it with it.
+		if v ~= v or v == math.huge or v == -math.huge then return nil end
+		return string.format("%.17g", v)
+	end
+	if t == "string" then return string.format("%q", v) end
+	return nil
+end
+
+-- Keys are SORTED, and that is load-bearing rather than tidy: the auto-save
+-- compares the serialised text against the last one written, and pairs() order
+-- is not stable in Luau, so an unsorted dump would look different on every pass
+-- and write the file every four seconds forever.
+local CFG_DEPTH = 3
+local function cfgSerialise(tbl, depth)
+	depth = depth or 1
+	local keys = {}
+	for k in pairs(tbl) do
+		if type(k) == "string" or type(k) == "number" then keys[#keys + 1] = k end
+	end
+	table.sort(keys, function(a, b) return tostring(a) < tostring(b) end)
+
+	local parts = {}
+	for _, k in ipairs(keys) do
+		local v = tbl[k]
+		local lit = cfgLiteral(v)
+		if lit == nil and type(v) == "table" and depth < CFG_DEPTH then
+			lit = cfgSerialise(v, depth + 1)
+		end
+		if lit ~= nil then
+			local name = type(k) == "number" and ("[" .. tostring(k) .. "]")
+				or ("[" .. string.format("%q", k) .. "]")
+			parts[#parts + 1] = name .. "=" .. lit
+		end
+	end
+	return "{" .. table.concat(parts, ",") .. "}"
+end
+
+local function cfgCopy(tbl, depth)
+	depth = depth or 1
+	local out = {}
+	for k, v in pairs(tbl) do
+		if type(k) == "string" or type(k) == "number" then
+			if cfgLiteral(v) ~= nil then
+				out[k] = v
+			elseif type(v) == "table" and depth < CFG_DEPTH then
+				out[k] = cfgCopy(v, depth + 1)
+			end
+		end
+	end
+	return out
+end
+
+local function cfgRead(file)
+	if not (isfile and readfile) then return nil end
+	local ok, body = pcall(function()
+		if not isfile(file) then return nil end
+		return readfile(file)
+	end)
+	if not ok or type(body) ~= "string" or string.sub(body, 1, 1) ~= "{" then
+		return nil
+	end
+	-- Luau kept loadstring and setfenv; plain 5.4 (lib/uitest.lua) has load with
+	-- an env argument instead. Both end up with an empty environment.
+	local chunk
+	if setfenv and loadstring then
+		chunk = loadstring("return " .. body)
+		if chunk then pcall(setfenv, chunk, {}) end
+	elseif load then
+		local ok2, made = pcall(load, "return " .. body, "selux-cfg", "t", {})
+		chunk = ok2 and made or nil
+	end
+	-- Last resort, an executor with neither: load it unsandboxed rather than
+	-- losing the whole feature. The file is in the caller's own workspace, and
+	-- anything able to write there can already run code in this client.
+	if not chunk and loadstring then chunk = loadstring("return " .. body) end
+	if not chunk then return nil end
+	local fine, value = pcall(chunk)
+	if not fine or type(value) ~= "table" then return nil end
+	return value
+end
+
+-- Merged against the DEFAULTS, never against the live table, and only where the
+-- types agree. That is what makes an old file harmless after an update: a key
+-- that no longer exists is ignored, a key whose meaning changed from a number to
+-- a string is ignored, and a file from a different script cannot bleed in.
+local function cfgMerge(live, saved, defaults, depth)
+	for k, want in pairs(saved) do
+		local base = defaults[k]
+		if base ~= nil and type(base) == type(want) then
+			if type(base) == "table" then
+				if depth < CFG_DEPTH and type(live[k]) == "table" then
+					cfgMerge(live[k], want, base, depth + 1)
+				end
+			else
+				live[k] = want
+			end
+		end
+	end
+end
+
+-- IN PLACE. The script is holding a reference to this exact table - and often to
+-- sub-tables of it - so replacing them would leave every closure in the script
+-- writing into an orphan while the panel reads the new one.
+local function cfgRestore(live, defaults, depth)
+	depth = depth or 1
+	for k, v in pairs(defaults) do
+		if type(v) == "table" then
+			if type(live[k]) == "table" and depth < CFG_DEPTH then
+				cfgRestore(live[k], v, depth + 1)
+			else
+				live[k] = cfgCopy(v, depth + 1)
+			end
+		else
+			live[k] = v
+		end
+	end
+end
+
+UI.configs = UI.configs or {}
+
+local function cfgView(record)
+	local out = {}
+	for k, v in pairs(record.live) do
+		if not (record.skip and record.skip[k]) then out[k] = v end
+	end
+	return out
+end
+
+-- alias  the script's name in hub/index.json, so two games never share a file
+-- tbl    the live CONFIG table, merged in place
+-- opts   { skip = { key = true } } for anything that must never be stored
+function UI.config(alias, tbl, opts)
+	if type(alias) ~= "string" or type(tbl) ~= "table" then return nil end
+	opts = opts or {}
+
+	local previous = UI.configs[alias]
+	local generation = ((previous and previous.generation) or 0) + 1
+	local record = {
+		alias = alias,
+		file = "selux-cfg-" .. alias .. ".txt",
+		live = tbl,
+		-- Taken BEFORE the merge: these are the script's own defaults and the
+		-- only thing "reset" has to restore to.
+		defaults = cfgCopy(tbl),
+		skip = opts.skip,
+		generation = generation,
+		saved = nil,
+		loaded = false,
+	}
+	UI.configs[alias] = record
+	UI.configCurrent = record
+
+	if UI.saveOn then
+		local saved = cfgRead(record.file)
+		if saved then
+			cfgMerge(record.live, saved, record.defaults, 1)
+			record.loaded = true
+		end
+	end
+	record.snapshot = cfgSerialise(cfgView(record))
+
+	-- Guarded on the generation, like every other loop in this project: a
+	-- re-executed script must not leave a second writer running against the same
+	-- file. os.clock is only read for the status line, never for the decision.
+	task.spawn(function()
+		while true do
+			task.wait(4)
+			local now = UI.configs[alias]
+			if not now or now.generation ~= generation then return end
+			if UI.saveOn then pcall(UI.configSave, alias) end
+		end
+	end)
+
+	return record
+end
+
+local function cfgRecord(alias)
+	if alias then return UI.configs[alias] end
+	return UI.configCurrent
+end
+
+-- Writes only when the serialised text actually changed, so the four-second loop
+-- costs one string build and one comparison on an idle panel.
+function UI.configSave(alias, force)
+	local record = cfgRecord(alias)
+	if not record then return false, "unknown" end
+	if not UI.canSave() then
+		record.note = "kein writefile"
+		return false, "writefile"
+	end
+	local text = cfgSerialise(cfgView(record))
+	if text == record.snapshot and not force then return true, "unchanged" end
+	local ok = pcall(writefile, record.file, text)
+	if not ok then
+		record.note = "Schreiben fehlgeschlagen"
+		return false, "write"
+	end
+	record.snapshot = text
+	record.saved = os.clock()
+	record.note = "gespeichert"
+	return true, "written"
+end
+
+-- Deleting the file is the point, not writing the defaults into it: with the
+-- file gone a later update that changes a default takes effect. delfile is not
+-- universal, so writing the defaults back is the fallback - same result for this
+-- version, just not for the next one.
+function UI.configReset(alias)
+	local record = cfgRecord(alias)
+	if not record then return false end
+	cfgRestore(record.live, record.defaults, 1)
+	record.snapshot = cfgSerialise(cfgView(record))
+	local removed = false
+	if isfile and delfile and isfile(record.file) then
+		removed = pcall(delfile, record.file)
+	end
+	if not removed and UI.canSave() then
+		pcall(writefile, record.file, record.snapshot)
+	end
+	record.saved = nil
+	record.note = "zurueckgesetzt"
+	return true
+end
 
 -- The flag itself: the repo copy for everybody, the workspace copy while
 -- developing, and the two letters when neither is reachable. A panel must never
@@ -1214,15 +1549,36 @@ function UI.Window(options)
 
 	local headSub = label(head, options.subtitle or "", 11, UI.font.body, UI.theme.faint)
 	headSub.Position = UDim2.fromOffset(190, 0)
-	headSub.Size = UDim2.fromOffset(120, 38)
+	headSub.Size = UDim2.fromOffset(90, 38)
 	headSub.ZIndex = 3
 	window.headSub = headSub
 
+	-- The header is three clusters and they used to be placed independently, which
+	-- is why they collided: the flag strip grew with UI.LANGS, the "18 aktiv" count
+	-- sat at a hardcoded offset that assumed three flags, and the two overlapped by
+	-- 14px - the count was drawn UNDER the first flag and read as "18 ak". So the
+	-- right-hand block is measured once here and everything is placed from it.
+	local FLAG_STEP = 23
+	local flagWidth = #UI.LANGS * FLAG_STEP - 4
+	local COUNT_W = 66
+	-- window buttons (52) + flags + a gap + the count, as a distance from the right
+	local RIGHT_BLOCK = 52 + flagWidth + 10 + COUNT_W
+	local HEAD_W = width - 46
+	local LEFT_BLOCK = 286               -- brand, page name, subtitle
+
 	-- search sits in the middle of the header, like the mockup
+	-- Actually centred on the header now, not "somewhere right of centre": it was
+	-- pinned 368px off the right edge, so on a 920 panel its middle sat 47px past
+	-- the middle of the bar. Centred, then clamped so it can never slide under
+	-- either cluster on a narrower window.
 	-- Drawn as a real field. It used to be fully transparent with no outline, so
 	-- the placeholder floated in the header and there was no telling where the
 	-- box began or ended.
-	local searchWrap = frame(head, UDim2.fromOffset(172, 24), UDim2.new(1, -368, 0, 7),
+	local SEARCH_W = 172
+	local searchX = math.floor((HEAD_W - SEARCH_W) / 2)
+	searchX = math.min(searchX, HEAD_W - RIGHT_BLOCK - SEARCH_W - 8)
+	searchX = math.max(searchX, LEFT_BLOCK)
+	local searchWrap = frame(head, UDim2.fromOffset(SEARCH_W, 24), UDim2.fromOffset(searchX, 7),
 		UI.theme.input, 0)
 	searchWrap.ZIndex = 3
 	corner(searchWrap, 7)
@@ -1252,8 +1608,8 @@ function UI.Window(options)
 	end)
 
 	local activeCount = label(head, "0 aktiv", 11, UI.font.body, UI.theme.accentSoft)
-	activeCount.Position = UDim2.new(1, -186, 0, 0)
-	activeCount.Size = UDim2.fromOffset(60, 38)
+	activeCount.Position = UDim2.new(1, -RIGHT_BLOCK, 0, 0)
+	activeCount.Size = UDim2.fromOffset(COUNT_W, 38)
 	activeCount.TextXAlignment = Enum.TextXAlignment.Right
 	activeCount.ZIndex = 3
 	window.activeCount = activeCount
@@ -1293,11 +1649,10 @@ function UI.Window(options)
 	-- Deliberately not a dropdown: one click has to be enough, and a menu would
 	-- need a label, which would itself need translating before anyone can read it.
 	--
-	-- The strip is SIZED FROM UI.LANGS rather than from a constant. It was 66px
-	-- for three flags, and adding Filipino as a fourth pushed the last chip out
-	-- from under its own parent - the flag was there, it just could not be clicked.
-	local FLAG_STEP = 23
-	local flagWidth = #UI.LANGS * FLAG_STEP - 4
+	-- The strip is SIZED FROM UI.LANGS rather than from a constant (FLAG_STEP and
+	-- flagWidth are computed with the rest of the right-hand block above). It was
+	-- 66px for three flags, and adding Filipino as a fourth pushed the last chip
+	-- out from under its own parent - the flag was there, just not clickable.
 	local flagStrip = frame(head, UDim2.fromOffset(flagWidth, 38),
 		UDim2.new(1, -52 - flagWidth, 0, 0), UI.theme.header, 1)
 	flagStrip.ZIndex = 3
@@ -2662,6 +3017,123 @@ function UI.Window(options)
 		return page
 	end
 
+	--------------------------------------------------------------- SETTINGS
+	--
+	-- Its own page with a GEAR, pinned to the BOTTOM of the rail. It started as a
+	-- card on Home and that was wrong: settings are not something you flip past,
+	-- they are the one thing you go looking for, and bottom-left with a cog is
+	-- where every program in the world has taught people to look.
+	--
+	-- Built from window:Home, so no game script gained a line for it.
+	function window:Settings(options3)
+		options3 = options3 or {}
+		local record = UI.configCurrent
+		local page = self:Page(options3.name or "Einstellungen", UI.icon.gear)
+
+		-- Out of the list layout and onto the rail itself. Everything else in the
+		-- rail is a page in reading order; this one is an anchor, so it is placed
+		-- rather than flowed.
+		page.railButton.Parent = rail
+		page.railButton.Position = UDim2.new(0, 8, 1, -40)
+		page.railButton.ZIndex = 5
+
+		local cfgCard = page:Card("EINSTELLUNGEN", 1):Accent():Icon(UI.icon.gear)
+		local cfgState = cfgCard:Label("")
+
+		local function describe()
+			if not record then
+				return "Dieses Script speichert noch nichts."
+			end
+			if not UI.canSave() then
+				return "Dieser Executor kann keine Dateien schreiben - nichts wird gespeichert."
+			end
+			if not UI.saveOn then
+				return "Speichern ist aus. Deine Schalter sind nach dem naechsten Beitritt wieder auf Standard."
+			end
+			if record.note == "zurueckgesetzt" then
+				return "Auf Standard zurueckgesetzt."
+			end
+			if record.saved then
+				local age = math.max(0, math.floor(os.clock() - record.saved))
+				return UI.tf("Gespeichert vor %d s  ·  %s", age, record.file)
+			end
+			if record.loaded then
+				return UI.tf("Geladen aus %s - Aenderungen werden automatisch gespeichert.", record.file)
+			end
+			return "Aenderungen werden automatisch gespeichert."
+		end
+		cfgState.set(describe())
+
+		if record then
+			local saveToggle
+			saveToggle = cfgCard:Toggle("Einstellungen speichern", UI.saveOn, function(v)
+				local on = UI.setSave(v)
+				if on then pcall(UI.configSave, record.alias, true) end
+				-- Read-back, not the argument: an executor with a writefile that
+				-- does nothing must snap the switch back rather than lie.
+				if on ~= v and saveToggle then saveToggle:set(on) end
+				cfgState.set(describe())
+			end, "Deine Schalter bleiben nach einem Rejoin erhalten.", UI.theme.good)
+
+			cfgCard:Button("Jetzt speichern", function()
+				local ok = UI.configSave(record.alias, true)
+				cfgState.set(ok and describe() or
+					"Konnte nicht speichern - dieser Executor erlaubt kein writefile.")
+			end)
+
+			-- The controls hold their own visual state and nothing maps a switch
+			-- back to a CONFIG key, so a reset that only rewrote the table would
+			-- leave every toggle on screen showing the old value. Rebuilding is
+			-- the honest fix: destroy this panel and let the loader run the
+			-- script again, which now reads the defaults it just restored. Run by
+			-- hand (bridge.py file) there is no loader, so it says what to do.
+			cfgCard:Button("Auf Standard zuruecksetzen", function()
+				UI.configReset(record.alias)
+				cfgState.set("Auf Standard zurueckgesetzt.")
+				local reload = _G.__SEL and _G.__SEL.reload
+				if type(reload) == "function" then
+					task.delay(0.4, function()
+						pcall(function() window:Destroy() end)
+						pcall(reload)
+					end)
+				else
+					cfgState.set("Auf Standard zurueckgesetzt - Script neu starten.")
+				end
+			end, UI.theme.bad)
+		end
+
+		-- The two switches that are NOT per script: they belong to the executor and
+		-- lived only behind the mark in the rail, which nobody finds. Same page now,
+		-- second card, and the mark still works for anyone used to it.
+		local devCard = page:Card("PANEL", 2):Icon(UI.icon.sliders)
+		local autoLabel = devCard:Label("")
+		local function autoText()
+			return UI.autoload and "An: das Panel kommt in jedem Spiel, das Selux kennt."
+				or "Aus: das Panel kommt nur in dem Spiel, in dem du den Loader ausfuehrst."
+		end
+		autoLabel.set(autoText())
+		local autoToggle
+		autoToggle = devCard:Toggle("Auto-Start in neuen Spielen", UI.getAutoload(), function(v)
+			local on = UI.setAutoload(v)
+			on = UI.getAutoload()
+			if on ~= v and autoToggle then autoToggle:set(on) end
+			autoLabel.set(autoText())
+		end, "Ohne das startet Selux nur in dem Spiel, in dem du es aufrufst.")
+
+		devCard:Button("Panel-Groesse: PC oder Handy", function() pcall(UI.askDevice) end)
+		devCard:Label(UI.tf("Selux v%s  ·  Sprache und Groesse gelten fuer alle Scripts.", UI.VERSION))
+
+		task.spawn(function()
+			while page.holder.Parent do
+				cfgState.set(describe())
+				task.wait(5)
+			end
+		end)
+
+		page:Fill()
+		return page
+	end
+
 	--------------------------------------------------------------- HOME
 	--
 	-- Always the first entry in the rail, always the page you land on. Everything
@@ -2854,6 +3326,11 @@ function UI.Window(options)
 		end, UI.theme.warn)
 		paintReportBtn()   -- start grey: nothing has been typed yet
 		report:Label("Mitgeschickt werden Spiel, Script-Version, der letzte Status und die aktiven Optionen. Kein Roblox-Name, keine UserId.")
+
+		-- The settings live on their own page with a gear at the BOTTOM of the rail.
+		-- Built from here so no game script gained a line for it, and built LAST so
+		-- Home stays the landing page.
+		self:Settings()
 
 		local function paint(list, err)
 			for _, child in ipairs(body2:GetChildren()) do

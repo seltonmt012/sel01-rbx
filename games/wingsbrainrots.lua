@@ -1434,6 +1434,12 @@ end)
 
 local UI = (_G.__SEL and _G.__SEL.ui) or loadstring(readfile("ui-template.lua"))()
 
+-- Every switch on this panel survives a rejoin. UI.config merges the saved file
+-- into CONFIG HERE, before the panel is built - the controls read their initial
+-- value out of CONFIG when they are created, so they come up on the saved state
+-- by themselves and nothing below had to be told about any of this.
+UI.config("wingsbrainrots", CONFIG)
+
 local win = UI.Window({
 	name = PANEL_NAME,
 	title = "WINGS", accentTitle = "BRAINROTS", subtitle = "seltonmt",

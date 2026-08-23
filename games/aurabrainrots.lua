@@ -204,6 +204,9 @@ local STATE = {
     rebirths  = 0, worlds = 0, auraBuys = 0,
     lastGrab  = "-", lastSwap = "-",
     rebirthNote = "-", auraNote = "-", worldNote = "-",
+    -- the world push owns the character while this is true; the farm cycle stands
+    -- back without anybody touching the user's toggle
+    worldPin  = false,
 }
 
 -- ------------------------------------------------------------------- helpers
@@ -776,7 +779,13 @@ local function farmCycle()
 
     STATE.rebirthNote = rebirthStep()
 
-    if CONFIG.autoFarm then
+    -- STATE.worldPin, not CONFIG.autoFarm: the world-push loop used to switch the
+    -- user's own toggle off for the seconds it holds the body and switch it back
+    -- afterwards. Harmless until settings started being saved - the four-second
+    -- autosave lands inside that window sooner or later and stores autoFarm as
+    -- OFF, so the next session comes up not farming. A runtime pin belongs in
+    -- STATE; CONFIG is what the user asked for.
+    if CONFIG.autoFarm and not STATE.worldPin then
         STATE.phase = "hunting"
         local m, v, bar = bestCandidate()
         if m then
@@ -823,11 +832,10 @@ end)
 task.spawn(function()
     while _G.__AURABR == GEN do
         if STATE.running and CONFIG.autoWorld then
-            local wasFarm = CONFIG.autoFarm
-            CONFIG.autoFarm = false            -- one body, one pin
+            STATE.worldPin = true              -- one body, one pin
             local ok, r = pcall(pushWorld)
             STATE.worldNote = ok and tostring(r) or ("ERR " .. tostring(r))
-            CONFIG.autoFarm = wasFarm
+            STATE.worldPin = false
             task.wait(5)
         else
             task.wait(1)
@@ -846,6 +854,12 @@ for _, parent in ipairs({ (gethui and gethui()) or nil, game:GetService("CoreGui
         end
     end)
 end
+
+-- Every switch on this panel survives a rejoin. UI.config merges the saved file
+-- into CONFIG HERE, before the panel is built - the controls read their initial
+-- value out of CONFIG when they are created, so they come up on the saved state
+-- by themselves and nothing below had to be told about any of this.
+UI.config("aurabrainrots", CONFIG)
 
 local win = UI.Window({
     title = "AURA", accentTitle = "BRAINROTS", subtitle = "seltonmt",
