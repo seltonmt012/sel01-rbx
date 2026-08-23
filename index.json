@@ -316,6 +316,27 @@
 			"detect": "local rs = game:GetService('ReplicatedStorage') local fw = rs:FindFirstChild('FrameWork_Shared') local rem = fw and fw:FindFirstChild('Remotes') local tr = rem and rem:FindFirstChild('Train') local ba = rem and rem:FindFirstChild('Battle') return tr ~= nil and tr:FindFirstChild('RE_ApplyOnceTrain') ~= nil and ba ~= nil and ba:FindFirstChild('RE_PlayerFinishBattle') ~= nil"
 		},
 		{
+			"alias": "speedtrain",
+			"name": "Speed Training",
+			"file": "games/speedtrain.lua",
+			"places": [
+				105553804282308
+			],
+			"status": "ok",
+			"detect": "local rs = game:GetService('ReplicatedStorage') local t = rs:FindFirstChild('Tables') local p = rs:FindFirstChild('Paper') if not (t and p) then return false end return t:FindFirstChild('Race') ~= nil and t:FindFirstChild('Treadmills') ~= nil and t:FindFirstChild('Shoes') ~= nil and rs:FindFirstChild('Shoes') ~= nil"
+		},
+		{
+			"alias": "rollgnome",
+			"name": "Roll A Gnome",
+			"file": "games/rollgnome.lua",
+			"places": [
+				117539213094671
+			],
+			"status": "ok",
+			"note": "every remote has an empty name; the client blanks them after binding, so everything goes through Library.Imported.Network by name",
+			"detect": "local rs = game:GetService('ReplicatedStorage') local lib = rs:FindFirstChild('Library') local cfg = lib and lib:FindFirstChild('Configs') return cfg ~= nil and cfg:FindFirstChild('Farmers') ~= nil and cfg:FindFirstChild('Farmer RNG') ~= nil and rs:FindFirstChild('Replication') ~= nil"
+		},
+		{
 			"alias": "minemountain",
 			"name": "[⛰️] Mine a Mountain",
 			"file": "games/minemountain.lua",

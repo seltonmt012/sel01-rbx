@@ -54,6 +54,7 @@ local plr = Players.LocalPlayer
 
 local Const = ReplicatedStorage.TS.constants
 local CfgShovels = require(Const.digging.Shovels)
+local CfgDig = require(Const.digging.DiggingConfig)
 local CfgSprays = require(Const.cleaning.SprayBottles)
 local CfgDetectors = require(Const.digging.Detectors)
 local CfgItems = require(Const.items.Items)
@@ -88,6 +89,18 @@ local CONFIG = {
 	scanUntil = 6,        -- sweep while fewer than this many nodes are known
 	scanEvery = 25,       -- and at most this often when the field is merely dull
 	scanRarity = 3,       -- ...or while the best known node is below this rarity
+	-- What the shovel can actually lift out of the ground, rather than a fixed
+	-- rarity floor. See "what a find costs in clicks" below: with a plastic shovel
+	-- everything above common is literally impossible, so "rarest first" spent the
+	-- opening hour stalling on nodes it could never finish.
+	rarityAuto = true,    -- rank nodes by gold per second for the equipped shovel
+	-- Not a "keep it snappy" number: the RANKING is gold per second, so a slow find
+	-- that pays is still the right pick (plastic shovel, measured: common 1.8s for
+	-- 175 gold = 97/s, uncommon 4.4s for 714 = 162/s, rare 16.0s for 4072 = 254/s).
+	-- This is only the wall that keeps a dig from eating a whole session.
+	digSeconds = 25,      -- refuse a node predicted to take longer than this
+	clickBudget = 0,      -- 0 = start from the click rate itself; measured from there
+	probeEvery = 12,      -- every N digs, allow one slow node through anyway
 	giveUpAfter = 4,      -- seconds without progress before abandoning a dig
 	sellAt = 0.3,         -- sell once the backpack is this full
 	gearEvery = 30,       -- seconds between gear-shopping trips
@@ -106,6 +119,9 @@ local STATE = {
 	sold = 0,
 	digs = 0,
 	nodes = 0,
+	power = 1,            -- power of the equipped shovel
+	cps = 8,              -- learned click budget: clicks/s this setup really lands
+	cap = "-",            -- best rarity that budget currently covers
 	lastRarity = "-",
 	goldRate = 0,
 	lastGold = 0,
@@ -321,6 +337,175 @@ do
 	end
 end
 
+--------------------------------------------------------------------------------
+-- what a find costs in seconds
+--------------------------------------------------------------------------------
+
+-- A dig is a race between `clickPower` per counted click and a `decay` per second,
+-- and both come out of DiggingConfig.digDifficultyFor(itemId, kg, shovelPower). The
+-- bar starts at DIG_PROGRESS_START and has to reach DIG_WIN_THRESHOLD, so with a
+-- click rate of `cps` the whole thing collapses to one number per rarity:
+--
+--   seconds = (0.985 - 0.33) / (clickPower * cps - decay)
+--
+-- and if that denominator is not positive the find is simply out of reach. Measured
+-- off the game's own config (median item of each band at its averageKg), the
+-- break-even click rate decay/clickPower reads:
+--
+--   shovel      common uncommon rare  epic  legend mythic divine+
+--   plastic p1    4.0     16.5  27.1  38.5   51.2   61.9   80.6
+--   metal   p5    1.0      1.3   2.5  13.3   27.1   31.7   39.1
+--   titanium p14  0.8      0.8   1.3   2.8    7.9   17.4   24.6
+--   diamond p40   0.8      0.8   0.8   1.2    1.4    1.7    5.6
+--
+-- Which is why "rarest first" is right with a diamond shovel and ruinous with a
+-- plastic one, and why "possible" is not the same question as "worth it": at 35
+-- clicks a second a plastic shovel CAN take a rare, and a measured run spent the
+-- whole 20-second dig timeout doing it and came away with one item in 105 seconds.
+-- So the picker below ranks on gold per second - the band's median value against
+-- its predicted dig time plus the walk - and refuses anything predicted slower than
+-- CONFIG.digSeconds. That is the part that follows the shovel.
+local DIG_SPAN = (CfgDig.DIG_WIN_THRESHOLD or 0.985) - (CfgDig.DIG_PROGRESS_START or 0.33)
+
+local function rarityStats(power)
+	local key = string.format("%.3f", power or 1)
+	-- the cache carries its own name per SHAPE, not just per power: a re-execute
+	-- keeps _G, so an older build's table (which held a bare number per rarity)
+	-- was still sitting there and every read indexed a number
+	_G.__DC_STATS2 = _G.__DC_STATS2 or {}
+	if _G.__DC_STATS2[key] then return _G.__DC_STATS2[key] end
+	local out = {}
+	for _, rarity in ipairs(CfgItems.RARITY_ORDER or {}) do
+		local powers, decays, values = {}, {}, {}
+		for id, item in pairs(CfgItems.Items or {}) do
+			if item.rarity == rarity then
+				local ok, diff = pcall(CfgDig.digDifficultyFor, id, item.averageKg, power)
+				if ok and type(diff) == "table" and (diff.clickPower or 0) > 0 then
+					powers[#powers + 1] = diff.clickPower
+					decays[#decays + 1] = diff.decay or 0
+				end
+				-- itemValueFor is (id, condition, kg) and answers `false` on a bad
+				-- call rather than raising, so the guard is a type check, not a pcall
+				local okv, value = pcall(CfgItems.itemValueFor, id, "ok", item.averageKg)
+				if okv and type(value) == "number" then values[#values + 1] = value end
+			end
+		end
+		-- the MEDIAN of each band, never its worst member: one very heavy item would
+		-- otherwise write off a rarity that is mostly diggable (epic at power 5
+		-- spreads 7.7 to 21.2 break-even clicks, legendary at 14 spreads 3.8 to 9.6)
+		local function mid(t)
+			table.sort(t)
+			return t[math.ceil(#t / 2)]
+		end
+		out[rarity] = {
+			clickPower = mid(powers) or 0,
+			decay = mid(decays) or math.huge,
+			value = mid(values) or 0,
+		}
+		out[rarity].cost = out[rarity].clickPower > 0
+			and (out[rarity].decay / out[rarity].clickPower) or math.huge
+	end
+	_G.__DC_STATS2[key] = out
+	return out
+end
+
+-- The click rate the SERVER counts is learned, not assumed: the loop fires
+-- CONFIG.clicksPerSec of them, but bursts, latency and the server's own accounting
+-- decide how many land, and nothing client-side reports it. Every dig that moves
+-- the bar measures it exactly - progress per second, plus the decay it had to
+-- overcome, divided by the click power - so one dig is enough to calibrate and each
+-- later one refines it.
+--
+-- MEASURED: firing 35 a second, the bar moves as if 11.9 were counted, which is
+-- DiggingConfig.DIG_EFFECTIVE_CLICKS_PER_SECOND (11) almost exactly. So that is the
+-- opening guess, not the nominal rate - starting at 35 cost three lost digs of
+-- calibration while it walked to rares it could never finish. The learned value
+-- survives a re-execute in _G, because it belongs to this machine and connection
+-- rather than to the shovel.
+STATE.cps = tonumber(_G.__DC_CPS)
+	or (CONFIG.clickBudget > 0 and CONFIG.clickBudget)
+	or tonumber(CfgDig.DIG_EFFECTIVE_CLICKS_PER_SECOND)
+	or 11
+
+local function rarityOf(node)
+	local stats = rarityStats(STATE.power)
+	return node and stats[node.rarity] or nil
+end
+
+-- Predicted seconds to take this node out of the ground, math.huge when the decay
+-- eats the clicks and the bar would never fill.
+local function digSeconds(node)
+	local s = rarityOf(node)
+	if not s or s.clickPower <= 0 then return math.huge end
+	local rate = s.clickPower * STATE.cps - s.decay
+	if rate <= 0 then return math.huge end
+	return DIG_SPAN / rate
+end
+
+local function digLimit()
+	-- one dig in probeEvery is deliberately allowed to be slow: it is how a
+	-- pessimistic estimate, a fresh shovel or a better connection gets noticed
+	-- without waiting for the whole ladder to be re-derived
+	return CONFIG.digSeconds * (STATE.probe and 2.5 or 1)
+end
+
+-- Highest rarity the current shovel and measured click rate can take inside the
+-- time limit - what the panel calls the ceiling and what the sweep holds out for.
+local function capIndex()
+	local best = 1
+	for i, rarity in ipairs(CfgItems.RARITY_ORDER or {}) do
+		if digSeconds({ rarity = rarity }) <= CONFIG.digSeconds then best = i end
+	end
+	return best
+end
+
+-- Progress per second is the direct measurement of the counted click rate:
+--   progressRate = clickPower * cps - decay   ->   cps = (rate + decay) / clickPower
+-- An EMA rather than a replacement, because a single dig carries the server's
+-- rounding and whatever the connection did during those five seconds.
+-- `gained` is signed on purpose. A dig that LOSES ground is the most informative
+-- sample there is: it says the counted click rate is under the break-even for this
+-- band, and reading only the rises is what let a plastic shovel keep picking rares
+-- whose bar fell from 33% to 28% and ended as a server-side loss - 0 digs in 103
+-- seconds, with the model still insisting on 35 clicks a second.
+local function learnRate(node, gained, seconds)
+	local s = rarityOf(node)
+	if not s or s.clickPower <= 0 then return end
+	if type(gained) ~= "number" or seconds < 1.2 then return end
+	local measured = (gained / seconds + s.decay) / s.clickPower
+	if measured ~= measured then return end
+	measured = math.max(measured, 0.5)
+	STATE.cps = math.max(STATE.cps * 0.6 + measured * 0.4, 0.5)
+	_G.__DC_CPS = STATE.cps
+end
+
+-- A stall is the other half of the measurement: the bar did not move at all, so
+-- whatever the model said, this band is out of reach right now.
+local function learnStall(node)
+	local s = rarityOf(node)
+	if not s or s.clickPower <= 0 then return end
+	local ceiling = s.decay / s.clickPower
+	if ceiling <= 0 or ceiling == math.huge then return end
+	if STATE.cps > ceiling then
+		STATE.cps = math.max(ceiling * 0.9, 1)
+		_G.__DC_CPS = STATE.cps
+	end
+end
+
+-- The shovel's power is what every cost above is computed from, so it is read off
+-- the data oracle rather than guessed from the tool in hand: a purchase equips a
+-- new shovel mid-cycle and the whole ladder has to move with it.
+local function refreshShovel(d)
+	local id = d and d.EquippedShovel or CfgShovels.DEFAULT_SHOVEL_ID
+	local entry = CfgShovels.Shovels and CfgShovels.Shovels[id]
+	STATE.power = tonumber(entry and entry.power) or 1
+	local order = CfgItems.RARITY_ORDER or {}
+	local idx = capIndex()
+	local secs = digSeconds({ rarity = order[idx] })
+	STATE.cap = string.format("%s in %.1fs  (p%s, %.0f counted clicks/s)",
+		tostring(order[idx] or "?"), secs, tostring(STATE.power), STATE.cps)
+end
+
 local function nodeList()
 	local seen = _G.__DC_SEEN
 	if type(seen) ~= "table" then return {} end
@@ -364,21 +549,43 @@ local function sweepArea(zone, points)
 	STATE.nodes = #nodeList()
 end
 
--- Rarest first, and among equals the nearest. Walking past a legendary to dig a
--- common is the one thing that actually costs value here.
+-- Rarest first, and among equals the nearest - but only among the nodes the
+-- current shovel can finish. Walking past a legendary to dig a common costs value;
+-- walking to a legendary a plastic shovel cannot move costs four seconds and
+-- yields nothing, and that is the worse trade at the start of a save.
+-- Second return value is true when nothing on the field was affordable and the
+-- cheapest node was taken anyway: standing still measures nothing, and the outcome
+-- of that dig is what corrects the budget.
 local function pickNode()
 	local _, hrp = char()
 	if not hrp then return nil end
-	local best, bestScore
+	local limit = digLimit()
+	local speed = math.max(CONFIG.moveSpeed, 1)
+	local best, bestScore, reach, reachSecs
 	for _, n in ipairs(nodeList()) do
 		if typeof(n.position) == "Vector3" then
-			local rarity = RARITY[n.rarity] or 1
 			local dist = (n.position - hrp.Position).Magnitude
-			local score = rarity * 10000 - dist
-			if not bestScore or score > bestScore then best, bestScore = n, score end
+			if not CONFIG.rarityAuto then
+				-- manual mode is the old rule: rarest first, nearest among equals
+				local score = (RARITY[n.rarity] or 1) * 10000 - dist
+				if not bestScore or score > bestScore then best, bestScore = n, score end
+			else
+				local secs = digSeconds(n)
+				local stats = rarityOf(n)
+				-- the walk is part of the price of a find, which is what stops the
+				-- picker crossing the whole beach for a node worth a fraction more
+				local total = secs + dist / speed + 1.5
+				local score = ((stats and stats.value) or 0) / total
+				if secs <= limit then
+					if not bestScore or score > bestScore then best, bestScore = n, score end
+				elseif not reachSecs or secs < reachSecs then
+					reach, reachSecs = n, secs
+				end
+			end
 		end
 	end
-	return best
+	if best then return best, false end
+	return reach, reach ~= nil
 end
 
 --------------------------------------------------------------------------------
@@ -485,15 +692,25 @@ local function doDig()
 	-- node was below rare, and on a field of thirty commons that is always true, so
 	-- it spent its whole life walking in circles over ground it had already
 	-- uncovered instead of digging what it had found.
-	local node = pickNode()
+	-- One dig in `probeEvery` is allowed to be slow, so a shovel upgrade or a
+	-- pessimistic estimate is noticed by measurement instead of by assumption.
+	STATE.probe = CONFIG.rarityAuto and CONFIG.probeEvery > 0
+		and ((STATE.digs + (STATE.tooHard or 0)) % CONFIG.probeEvery == 0)
+
+	local node, stretched = pickNode()
 	local known = #nodeList()
 	local thin = known < CONFIG.scanUntil or not node
-	local mediocre = node and (RARITY[node.rarity] or 1) < CONFIG.scanRarity
+	-- The sweep target follows the shovel too. A fixed "hold out for rare" made the
+	-- opening hour walk in circles on a field whose rares were unreachable anyway,
+	-- and it stopped sweeping long before a diamond shovel had any reason to settle
+	-- for an epic. `capIndex()` is the best band the current setup actually covers.
+	local target = CONFIG.rarityAuto and capIndex() or CONFIG.scanRarity
+	local mediocre = stretched or (node and (RARITY[node.rarity] or 1) < target)
 	local cooled = os.clock() >= (STATE.nextScanAt or 0)
 	if CONFIG.scan and (thin or (mediocre and cooled)) then
 		STATE.nextScanAt = os.clock() + CONFIG.scanEvery
 		sweepArea(zone, CONFIG.scanPoints)
-		node = pickNode()
+		node, stretched = pickNode()
 	end
 	if not node then
 		-- A toggle forces a fresh stream; without it the list can stay empty after
@@ -502,13 +719,15 @@ local function doDig()
 		task.wait(0.3)
 		fire("DetectorNetwork", "DetectorEvents", "SetDetectorHeld", true)
 		task.wait(1.5)
-		node = pickNode()
+		node, stretched = pickNode()
 	end
 	if not node then STATE.note = "no buried nodes" return false end
 
+	local predicted = digSeconds(node)
 	STATE.nodes = #nodeList()
 	STATE.lastRarity = tostring(node.rarity)
-	STATE.phase = "dig " .. tostring(node.rarity)
+	STATE.phase = string.format("dig %s (~%.0fs)", tostring(node.rarity),
+		predicted == math.huge and 99 or predicted)
 	hop(node.position + Vector3.new(0, 3, 0), 0.8)
 
 	-- Standing on a remembered position is not the same as the detector having the
@@ -575,11 +794,25 @@ local function doDig()
 	end)
 	if okProg then progConn = pc _G.__DC_PROGCONN = pc end
 
-	local deadline = os.clock() + 20
+	-- The deadline follows the prediction instead of sitting at a flat 20 seconds:
+	-- a node predicted at 4s that is still going at 12 is not a slow dig, it is a
+	-- wrong model, and the sooner that ends the sooner the model is corrected. The
+	-- ceiling stays at DIG_SESSION_TIMEOUT so a genuinely long dig is never cut.
+	local budgeted = math.clamp(
+		(predicted == math.huge and 20 or predicted) * 2.5 + 3, 6,
+		CfgDig.DIG_SESSION_TIMEOUT or 45)
+	local started_at = os.clock()
+	local firstProgress, firstAt, lastProgress, lastAt
+	local deadline = started_at + budgeted
 	local stalled = false
 	while finished == nil and os.clock() < deadline and CONFIG.auto and GEN == _G.__DIGCLEAN do
 		pcall(function() ctrl:onDigInput() end)
 		task.wait(interval)
+		-- every sample is kept, up OR down: the slope of the bar is the measurement
+		if progress > 0 and progress ~= lastProgress then
+			if not firstAt then firstProgress, firstAt = progress, os.clock() end
+			lastProgress, lastAt = progress, os.clock()
+		end
 		if progress > bestProgress + 0.01 then
 			bestProgress, bestAt = progress, os.clock()
 		elseif os.clock() - bestAt > CONFIG.giveUpAfter then
@@ -591,8 +824,17 @@ local function doDig()
 	if okStart then pcall(function() startConn:Disconnect() end) end
 	if progConn then pcall(function() progConn:Disconnect() end) end
 
+	-- Whatever the outcome, the bar's own speed is the measurement of how many
+	-- clicks the server counted, and every dig that moved it refines the model.
+	if firstAt and lastAt then
+		learnRate(node, lastProgress - firstProgress, lastAt - firstAt)
+	end
+
 	if stalled and finished == nil then
 		forgetNode(node.id)
+		-- A dig that did not move at all is the honest proof that this band is out
+		-- of reach right now, whatever the config said.
+		learnStall(node)
 		STATE.note = string.format("too hard for this shovel (%s, stuck at %.0f%%)",
 			tostring(node.rarity), bestProgress * 100)
 		STATE.tooHard = (STATE.tooHard or 0) + 1
@@ -606,10 +848,22 @@ local function doDig()
 
 	if finished then
 		STATE.digs = STATE.digs + 1
-		STATE.note = "dug " .. tostring(node.rarity)
+		STATE.note = string.format("dug %s in %.1fs (predicted %.1fs)",
+			tostring(node.rarity), os.clock() - started_at,
+			predicted == math.huge and 99 or predicted)
 		return true
 	end
-	STATE.note = "dig timed out"
+	if finished == false then
+		-- The server ends a dig as a loss once the bar falls past DIG_LOSE_THRESHOLD,
+		-- which is what a band above the real click rate looks like from here: the
+		-- slope measured above has already pulled the model down.
+		STATE.note = string.format("lost the dig (%s, bar fell to %.0f%% in %.0fs)",
+			tostring(node.rarity), bestProgress * 100, os.clock() - started_at)
+		STATE.tooHard = (STATE.tooHard or 0) + 1
+		return false
+	end
+	STATE.note = string.format("dig ran out of time (%s, %.0f%% after %.0fs)",
+		tostring(node.rarity), bestProgress * 100, os.clock() - started_at)
 	return false
 end
 
@@ -1111,6 +1365,32 @@ end
 
 local GEAR_CATEGORY = { shovel = "shovel", spray = "spray", detector = "detector" }
 
+-- Owning the best tier and HOLDING it are two different things, and only the second
+-- one digs: `bestGear` skips anything already owned, so once the equipped item is
+-- behind the inventory - a swap, a pack, a reward - nothing ever put it right and
+-- the farm kept measuring a plastic shovel while a gold one sat in the bag.
+local function equipBest(d, cfg, orderKey, tableKey, owned, equipped, category)
+	local list, order = cfg[tableKey], cfg[orderKey]
+	if type(list) ~= "table" or type(order) ~= "table" then return false end
+	local rankOf = {}
+	for index, id in ipairs(order) do
+		local entry = list[id]
+		rankOf[id] = entry and (tonumber(entry.power) or tonumber(entry.range)
+			or tonumber(entry.strength) or index) or index
+	end
+	local pick, pickRank = nil, rankOf[equipped] or -1
+	for _, id in ipairs(owned or {}) do
+		if (rankOf[id] or -1) > pickRank then pick, pickRank = id, rankOf[id] end
+	end
+	if not pick then return false end
+	local ok, res = invoke("ShopNetwork", "ShopFunctions", "equipGear", category, pick)
+	if ok and res ~= false then
+		STATE.note = "equipped " .. pick
+		return true
+	end
+	return false
+end
+
 local function doBuyGear()
 	local d = data()
 	if not d then return false end
@@ -1119,12 +1399,23 @@ local function doBuyGear()
 
 	local jobs = {
 		{ cat = GEAR_CATEGORY.shovel, cfg = CfgShovels, order = "SHOVEL_TIER_ORDER",
-		  tbl = "Shovels", owned = d.OwnedShovels, ownedKey = "OwnedShovels" },
+		  tbl = "Shovels", owned = d.OwnedShovels, ownedKey = "OwnedShovels",
+		  equippedKey = "EquippedShovel" },
 		{ cat = GEAR_CATEGORY.spray, cfg = CfgSprays, order = "SPRAY_TIER_ORDER",
-		  tbl = "SprayBottles", owned = d.OwnedSprays, ownedKey = "OwnedSprays" },
+		  tbl = "SprayBottles", owned = d.OwnedSprays, ownedKey = "OwnedSprays",
+		  equippedKey = "EquippedSpray" },
 		{ cat = GEAR_CATEGORY.detector, cfg = CfgDetectors, order = "DETECTOR_TIER_ORDER",
-		  tbl = "Detectors", owned = d.OwnedDetectors, ownedKey = "OwnedDetectors" },
+		  tbl = "Detectors", owned = d.OwnedDetectors, ownedKey = "OwnedDetectors",
+		  equippedKey = "EquippedDetector" },
 	}
+
+	-- Before spending anything: hold the best of what is already owned. This needs
+	-- no NPC and no gold, and it is the only thing that repairs an equipped tier
+	-- that has fallen behind the inventory.
+	for _, job in ipairs(jobs) do
+		equipBest(d, job.cfg, job.order, job.tbl, d[job.ownedKey],
+			d[job.equippedKey], job.cat)
+	end
 
 	-- One trip buys as many tiers as the balance covers, not one per visit. Gold
 	-- accumulates while digging, so a single-purchase trip left affordable gear
@@ -1173,12 +1464,20 @@ local function gearPending()
 	local d = data()
 	if not d then return false end
 	local checks = {
-		{ CfgShovels, "SHOVEL_TIER_ORDER", "Shovels", d.OwnedShovels },
-		{ CfgSprays, "SPRAY_TIER_ORDER", "SprayBottles", d.OwnedSprays },
-		{ CfgDetectors, "DETECTOR_TIER_ORDER", "Detectors", d.OwnedDetectors },
+		{ CfgShovels, "SHOVEL_TIER_ORDER", "Shovels", d.OwnedShovels,
+		  d.EquippedShovel, GEAR_CATEGORY.shovel },
+		{ CfgSprays, "SPRAY_TIER_ORDER", "SprayBottles", d.OwnedSprays,
+		  d.EquippedSpray, GEAR_CATEGORY.spray },
+		{ CfgDetectors, "DETECTOR_TIER_ORDER", "Detectors", d.OwnedDetectors,
+		  d.EquippedDetector, GEAR_CATEGORY.detector },
 	}
 	for _, c in ipairs(checks) do
 		if bestGear(c[1], c[2], c[3], c[4], d.UnlockedIslands, d.Gold or 0) then return true end
+	end
+	-- A better OWNED tier that is not in hand is also pending work, and it is the
+	-- cheap kind: no walk, no gold, and it is what the trip existed for anyway.
+	for _, c in ipairs(checks) do
+		if equipBest(d, c[1], c[2], c[3], c[4], c[5], c[6]) then return false end
 	end
 	return false
 end
@@ -1270,6 +1569,7 @@ loop(6, function()
 	STATE.tutorial = tutorialStep()
 	STATE.gear = tostring(d.EquippedShovel) .. " / " .. tostring(d.EquippedSpray) ..
 		" / " .. tostring(d.EquippedDetector)
+	refreshShovel(d)
 	local best, luck, nextLocked, nextCost = bestIsland(d)
 	STATE.island = tostring(d.CurrentIsland) .. " luck x" .. tostring(luck == 0 and 1 or luck) ..
 		(nextLocked and ("   next " .. nextLocked .. " " .. short(nextCost)) or "   all owned")
@@ -1282,6 +1582,13 @@ loop(120, function()
 end)
 
 armNodeListener()
+
+-- The 6s refresh only runs while AUTO is on, so the ladder is read once at load -
+-- otherwise the panel opens quoting a plastic shovel's ceiling on a diamond one.
+task.spawn(function()
+	local ok, d = pcall(data)
+	refreshShovel(ok and d or nil)
+end)
 
 --------------------------------------------------------------------------------
 -- panel
@@ -1310,15 +1617,34 @@ main:Toggle("Clean", CONFIG.clean, function(v) CONFIG.clean = v end,
 main:Toggle("Sell", CONFIG.sell, function(v) CONFIG.sell = v end,
 	"walks to the seller once the backpack is full enough")
 main:Slider("Clicks/sec", 4, 30, CONFIG.clicksPerSec, function(v)
+	local was = CONFIG.clicksPerSec
 	CONFIG.clicksPerSec = math.floor(v)
+	-- The learned budget is measured AT a click rate, so halving the rate halves
+	-- what the loop can take out of the ground. Scaling it here keeps the rarity
+	-- target honest instead of waiting for a run of stalls to discover it.
+	if was > 0 then
+		STATE.cps = math.max(STATE.cps * (CONFIG.clicksPerSec / was), 1)
+		_G.__DC_CPS = STATE.cps
+	end
 end, "the game's own ceiling is 50 per second")
 main:Toggle("Scan the field", CONFIG.scan, function(v) CONFIG.scan = v end,
 	"sweeps the area first so there is a choice of nodes instead of one underfoot")
 main:Slider("Scan hops", 2, 10, CONFIG.scanPoints, function(v)
 	CONFIG.scanPoints = math.floor(v)
 end, "more hops reveal more of the field and cost about half a second each")
+main:Toggle("Match the shovel", CONFIG.rarityAuto, function(v) CONFIG.rarityAuto = v end,
+	"dig only what this shovel can finish, and raise the target as it improves",
+	UI.theme.good)
+main:Stepper("Give a node", function()
+	return string.format("%ds", CONFIG.digSeconds)
+end, function(dir)
+	CONFIG.digSeconds = math.clamp(CONFIG.digSeconds + dir * 2, 4, 30)
+end, "anything predicted slower than this is left in the ground")
 main:Stepper("Hold out for", function()
 	local order = CfgItems.RARITY_ORDER
+	if CONFIG.rarityAuto then
+		return "auto " .. tostring((type(order) == "table" and order[capIndex()]) or "?")
+	end
 	return (type(order) == "table" and order[CONFIG.scanRarity]) or tostring(CONFIG.scanRarity)
 end, function(dir)
 	CONFIG.scanRarity = math.clamp(CONFIG.scanRarity + dir, 1, 8)
@@ -1355,7 +1681,7 @@ extra:Slider("Move speed", 30, 200, CONFIG.moveSpeed, function(v)
 end, "studs per second for the hops")
 extra:Button("Unstuck", unstuck, UI.theme.bad)
 
-local out = page:Card("STATUS", 0):Readout(13, function(text)
+local out = page:Card("STATUS", 0):Readout(14, function(text)
 	if text:find("tutorial") then return UI.theme.warn end
 	if text:find("^AUTO") then return UI.theme.good end
 	return nil
@@ -1374,6 +1700,8 @@ task.spawn(function()
 			"  gear     " .. tostring(STATE.gear),
 			"  island   " .. tostring(STATE.island),
 			"  nodes    " .. STATE.nodes .. " visible, last " .. tostring(STATE.lastRarity),
+			"  digs up to " .. tostring(STATE.cap) ..
+				(CONFIG.rarityAuto and "" or "   (manual target)"),
 			"  backpack " .. string.format("%d%%", math.floor(backpackFullness() * 100)),
 			"  " .. tostring(STATE.note),
 		}
@@ -1408,6 +1736,9 @@ _G.__DIGCLEAN_DBG = {
 	closeModals = closeModals, plotNumber = plotNumber,
 	pickNode = pickNode, nodeList = nodeList, digController = digController,
 	sweepArea = sweepArea, forgetNode = forgetNode, armNodeListener = armNodeListener,
+	rarityStats = rarityStats, digSeconds = digSeconds, digLimit = digLimit,
+	capIndex = capIndex, learnRate = learnRate, learnStall = learnStall,
+	rarityOf = rarityOf, refreshShovel = refreshShovel,
 	invoke = invoke, fire = fire, hop = hop, npcNamed = npcNamed,
 	inventoryList = inventoryList, backpackFullness = backpackFullness,
 }
