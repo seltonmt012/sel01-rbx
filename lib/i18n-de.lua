@@ -8,7 +8,7 @@
 -- they are - they keep passing "Auto rebirth" and only this file decides what
 -- the player reads.
 --
--- 990 entries.
+-- 994 entries.
 
 return {
 	["0 = highest stage of the current world"] = "0 = hoechste Stage der aktuellen Welt",

@@ -1,0 +1,67 @@
+-- Selux panel dictionary, fil. GENERATED - edit the TSV under tools/i18n/ and
+-- run tools/i18n-build.py, not this file.
+--
+-- Keyed by the string as the SCRIPT writes it, whatever language that happens to
+-- be in. UI.t() looks the key up and returns the value; a key that is not here
+-- falls through unchanged, so a missing translation shows the original rather
+-- than an empty label. That is what lets all 21 game scripts stay exactly as
+-- they are - they keep passing "Auto rebirth" and only this file decides what
+-- the player reads.
+--
+-- 994 entries.
+
+return {
+	["%d Min"] = "%d min",
+	["%d Std"] = "%d oras",
+	["%d Tage"] = "%d araw",
+	["%s / %s an"] = "%s / %s naka-on",
+	["%s aktiv"] = "%s aktibo",
+	["AN"] = "ON",
+	["AUS"] = "OFF",
+	["An: das Panel kommt in jedem Spiel, das Selux kennt."] = "On: lalabas ang panel sa bawat larong kilala ng Selux.",
+	["Angekommen. Nummer #%s - die kannst du im Support-Forum nennen."] = "Dumating na. Numero #%s - banggitin ito sa support forum.",
+	["Aus: das Panel kommt nur in dem Spiel, in dem du den Loader ausfuehrst."] = "Off: lalabas lang ang panel sa larong pinatakbo mo ng loader.",
+	["Auto Farm laeuft"] = "Auto farm running",
+	["Auto-Start in neuen Spielen"] = "Auto-start sa mga bagong laro",
+	["Bereit"] = "Handa",
+	["Bitte schreib kurz rein, was nicht geht - mindestens %d Zeichen. Ohne Beschreibung kann ich den Fehler nicht finden."] = "Pakisulat kung ano ang sira - hindi bababa sa %d na karakter. Kung walang paglalarawan, hindi mahahanap ang bug.",
+	["Codes, Updates & Support"] = "Mga code, update at suporta",
+	["DISCORD BEITRETEN"] = "SUMALI SA DISCORD",
+	["Das Panel laeuft erst %ds. Lass es kurz laufen (noch %ds) - oder schreib oben rein, was nicht geht, dann geht es sofort."] = "The panel has only been running %ds. Give it a moment (%ds to go) - or type above what is broken and it goes straight out.",
+	["Dieses Problem wurde fuer dieses Spiel gerade schon gemeldet - es ist angekommen, aber nicht doppelt."] = "Kaka-report lang nito para sa larong ito - dumating ito, hindi lang binibilang nang dalawang beses.",
+	["GEMELDET - DANKE  #%s"] = "NAIREPORT - SALAMAT  #%s",
+	["Gestoppt"] = "Huminto",
+	["GitHub nicht erreichbar"] = "Hindi maabot ang GitHub",
+	["IM BROWSER GEOEFFNET"] = "BINUKSAN SA BROWSER",
+	["In die Zwischenablage kopiert - bitte im Discord unter #support einfuegen. Nummer #%s"] = "Nakopya sa clipboard - pakipaste sa #support sa Discord. Numero #%s",
+	["KOPIERT  #%s"] = "NAKOPYA  #%s",
+	["Konnte nicht senden. Bitte im Discord im Support-Forum melden."] = "Could not send. Please report it in the Discord support forum.",
+	["LAEUFT GERADE"] = "RUNNING NOW",
+	["LIMIT ERREICHT"] = "LIMIT REACHED",
+	["LINK KOPIERT"] = "NAKOPYA ANG LINK",
+	["MELDEN"] = "I-REPORT",
+	["MELDEN (TEXT FEHLT)"] = "I-REPORT (WALANG TEKSTO)",
+	["Mitgeschickt werden Spiel, Script-Version, der letzte Status und die aktiven Optionen. Kein Roblox-Name, keine UserId."] = "Ipinapadala: ang laro, bersyon ng script, huling status at ang mga aktibong opsyon. Walang Roblox name, walang UserId.",
+	["Nochmal druecken zum Senden. Besser: schreib kurz rein, was nicht geht - dann kann ich es auch beheben."] = "Press again to send. Better: type what is broken - then it can actually be fixed.",
+	["PROBLEM MELDEN"] = "MAG-REPORT NG PROBLEMA",
+	["SCHON GEMELDET  #%s"] = "NAIREPORT NA  #%s",
+	["Script kaputt oder Spiel geupdatet? Ein Klick reicht - wenn du willst, schreib kurz dazu was nicht geht."] = "Script broken or the game updated? One click is enough - and if you like, add a line about what is wrong.",
+	["Sitzung %d min  ·  %d Seiten  ·  Selux v%s"] = "Sesyon %d min  ·  %d pahina  ·  Selux v%s",
+	["Stunde nochmal."] = "hour.",
+	["Suche"] = "Hanapin",
+	["Von dieser Verbindung kamen zuletzt zu viele Meldungen, diese wurde NICHT zugestellt. Sie liegt in der Zwischenablage - fueg sie im Discord unter #support ein, oder probier es gleich nochmal."] = "Masyadong maraming report ang galing sa koneksyon na ito, kaya HINDI ito naipadala. Nasa clipboard mo - i-paste ito sa #support sa Discord, o subukan ulit maya-maya.",
+	["WIRKLICH MELDEN?"] = "REALLY REPORT?",
+	["Was genau geht nicht? (Pflicht)"] = "Ano ang hindi gumagana? (kailangan)",
+	["Was genau geht nicht? (optional)"] = "What exactly is broken? (optional)",
+	["Was genau geht nicht? Schreib es kurz rein - ohne Text kann ich nichts beheben."] = "Ano ang hindi gumagana? Isulat ito nang maikli - kung walang teksto, walang maaayos.",
+	["gemeldet - es ist angekommen, aber nicht doppelt."] = "reported - it arrived, just not twice.",
+	["gerade eben"] = "ngayon lang",
+	["keine Verbindung"] = "walang koneksyon",
+	["keine Verbindung zu GitHub"] = "no connection to GitHub",
+	["laedt ..."] = "naglo-load ...",
+	["oben rein, was nicht geht, dann geht es sofort."] = "type what is broken above, then it goes straight out.",
+	["rein, was nicht geht - dann kann ich es auch beheben."] = "what is broken - then it can actually be fixed.",
+	["und die aktiven Optionen. Kein Roblox-Name, keine UserId."] = "and the active options. No Roblox name, no UserId.",
+	["unlesbare Antwort"] = "hindi mabasang sagot",
+	["wenn du willst, schreib kurz dazu was nicht geht."] = "if you like, add a line about what is broken.",
+}

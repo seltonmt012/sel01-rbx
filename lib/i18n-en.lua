@@ -8,7 +8,7 @@
 -- they are - they keep passing "Auto rebirth" and only this file decides what
 -- the player reads.
 --
--- 990 entries.
+-- 994 entries.
 
 return {
 	["%d Min"] = "%d min",
@@ -24,6 +24,7 @@ return {
 	["Auto Farm laeuft"] = "Auto farm running",
 	["Auto-Start in neuen Spielen"] = "Auto-start in new games",
 	["Bereit"] = "Ready",
+	["Bitte schreib kurz rein, was nicht geht - mindestens %d Zeichen. Ohne Beschreibung kann ich den Fehler nicht finden."] = "Please write what is broken - at least %d characters. Without a description the bug cannot be found.",
 	["Codes, Updates & Support"] = "Codes, updates & support",
 	["DISCORD BEITRETEN"] = "JOIN THE DISCORD",
 	["Das Panel laeuft erst %ds. Lass es kurz laufen (noch %ds) - oder schreib oben rein, was nicht geht, dann geht es sofort."] = "The panel has only been running %ds. Give it a moment (%ds to go) - or type above what is broken and it goes straight out.",
@@ -39,6 +40,7 @@ return {
 	["LIMIT ERREICHT"] = "LIMIT REACHED",
 	["LINK KOPIERT"] = "LINK COPIED",
 	["MELDEN"] = "REPORT",
+	["MELDEN (TEXT FEHLT)"] = "REPORT (TEXT MISSING)",
 	["Mitgeschickt werden Spiel, Script-Version, der letzte Status und die aktiven Optionen. Kein Roblox-Name, keine UserId."] = "Sent along: the game, the script version, the last status and the active options. No Roblox name, no UserId.",
 	["Nochmal druecken zum Senden. Besser: schreib kurz rein, was nicht geht - dann kann ich es auch beheben."] = "Press again to send. Better: type what is broken - then it can actually be fixed.",
 	["PROBLEM MELDEN"] = "REPORT A PROBLEM",
@@ -49,7 +51,9 @@ return {
 	["Suche"] = "Search",
 	["Von dieser Verbindung kamen zuletzt zu viele Meldungen, diese wurde NICHT zugestellt. Sie liegt in der Zwischenablage - fueg sie im Discord unter #support ein, oder probier es gleich nochmal."] = "Too many reports came from this connection recently, so this one was NOT delivered. It is on your clipboard - paste it into #support on the Discord, or try again shortly.",
 	["WIRKLICH MELDEN?"] = "REALLY REPORT?",
+	["Was genau geht nicht? (Pflicht)"] = "What exactly is broken? (required)",
 	["Was genau geht nicht? (optional)"] = "What exactly is broken? (optional)",
+	["Was genau geht nicht? Schreib es kurz rein - ohne Text kann ich nichts beheben."] = "What exactly is broken? Write a line about it - without text nothing can be fixed.",
 	["gemeldet - es ist angekommen, aber nicht doppelt."] = "reported - it arrived, just not twice.",
 	["gerade eben"] = "just now",
 	["keine Verbindung"] = "no connection",

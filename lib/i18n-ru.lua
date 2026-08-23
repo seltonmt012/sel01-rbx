@@ -8,7 +8,7 @@
 -- they are - they keep passing "Auto rebirth" and only this file decides what
 -- the player reads.
 --
--- 990 entries.
+-- 994 entries.
 
 return {
 	["%d Min"] = "%d мин",
@@ -134,6 +134,7 @@ return {
 	["Bereit"] = "Готово",
 	["Best training bag"] = "Лучший рюкзак",
 	["Best training pad"] = "Лучшая площадка",
+	["Bitte schreib kurz rein, was nicht geht - mindestens %d Zeichen. Ohne Beschreibung kann ich den Fehler nicht finden."] = "Напишите, что не работает - минимум %d символов. Без описания ошибку не найти.",
 	["Blast gap (s)"] = "Пауза взрыва (с)",
 	["Blasts per burst"] = "Взрывов за серию",
 	["Blue x2 @1M up to Super Saiyan x400 @1Qa, stacks with the trail"] = "Blue x2 @1M до Super Saiyan x400 @1Qa, складывается со следом",
@@ -380,6 +381,7 @@ return {
 	["MASTER"] = "ГЛАВНЫЙ",
 	["MEASUREMENT"] = "ИЗМЕРЕНИЕ",
 	["MELDEN"] = "СООБЩИТЬ",
+	["MELDEN (TEXT FEHLT)"] = "СООБЩИТЬ (НЕТ ТЕКСТА)",
 	["MINER"] = "ШАХТЁР",
 	["MUSEUM & GEAR"] = "МУЗЕЙ И СНАРЯЖЕНИЕ",
 	["Manage only opens a HUD tab and this script teleports - both do nothing here"] = "Manage лишь открывает вкладку интерфейса, а этот скрипт телепортируется - здесь бесполезны оба",
@@ -608,7 +610,9 @@ return {
 	["Wall only"] = "Только сквозь стену",
 	["Wall outline"] = "Контур сквозь стену",
 	["Wall timeout (s)"] = "Таймаут стены (с)",
+	["Was genau geht nicht? (Pflicht)"] = "Что именно не работает? (обязательно)",
 	["Was genau geht nicht? (optional)"] = "Что именно не работает? (необязательно)",
+	["Was genau geht nicht? Schreib es kurz rein - ohne Text kann ich nichts beheben."] = "Что именно не работает? Напишите пару слов - без текста починить нельзя.",
 	["Weapon"] = "Оружие",
 	["Weapons"] = "Оружие",
 	["Weight budget (%)"] = "Бюджет на грузоподъёмность (%)",

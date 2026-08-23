@@ -211,6 +211,63 @@ end
 
 UI.LOGO = "selux-mark.png"
 
+-- Open a link, for real ---------------------------------------------------------
+--
+-- "Copied to your clipboard" is not opening a link. It ends with the user
+-- alt-tabbing, opening a browser and pasting - which is exactly the friction the
+-- button existed to remove, and the reason the Discord bar felt broken.
+--
+-- There is no single function for this: every executor names it differently and
+-- Roblox's own one is not available everywhere. So try them in order of how
+-- directly they land on the page, and only fall back to the clipboard when none
+-- of them exists. The clipboard is written EITHER WAY - worst case the link is
+-- one paste away instead of lost.
+--
+-- Returns "browser" if something claimed to open it, "clipboard" if only the
+-- copy worked, and "none" if even that is missing.
+function UI.openUrl(url)
+	local env = (getgenv and getgenv()) or _G or {}
+	local copied = pcall(function()
+		(setclipboard or toclipboard or set_clipboard or env.setclipboard)(url)
+	end)
+
+	-- Executor-provided openers. Named differently in every one of them, so this
+	-- is a lookup rather than a call: whichever exists wins, none is assumed.
+	-- They open the SYSTEM browser, which is what people expect.
+	--
+	-- Built as an APPEND-ONLY list, never as a table literal with holes in it:
+	-- `{a, nil, c}` stops `ipairs` at the first missing entry, so on an executor
+	-- without the first function every later one would go untried.
+	local openers = {}
+	local function consider(fn)
+		if type(fn) == "function" then openers[#openers + 1] = fn end
+	end
+	for _, name in ipairs({ "openbrowser", "open_url", "openurl", "browse" }) do
+		consider(rawget(env, name))
+	end
+	consider(syn and syn.open_url)
+	consider(fluxus and fluxus.open_url)
+	for _, fn in ipairs(openers) do
+		if pcall(fn, url) then return "browser" end
+	end
+
+	-- Roblox's own. It exists on the desktop client and is missing on others, and
+	-- on at least one it BLOCKS until the overlay is dismissed - so it runs in its
+	-- own thread. A yielding call in a click handler freezes the panel, and inside
+	-- the bridge's poll loop it takes the whole session down.
+	local fired = false
+	local ok = pcall(function()
+		local gui = game:GetService("GuiService")
+		if type(gui.OpenBrowserWindow) == "function" then
+			fired = true
+			task.spawn(function() pcall(gui.OpenBrowserWindow, gui, url) end)
+		end
+	end)
+	if ok and fired then return "browser" end
+
+	return copied and "clipboard" or "none"
+end
+
 --------------------------------------------------------------------------------
 -- language
 --------------------------------------------------------------------------------
@@ -226,8 +283,8 @@ UI.LOGO = "selux-mark.png"
 --
 -- Anything with no dictionary entry falls through unchanged, so a missing
 -- translation is a mixed panel, never a blank one.
-UI.LANGS = { "de", "en", "ru" }
-UI.LANG_NAME = { de = "Deutsch", en = "English", ru = "Russkij" }
+UI.LANGS = { "de", "en", "ru", "fil" }
+UI.LANG_NAME = { de = "Deutsch", en = "English", ru = "Russkij", fil = "Filipino" }
 UI.RAW = "https://raw.githubusercontent.com/" .. UI.REPO .. "/main/"
 
 local LANG_FILE = "selux-lang.txt"
@@ -236,15 +293,30 @@ local HINT_ATTR = "SxHint"
 
 -- The player's own Roblox language is the best default there is: a Russian
 -- client gets Russian without touching anything. A saved choice always wins.
+-- Locale ids that are not simply the first two letters of the language code.
+-- `fil` is three letters, Tagalog answers as `tl`, and cutting to two would turn
+-- Filipino into "fi" - which is FINNISH. A table beats string arithmetic here for
+-- the same reason index-based name mapping is a trap everywhere else in this
+-- project: the shape of the id is not the meaning of it.
+local LOCALE_MAP = {
+	fil = "fil", tl = "fil", ph = "fil",
+	de = "de", en = "en", ru = "ru",
+}
+
 local function detectLang()
 	local ok, id = pcall(function()
 		return game:GetService("LocalizationService").RobloxLocaleId
 	end)
 	if ok and type(id) == "string" then
-		local two = string.lower(string.sub(id, 1, 2))
-		for _, l in ipairs(UI.LANGS) do
-			if l == two then return l end
-		end
+		id = string.lower(id)
+		-- longest first: "fil_ph" must not be read as "fi"
+		local three = string.sub(id, 1, 3)
+		if LOCALE_MAP[three] then return LOCALE_MAP[three] end
+		local two = string.sub(id, 1, 2)
+		if LOCALE_MAP[two] then return LOCALE_MAP[two] end
+		-- a Philippine client set to English still reads English, but a
+		-- Philippine REGION is a strong enough hint to offer Filipino
+		if string.find(id, "_ph", 1, true) then return "fil" end
 	end
 	return "en"
 end
@@ -1167,11 +1239,17 @@ function UI.Window(options)
 	end
 
 	----------------------------------------------------------------- language
-	-- Three flags in the header, left of the window buttons. Deliberately not a
-	-- dropdown: one click has to be enough, and a menu would need a label, which
-	-- would itself need translating before anyone can read it.
-	local flagStrip = frame(head, UDim2.fromOffset(66, 38), UDim2.new(1, -118, 0, 0),
-		UI.theme.header, 1)
+	-- One flag per language in the header, left of the window buttons.
+	-- Deliberately not a dropdown: one click has to be enough, and a menu would
+	-- need a label, which would itself need translating before anyone can read it.
+	--
+	-- The strip is SIZED FROM UI.LANGS rather than from a constant. It was 66px
+	-- for three flags, and adding Filipino as a fourth pushed the last chip out
+	-- from under its own parent - the flag was there, it just could not be clicked.
+	local FLAG_STEP = 23
+	local flagWidth = #UI.LANGS * FLAG_STEP - 4
+	local flagStrip = frame(head, UDim2.fromOffset(flagWidth, 38),
+		UDim2.new(1, -52 - flagWidth, 0, 0), UI.theme.header, 1)
 	flagStrip.ZIndex = 3
 	local flagChips = {}
 
@@ -1192,7 +1270,7 @@ function UI.Window(options)
 	for i, code in ipairs(UI.LANGS) do
 		local chip = Instance.new("TextButton")
 		chip.Size = UDim2.fromOffset(19, 14)
-		chip.Position = UDim2.fromOffset((i - 1) * 23, 12)
+		chip.Position = UDim2.fromOffset((i - 1) * FLAG_STEP, 12)
 		chip.BackgroundColor3 = UI.theme.input
 		chip.BackgroundTransparency = 0.35
 		chip.BorderSizePixel = 0
@@ -1375,11 +1453,31 @@ function UI.Window(options)
 	discordGrad.Color = ColorSequence.new(UI.theme.discord, UI.theme.discordAlt)
 	discordGrad.Parent = discord
 
-	local dIcon = label(discord, "◉", 20, UI.font.heading, Color3.new(1, 1, 1))
-	dIcon.Position = UDim2.fromOffset(15, 0)
-	dIcon.Size = UDim2.fromOffset(24, 50)
-	dIcon.TextXAlignment = Enum.TextXAlignment.Center
-	dIcon.ZIndex = 3
+	-- The real Discord mark, not a filled circle standing in for one. Workspace
+	-- copy first (that is where bridge.py mirrors brand/icons/), then the repo -
+	-- somebody who only ran the loader has no workspace copy of anything, and this
+	-- icon is the whole point of the bar it sits on. A text glyph remains the last
+	-- resort so the bar can never end up blank.
+	local dIcon
+	local dIconId = UI.image("icons/selux-discord.png")
+		or UI.imageFromUrl(UI.RAW .. "icons/discord.png", "selux-cache/discord.png")
+	if dIconId then
+		dIcon = Instance.new("ImageLabel")
+		dIcon.BackgroundTransparency = 1
+		dIcon.Image = dIconId
+		dIcon.ImageColor3 = Color3.new(1, 1, 1)
+		dIcon.ScaleType = Enum.ScaleType.Fit
+		dIcon.Size = UDim2.fromOffset(24, 24)
+		dIcon.Position = UDim2.fromOffset(15, 13)
+		dIcon.ZIndex = 3
+		dIcon.Parent = discord
+	else
+		dIcon = label(discord, "◉", 20, UI.font.heading, Color3.new(1, 1, 1))
+		dIcon.Position = UDim2.fromOffset(15, 0)
+		dIcon.Size = UDim2.fromOffset(24, 50)
+		dIcon.TextXAlignment = Enum.TextXAlignment.Center
+		dIcon.ZIndex = 3
+	end
 
 	local dTitle = label(discord, "DISCORD BEITRETEN", 13, UI.font.heading, Color3.new(1, 1, 1))
 	dTitle.Position = UDim2.fromOffset(52, 11)
@@ -1412,16 +1510,17 @@ function UI.Window(options)
 	end)
 	discord.MouseButton1Click:Connect(function()
 		press(discord)
-		local url = "https://" .. UI.DISCORD
-		-- GuiService:OpenBrowserWindow really does open the system browser from a
-		-- LocalScript - verified present in this client. It is not on every
-		-- platform though, so the clipboard is still written either way: worst
-		-- case the link is one paste away instead of lost.
-		pcall(function() (setclipboard or toclipboard or set_clipboard)(url) end)
-		local opened = pcall(function()
-			game:GetService("GuiService"):OpenBrowserWindow(url)
-		end)
-		setText(dTitle, opened and "IM BROWSER GEOEFFNET" or "LINK KOPIERT")
+		-- UI.openUrl tries every opener an executor might have before it settles
+		-- for the clipboard, so the normal case is a browser tab rather than a
+		-- copied string the user then has to paste somewhere themselves.
+		local how = UI.openUrl("https://" .. UI.DISCORD)
+		if how == "browser" then
+			setText(dTitle, "IM BROWSER GEOEFFNET")
+		elseif how == "clipboard" then
+			setText(dTitle, "LINK KOPIERT")
+		else
+			setText(dTitle, UI.DISCORD)
+		end
 		task.delay(2.5, function() setText(dTitle, "DISCORD BEITRETEN") end)
 	end)
 
@@ -2563,11 +2662,14 @@ function UI.Window(options)
 		-- Report card. Sits on Home, under the live panel, so a user who thinks
 		-- something is broken finds it without being told where to look.
 		local report = page:Card("PROBLEM MELDEN", 2):Icon(UI.icon.shield)
-		local reportHint = report:Label("Script kaputt oder Spiel geupdatet? Ein Klick reicht - wenn du willst, schreib kurz dazu was nicht geht.")
+		local reportHint = report:Label("Was genau geht nicht? Schreib es kurz rein - ohne Text kann ich nichts beheben.")
 
-		-- Optional free text. Deliberately an inline field and not a popup: a
-		-- modal would make the common case (just press it) two clicks, and a
-		-- report with nothing typed is still worth having.
+		-- Free text, and it is REQUIRED. It used to be optional with a two-press
+		-- confirmation instead, and both halves of that were wrong: the reports
+		-- that arrived carried notes like "Bereit" and "0 wins lvl 0" from panels
+		-- that had just been loaded, and the confirmation read as a broken button
+		-- because pressing MELDEN appeared to do nothing the first time. One rule
+		-- replaces both - say what is broken, then it sends on the first press.
 		local MAX_MESSAGE = 300
 		local msgRow = report.row(nil, nil, 0)
 		msgRow.title:Destroy()
@@ -2582,7 +2684,7 @@ function UI.Window(options)
 		msgInput.BackgroundTransparency = 1
 		msgInput.Size = UDim2.fromScale(1, 1)
 		msgInput.Text = ""
-		setPlaceholder(msgInput, "Was genau geht nicht? (optional)")
+		setPlaceholder(msgInput, "Was genau geht nicht? (Pflicht)")
 		msgInput.TextSize = 11
 		msgInput.Font = UI.font.body
 		msgInput.TextColor3 = UI.theme.textSoft
@@ -2608,56 +2710,53 @@ function UI.Window(options)
 			counter.Text = #msgInput.Text .. " / " .. MAX_MESSAGE
 		end)
 
-		-- THREE GATES, because a bright button that costs nothing gets pressed out
-		-- of curiosity. Measured on the live relay: the reports arriving carried
-		-- notes like "Bereit" and "Gestoppt" and statuses like "0 wins lvl 0 reb 0"
-		-- - panels that had just been loaded. Nobody had a problem; they had a
-		-- button. A report from a panel that has not run yet says nothing and
-		-- buries the real ones.
-		local READY_AFTER = 60          -- seconds the script must have run
-		local openedAt = os.clock()
+		-- ONE gate, and it is the description. A bright button that costs nothing
+		-- gets pressed out of curiosity: measured on the live relay, the reports
+		-- arriving carried notes like "Bereit" and "Gestoppt" and statuses like
+		-- "0 wins lvl 0 reb 0" - panels that had just been loaded. Nobody had a
+		-- problem; they had a button. A sentence about what is wrong costs a
+		-- curious click nothing to skip and is the only thing that makes a report
+		-- actionable, so it is the requirement.
+		local MIN_MESSAGE = 10
 		local reportBtn
-		local sent, armed = false, false
+		local sent = false
 
-		-- Gate 1: is there anything to report yet? Either the script has been
-		-- running a while, or it has already parked a real complaint in the
-		-- status strip - STATE.blocked and the error notes both land there.
-		local function haveSomethingToSay()
-			if os.clock() - openedAt >= READY_AFTER then return true end
-			if msgInput.Text ~= "" then return true end
-			local note = (window.stripTitle and window.stripTitle.Text or "") .. " "
-				.. (window.stripSub and window.stripSub.Text or "")
-			note = string.lower(note)
-			for _, word in ipairs({ "fail", "error", "refus", "blocked", "stuck",
-				"stall", "nicht", "kein", "fehler" }) do
-				if string.find(note, word, 1, true) then return true end
+		-- Long enough, and not the same key held down: ".........." and "aaaaaaaaa"
+		-- clear a length check and say exactly as much as an empty box.
+		local function described()
+			local text = string.gsub(msgInput.Text, "^%s+", "")
+			text = string.gsub(text, "%s+$", "")
+			if #text < MIN_MESSAGE then return false end
+			local seen, distinct = {}, 0
+			for i = 1, #text do
+				local ch = string.lower(string.sub(text, i, i))
+				if not seen[ch] then seen[ch] = true distinct = distinct + 1 end
 			end
-			return false
+			return distinct >= 4
 		end
 
-		reportBtn = report:Button("MELDEN", function()
+		-- The button says whether it will do anything BEFORE it is pressed. A
+		-- press that silently does nothing is what made the old confirmation read
+		-- as a bug rather than as a question.
+		local function paintReportBtn()
+			-- reportBtn is still nil while the field is being typed into during
+			-- construction, and a local is invisible above its own definition -
+			-- so this is checked rather than assumed.
+			if not reportBtn or sent then return end
+			local ready = described()
+			reportBtn.BackgroundColor3 = ready and UI.theme.warn or UI.theme.band
+			setText(reportBtn, ready and "MELDEN" or "MELDEN (TEXT FEHLT)")
+		end
+
+		-- Repaint as it is typed, so the button turns from grey to live the moment
+		-- the description is long enough.
+		msgInput:GetPropertyChangedSignal("Text"):Connect(paintReportBtn)
+
+		reportBtn = report:Button("MELDEN (TEXT FEHLT)", function()
 			if sent then return end
 
-			if not haveSomethingToSay() then
-				local left = math.ceil(READY_AFTER - (os.clock() - openedAt))
-				reportHint.set(UI.tf("Das Panel laeuft erst %ds. Lass es kurz laufen (noch %ds) - oder schreib oben rein, was nicht geht, dann geht es sofort.", READY_AFTER - left, left))
-				return
-			end
-
-			-- Gate 2: a second press confirms. Anyone who typed something has
-			-- already shown intent, so they skip it.
-			if not armed and msgInput.Text == "" then
-				armed = true
-				setText(reportBtn, "WIRKLICH MELDEN?")
-				reportBtn.BackgroundColor3 = UI.theme.bad
-				reportHint.set("Nochmal druecken zum Senden. Besser: schreib kurz rein, was nicht geht - dann kann ich es auch beheben.")
-				task.delay(8, function()
-					if not sent and armed then
-						armed = false
-						setText(reportBtn, "MELDEN")
-						reportBtn.BackgroundColor3 = UI.theme.warn
-					end
-				end)
+			if not described() then
+				reportHint.set(UI.tf("Bitte schreib kurz rein, was nicht geht - mindestens %d Zeichen. Ohne Beschreibung kann ich den Fehler nicht finden.", MIN_MESSAGE))
 				return
 			end
 
@@ -2698,6 +2797,7 @@ function UI.Window(options)
 				reportHint.set(UI.tf("Angekommen. Nummer #%s - die kannst du im Support-Forum nennen.", r.id))
 			end
 		end, UI.theme.warn)
+		paintReportBtn()   -- start grey: nothing has been typed yet
 		report:Label("Mitgeschickt werden Spiel, Script-Version, der letzte Status und die aktiven Optionen. Kein Roblox-Name, keine UserId.")
 
 		local function paint(list, err)
