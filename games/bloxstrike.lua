@@ -175,8 +175,9 @@ local CONFIG = {
 	-- misc ---------------------------------------------------------------------
 	bhop       = false,    -- re-press jump the moment you land
 	bhopKey    = "Space",  -- hold this and it keeps hopping
-	airStrafe  = false,    -- A/D in sync with the mouse while airborne
-	airStrafeStrength = 100,
+	airStrafe  = false,    -- hold the strafe key that keeps your air speed
+	airStrafeSteer = false,-- ...and steer the view onto the ideal angle too
+	airStrafeStrength = 60,
 
 	rcsCurve   = false,       -- set once the spray-curve defaults have been applied
 	rcsStrength = 70,         -- the ONE number: drives rcsPitch and rcsYaw
@@ -2459,6 +2460,13 @@ end)
 --
 -- There is no "grounded" attribute anywhere on the character, so it is a short
 -- ray straight down out of the root part.
+-- Everything in here is scoped to this block on purpose. Luau allows 200 locals
+-- per function and the main chunk of this script is one function; adding the
+-- movement helpers at the top level put it over the edge and the whole file
+-- stopped compiling with "Out of local registers". Only grounded() is needed
+-- outside, so only grounded() leaves the block.
+local grounded
+do
 local VIM = game:GetService("VirtualInputManager")
 
 local function tapKey(keyCode, holdFor)
@@ -2479,7 +2487,7 @@ local function tapKey(keyCode, holdFor)
 	end
 end
 
-local function grounded()
+function grounded()
 	local char = alive(plr)
 	local root = char and char:FindFirstChild("HumanoidRootPart")
 	if not root then return false end
@@ -2510,35 +2518,118 @@ task.spawn(function()
 	end
 end)
 
--- Air strafe. UNVERIFIED against a real jump at the time of writing: it presses
--- A or D to match the way the mouse is turning while you are off the ground,
--- which is what a hand does on a strafe jump. It is OFF by default and says so on
--- the page, because an unproven movement feature that fights the player is worse
--- than none - that is exactly how the aim assist ended up shaking for days.
-task.spawn(function()
-	local held = nil
-	while _G.__BSTRIKE == GEN do
-		local want = nil
-		if CONFIG.airStrafe and alive(plr) and not grounded() then
-			local turn = mouseDX
-			local threshold = 3 * (100 / math.max(CONFIG.airStrafeStrength, 1))
-			if turn > threshold then want = Enum.KeyCode.D
-			elseif turn < -threshold then want = Enum.KeyCode.A end
-		end
-		if want ~= held then
-			if held then pcall(function()
-				if keyrelease and held.Value then keyrelease(held.Value)
-				else VIM:SendKeyEvent(false, held, false, game) end
-			end) end
-			if want then pcall(function()
-				if keypress and want.Value then keypress(want.Value)
-				else VIM:SendKeyEvent(true, want, false, game) end
-			end) end
-			held = want
-		end
-		task.wait(0.03)
+-- AIR STRAFE, built on the game's own numbers rather than on feel. This is a
+-- Source port and it publishes the whole movement model as workspace attributes:
+--
+--   sv_airaccelerate 12   sv_airspeedcap 2.25   sv_maxspeed 18.75
+--   sv_jumpspeed 22.65    sv_gravity 60         sv_friction 5.2
+--
+-- Air control therefore works exactly the way it does in Counter Strike: while
+-- you are off the ground the game only honours your key direction up to
+-- sv_airspeedcap, so pushing straight forward adds NOTHING once you are past it.
+-- The speed comes from holding one strafe key while the direction you are asking
+-- for sits at an angle to the direction you are already travelling - the part of
+-- the acceleration that points sideways curves the path instead of being thrown
+-- away against the cap.
+--
+--   accelPerTick = sv_airaccelerate * sv_airspeedcap * dt
+--   ideal angle  = acos((sv_airspeedcap - accelPerTick) / speed)
+--
+-- Below the cap the ideal angle is zero and pushing forward is right; above it
+-- the angle opens up as you get faster, which is why a good strafe turns more
+-- gently the faster it goes.
+local function cvar(name, fallback)
+	local v = tonumber(workspace:GetAttribute(name))
+	if v and v == v then return v end
+	return fallback
+end
+
+local airKey = nil
+local strafeSide = 1
+
+local function releaseAirKey()
+	if not airKey then return end
+	local held = airKey
+	airKey = nil
+	pcall(function()
+		if keyrelease and held.Value then keyrelease(held.Value)
+		else VIM:SendKeyEvent(false, held, false, game) end
+	end)
+end
+
+local function holdAirKey(keyCode)
+	if airKey == keyCode then return end
+	releaseAirKey()
+	airKey = keyCode
+	pcall(function()
+		if keypress and keyCode.Value then keypress(keyCode.Value)
+		else VIM:SendKeyEvent(true, keyCode, false, game) end
+	end)
+end
+
+STATE.airSpeed, STATE.airGain, STATE.airAngle, STATE.airIdeal = 0, 0, 0, 0
+
+RunService.Heartbeat:Connect(function(dt)
+	if _G.__BSTRIKE ~= GEN then return end
+	if not CONFIG.airStrafe then releaseAirKey() return end
+
+	local char = alive(plr)
+	local root = char and char:FindFirstChild("HumanoidRootPart")
+	if not root or grounded() then
+		releaseAirKey()
+		STATE.airGain = 0
+		return
+	end
+
+	local v = root.AssemblyLinearVelocity
+	local flat = Vector3.new(v.X, 0, v.Z)
+	local speed = flat.Magnitude
+	STATE.airSpeed = speed
+	if speed < 0.5 then releaseAirKey() return end
+
+	local cap = cvar("sv_airspeedcap", 2.25)
+	local accelPerTick = cvar("sv_airaccelerate", 12) * cap * dt
+	local ideal = math.acos(math.clamp((cap - accelPerTick) / speed, -1, 1))
+	STATE.airIdeal = math.deg(ideal)
+
+	-- Which side to strafe on follows the player's own mouse, and it is KEPT
+	-- until they turn the other way: flipping sides mid-jump is what kills the
+	-- speed a strafe just built.
+	if mouseDX > 2 then strafeSide = 1 elseif mouseDX < -2 then strafeSide = -1 end
+	holdAirKey(strafeSide > 0 and Enum.KeyCode.D or Enum.KeyCode.A)
+
+	if not CONFIG.airStrafeSteer or aimWroteCamera then return end
+
+	local cf = camera.CFrame
+	local right = cf.RightVector
+	local wish = Vector3.new(right.X, 0, right.Z)
+	if wish.Magnitude < 1e-3 then return end
+	wish = wish.Unit * strafeSide
+	local velDir = flat.Unit
+	local angleNow = math.acos(math.clamp(velDir:Dot(wish), -1, 1))
+	STATE.airAngle = math.deg(angleNow)
+
+	-- The sign is MEASURED, not derived. Working out which way a yaw rotation
+	-- moves the wish vector through Roblox's handedness is exactly the kind of
+	-- reasoning that ships backwards, so both directions are tried against the
+	-- goal and the better one wins. Two dot products, once a frame.
+	local function missAfter(delta)
+		local rotated = (CFrame.Angles(0, delta, 0) * wish)
+		return math.abs(math.acos(math.clamp(velDir:Dot(rotated.Unit), -1, 1)) - ideal)
+	end
+	local probe = math.rad(1)
+	local sign = (missAfter(probe) < missAfter(-probe)) and 1 or -1
+
+	local err = math.abs(angleNow - ideal)
+	local gain = math.clamp(CONFIG.airStrafeStrength / 100, 0, 1) * 0.4
+	local stepYaw = sign * math.min(err, math.rad(8)) * gain
+	if math.abs(stepYaw) > 1e-5 then
+		local curPitch, curYaw = cf:ToOrientation()
+		moveLook(stepYaw, 0, curYaw, curPitch, cf.Position)
 	end
 end)
+
+end
 
 --------------------------------------------------------------------------------
 -- panel
@@ -3087,7 +3178,9 @@ local humOut = humPage:Card("STATUS", 1):Readout(7)
 
 -- MISC ---------------------------------------------------------------------------
 
-local miscPage = win:Page("MISC", UI.icon.loop)
+local miscOut, airCard
+do
+local miscPage = win:Page("MISC", UI.icon.wrench)
 
 local moveCard = miscPage:Card("MOVEMENT", 1):Accent()
 moveCard:Toggle("Bunny hop", CONFIG.bhop, function(v) CONFIG.bhop = v end,
@@ -3096,14 +3189,21 @@ moveCard:Toggle("Bunny hop", CONFIG.bhop, function(v) CONFIG.bhop = v end,
 moveCard:Dropdown("Hop key", { "Space", "LeftControl", "LeftShift", "V", "C" },
 	CONFIG.bhopKey, function(v) CONFIG.bhopKey = v end)
 moveCard:Toggle("Air strafe", CONFIG.airStrafe, function(v) CONFIG.airStrafe = v end,
-	"UNTESTED - presses A/D to follow the mouse while you are in the air",
+	"holds the strafe key that keeps your speed while you are off the ground",
+	UI.theme.good)
+moveCard:Toggle("Steer the view too", CONFIG.airStrafeSteer, function(v)
+	CONFIG.airStrafeSteer = v
+end, "turns the camera onto the ideal angle - this is the part that GAINS speed",
 	UI.theme.warn)
-moveCard:Slider("Air strafe reaction", 20, 100, CONFIG.airStrafeStrength, function(v)
+moveCard:Slider("Steering strength", 20, 100, CONFIG.airStrafeStrength, function(v)
 	CONFIG.airStrafeStrength = v
-end, "higher reacts to smaller mouse movements")
-moveCard:Label("This game has no Humanoid - movement is its own networked simulation, so both of these press the real key and let the game do the jump. Nothing here touches your velocity.")
+end, "how hard it pulls towards the ideal angle")
+moveCard:Label("This game has no Humanoid - movement is its own networked simulation, so nothing here touches your velocity. It presses the real key and turns the real view, and the game does the rest.")
 
-local miscOut = miscPage:Card("STATUS", 2):Readout(5)
+airCard = miscPage:Card("AIR", 2):Readout(7)
+
+miscOut = miscPage:Card("STATUS", 2):Readout(5)
+end
 
 local infoPage = win:Page("ROUND", UI.icon.list)
 local roundOut = infoPage:Card("ROUND", 0):Readout(5, function(text)
@@ -3359,12 +3459,31 @@ task.spawn(function()
 
 
 			pcall(function()
+				local onGround = grounded()
 				miscOut:set({
 					"  MISC",
 					"  bunny hop  " .. (CONFIG.bhop and ("on, key " .. tostring(CONFIG.bhopKey)) or "off"),
 					"  hops       " .. tostring(STATE.bhops),
-					"  air strafe " .. (CONFIG.airStrafe and "on" or "off"),
-					"  on ground  " .. tostring(grounded()),
+					"  air strafe " .. (CONFIG.airStrafe and (CONFIG.airStrafeSteer and "on + steering" or "on") or "off"),
+					"  on ground  " .. tostring(onGround),
+				})
+				-- The three numbers that say whether a strafe is actually working:
+				-- how fast you are, the angle between where you are going and where
+				-- you are asking to go, and what that angle should be.
+				airCard:set({
+					"  AIR",
+					string.format("  speed    %.1f studs/s   ground cap %.1f",
+						STATE.airSpeed or 0, tonumber(workspace:GetAttribute("sv_maxspeed")) or 18.75),
+					string.format("  angle    %.0f deg   ideal %.0f deg",
+						STATE.airAngle or 0, STATE.airIdeal or 0),
+					"  above the ground cap means the strafe is gaining",
+					string.format("  cvars    airaccel %s   airspeedcap %s",
+						tostring(workspace:GetAttribute("sv_airaccelerate")),
+						tostring(workspace:GetAttribute("sv_airspeedcap"))),
+					string.format("  jump     %s   gravity %s",
+						tostring(workspace:GetAttribute("sv_jumpspeed")),
+						tostring(workspace:GetAttribute("sv_gravity"))),
+					onGround and "  on the ground - nothing to strafe" or "  airborne",
 				})
 			end)
 

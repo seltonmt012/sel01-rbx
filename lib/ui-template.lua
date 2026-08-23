@@ -140,6 +140,7 @@ UI.icon = {
 	pickaxe = "⛏", bag = "■", clock = "○", flame = "◆",
 	star = "★", wave = "≈", grid = "▦", spark = "★",
 	home = "▲", loop = "→", up = "↑", info = "○",
+	wrench = "⚒",
 }
 
 -- ...and the real thing. The glyphs above are only the fallback now: a stroked
@@ -158,7 +159,7 @@ UI.iconFile = {
 	-- The eye and the crosshair used to point at shield.png, so ESP, AIM and
 	-- HUMANISER all drew the same picture and the rail told you nothing. The
 	-- recoil page had no entry at all and fell through to the raw glyph.
-	["◉"] = "eye", ["◎"] = "target", ["≈"] = "wave",
+	["◉"] = "eye", ["◎"] = "target", ["≈"] = "wave", ["⚒"] = "wrench",
 }
 
 -- Real images, not glyphs ------------------------------------------------------
