@@ -2311,6 +2311,45 @@ win:OnMaster(function(on)
 	note(on and "ESP on" or "ESP off")
 end)
 
+-- Switching a drawing ON while the master switch is off used to do NOTHING: the
+-- render pass is gated on CONFIG.esp, so the row moved, the panel looked armed
+-- and the screen stayed empty. Reported by a user, and it reads like a broken
+-- toggle even though it is exactly what the gate says. Same trap one page over -
+-- auto fire with the aim itself switched off.
+--
+-- Watched from ONE place instead of being wired into thirty callbacks: what
+-- matters is the transition off -> on, and a poll sees that however the flag was
+-- changed - a toggle, a preset, or the console. Seeded from the current values,
+-- so a panel that starts up with drawings already on does not arm itself.
+local ARM = {
+	{ master = "esp", strip = true, note = "ESP was off - switched on with it",
+	  keys = { "box", "boxFilled", "name", "armorIcon", "health", "hpText", "weapon", "ammo", "money", "distance", "headDot", "skeleton", "tracer", "viewLine", "lookWarn", "teamESP", "deadESP", "chams" } },
+	{ master = "aim", note = "Aim was off - switched on with it",
+	  keys = { "aimFire", "aimCircle", "aimCircle2" } },
+}
+
+task.spawn(function()
+	local was = {}
+	for _, group in ipairs(ARM) do
+		for _, key in ipairs(group.keys) do was[key] = CONFIG[key] and true or false end
+	end
+	while _G.__BSTRIKE == GEN do
+		for _, group in ipairs(ARM) do
+			for _, key in ipairs(group.keys) do
+				local on = CONFIG[key] and true or false
+				if on and not was[key] and not CONFIG[group.master] then
+					CONFIG[group.master] = true
+					if group.strip then pcall(function() win:SetMaster(true) end) end
+					note(group.note)
+				end
+				was[key] = on
+			end
+		end
+		task.wait(0.2)
+	end
+end)
+
+
 -- Toggle, Slider and Dropdown all return a handle with a `set`, so a preset can
 -- move the CONTROLS and not only the CONFIG behind them. Without this a preset
 -- would change how the script behaves while every slider on screen kept showing

@@ -885,7 +885,7 @@ spend:Toggle("Auto food", CONFIG.autoFood, function(v) CONFIG.autoFood = v end,
 spend:Toggle("Auto trail", CONFIG.autoTrail, function(v) CONFIG.autoTrail = v end,
 	"x1.05 at 75 wins to x2.3 at 75K, stacks with the food", UI.theme.warn)
 spend:Toggle("Nur Wins farmen", CONFIG.winsOnly, function(v) CONFIG.winsOnly = v end,
-	"bleibt fuer das Leaderboard auf dem Feld, ~42K Wins/s auf Stage 13", UI.theme.good)
+	"bleibt für das Leaderboard auf dem Feld, ~42K Wins/s auf Stage 13", UI.theme.good)
 spend:Label("Robux food and the DoubleWin pads are never touched")
 
 local out = farm:Card("STATUS", 0):Readout(14, function(text)
@@ -932,7 +932,7 @@ pcall(function() win:Home() end)
 win:SetStat(1, "-", "wins")
 win:SetStat(2, "-", "cash/s")
 win:SetStat(3, "-", "rebirths")
-win:SetMaster(CONFIG.auto, CONFIG.auto and "Auto Farm laeuft" or "Gestoppt")
+win:SetMaster(CONFIG.auto, CONFIG.auto and "Auto Farm läuft" or "Gestoppt")
 win:OnMaster(function(on)
 	CONFIG.auto = on
 	STATE.note = on and "running" or "stopped"
@@ -944,7 +944,7 @@ task.spawn(function()
 			win:SetStat(1, short(STATE.wins))
 			win:SetStat(2, short(STATE.cashRate) .. "/s")
 			win:SetStat(3, tostring(STATE.rebirths))
-			win:SetMaster(CONFIG.auto, CONFIG.auto and "Auto Farm laeuft" or "Gestoppt")
+			win:SetMaster(CONFIG.auto, CONFIG.auto and "Auto Farm läuft" or "Gestoppt")
 		end)
 		task.wait(1)
 	end

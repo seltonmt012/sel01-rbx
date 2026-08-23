@@ -959,7 +959,7 @@ task.spawn(function()
 end)
 
 pcall(function()
-    win:SetMaster(CONFIG.autoFarm, "Auto Farm laeuft")
+    win:SetMaster(CONFIG.autoFarm, "Auto Farm läuft")
     win:OnMaster(function(on)
         CONFIG.autoFarm = on
         STATE.running = on or STATE.running

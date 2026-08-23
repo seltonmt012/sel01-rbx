@@ -1,5 +1,5 @@
 --[[
-    logobrainrots.lua - "Logo fuer Brainrots!"  place 123959902101040
+    logobrainrots.lua - "Logo für Brainrots!"  place 123959902101040
     ------------------------------------------------------------------------
     Despite the name this is not a quiz game. It is a carry-and-place plot
     income game with a logo-quiz door between the stages, and the doors are
@@ -1275,7 +1275,7 @@ task.spawn(function()
 end)
 
 pcall(function()
-    win:SetMaster(CONFIG.autoFarm, "Auto Farm laeuft")
+    win:SetMaster(CONFIG.autoFarm, "Auto Farm läuft")
     win:OnMaster(function(on)
         CONFIG.autoFarm = on
         STATE.running = on or STATE.running

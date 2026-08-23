@@ -881,7 +881,7 @@ pcall(function() win:Home() end)
 win:SetStat(1, "-", "wins")
 win:SetStat(2, "-", "rate")
 win:SetStat(3, "-", "rebirths")
-win:SetMaster(CONFIG.auto, CONFIG.auto and "Auto Farm laeuft" or "Gestoppt")
+win:SetMaster(CONFIG.auto, CONFIG.auto and "Auto Farm läuft" or "Gestoppt")
 win:OnMaster(function(on)
 	CONFIG.auto = on
 	STATE.note = on and "running" or "stopped"
@@ -896,7 +896,7 @@ task.spawn(function()
 			-- Kein Untertitel hier. Die Zeile darunter gehoert SetStatus, das sie
 			-- im Read-out-Loop mit den Zahlen fuellt - beide zu schreiben liess
 			-- sie im Sekundentakt zwischen den Zahlen und "Ziel ..." springen.
-			win:SetMaster(CONFIG.auto, CONFIG.auto and "Auto Farm laeuft" or "Gestoppt")
+			win:SetMaster(CONFIG.auto, CONFIG.auto and "Auto Farm läuft" or "Gestoppt")
 		end)
 		task.wait(1)
 	end

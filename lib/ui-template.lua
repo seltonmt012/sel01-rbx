@@ -51,7 +51,7 @@ local plr = Players.LocalPlayer
 
 local UI = {}
 
-UI.VERSION = "3.3"
+UI.VERSION = "3.4"
 UI.BRAND = "SELUX"
 UI.DISCORD = "discord.gg/ARdpzFuKMm"
 UI.REPO = "seltonmt012/sel01-rbx"
@@ -1044,7 +1044,7 @@ function UI.configReset(alias)
 		pcall(writefile, record.file, record.snapshot)
 	end
 	record.saved = nil
-	record.note = "zurueckgesetzt"
+	record.note = "zurückgesetzt"
 	return true
 end
 
@@ -1299,7 +1299,7 @@ function UI.askDevice(onDone)
 	title.Position = UDim2.fromOffset(16, 12)
 	title.Size = UDim2.fromOffset(120, 16)
 
-	local question = label(card, "Panel-Groesse: PC oder Handy?", 14, UI.font.heading, UI.theme.text)
+	local question = label(card, "Panel-Größe: PC oder Handy?", 14, UI.font.heading, UI.theme.text)
 	question.Position = UDim2.fromOffset(16, 34)
 	question.Size = UDim2.new(1, -32, 0, 20)
 
@@ -1365,7 +1365,7 @@ function UI.askDevice(onDone)
 	autoCap.Position = UDim2.fromOffset(16, 160)
 	autoCap.Size = UDim2.fromOffset(184, 16)
 
-	local autoHint = label(card, "Aus: das Panel kommt nur in dem Spiel, in dem du den Loader ausfuehrst.",
+	local autoHint = label(card, "Aus: das Panel kommt nur in dem Spiel, in dem du den Loader ausführst.",
 		10, UI.font.body, UI.theme.muted)
 	autoHint.Position = UDim2.fromOffset(16, 180)
 	autoHint.Size = UDim2.new(1, -32, 0, 40)
@@ -1414,7 +1414,7 @@ function UI.askDevice(onDone)
 		if autoOn then
 			setText(autoHint, "An: das Panel kommt in jedem Spiel, das Selux kennt.")
 		else
-			setText(autoHint, "Aus: das Panel kommt nur in dem Spiel, in dem du den Loader ausfuehrst.")
+			setText(autoHint, "Aus: das Panel kommt nur in dem Spiel, in dem du den Loader ausführst.")
 		end
 	end)
 
@@ -1929,7 +1929,7 @@ function UI.Window(options)
 		-- copied string the user then has to paste somewhere themselves.
 		local how = UI.openUrl("https://" .. UI.DISCORD)
 		if how == "browser" then
-			setText(dTitle, "IM BROWSER GEOEFFNET")
+			setText(dTitle, "IM BROWSER GEÖFFNET")
 		elseif how == "clipboard" then
 			setText(dTitle, "LINK KOPIERT")
 		else
@@ -3057,19 +3057,19 @@ function UI.Window(options)
 				return "Dieser Executor kann keine Dateien schreiben - nichts wird gespeichert."
 			end
 			if not UI.saveOn then
-				return "Speichern ist aus. Deine Schalter sind nach dem naechsten Beitritt wieder auf Standard."
+				return "Speichern ist aus. Deine Schalter sind nach dem nächsten Beitritt wieder auf Standard."
 			end
-			if record.note == "zurueckgesetzt" then
-				return "Auf Standard zurueckgesetzt."
+			if record.note == "zurückgesetzt" then
+				return "Auf Standard zurückgesetzt."
 			end
 			if record.saved then
 				local age = math.max(0, math.floor(os.clock() - record.saved))
 				return UI.tf("Gespeichert vor %d s  ·  %s", age, record.file)
 			end
 			if record.loaded then
-				return UI.tf("Geladen aus %s - Aenderungen werden automatisch gespeichert.", record.file)
+				return UI.tf("Geladen aus %s - Änderungen werden automatisch gespeichert.", record.file)
 			end
-			return "Aenderungen werden automatisch gespeichert."
+			return "Änderungen werden automatisch gespeichert."
 		end
 		cfgState.set(describe())
 
@@ -3096,9 +3096,9 @@ function UI.Window(options)
 			-- the honest fix: destroy this panel and let the loader run the
 			-- script again, which now reads the defaults it just restored. Run by
 			-- hand (bridge.py file) there is no loader, so it says what to do.
-			cfgCard:Button("Auf Standard zuruecksetzen", function()
+			cfgCard:Button("Auf Standard zurücksetzen", function()
 				UI.configReset(record.alias)
-				cfgState.set("Auf Standard zurueckgesetzt.")
+				cfgState.set("Auf Standard zurückgesetzt.")
 				local reload = _G.__SEL and _G.__SEL.reload
 				if type(reload) == "function" then
 					task.delay(0.4, function()
@@ -3106,7 +3106,7 @@ function UI.Window(options)
 						pcall(reload)
 					end)
 				else
-					cfgState.set("Auf Standard zurueckgesetzt - Script neu starten.")
+					cfgState.set("Auf Standard zurückgesetzt - Script neu starten.")
 				end
 			end, UI.theme.bad)
 		end
@@ -3118,7 +3118,7 @@ function UI.Window(options)
 		local autoLabel = devCard:Label("")
 		local function autoText()
 			return UI.autoload and "An: das Panel kommt in jedem Spiel, das Selux kennt."
-				or "Aus: das Panel kommt nur in dem Spiel, in dem du den Loader ausfuehrst."
+				or "Aus: das Panel kommt nur in dem Spiel, in dem du den Loader ausführst."
 		end
 		autoLabel.set(autoText())
 		local autoToggle
@@ -3129,8 +3129,8 @@ function UI.Window(options)
 			autoLabel.set(autoText())
 		end, "Ohne das startet Selux nur in dem Spiel, in dem du es aufrufst.")
 
-		devCard:Button("Panel-Groesse: PC oder Handy", function() pcall(UI.askDevice) end)
-		devCard:Label(UI.tf("Selux v%s  ·  Sprache und Groesse gelten fuer alle Scripts.", UI.VERSION))
+		devCard:Button("Panel-Größe: PC oder Handy", function() pcall(UI.askDevice) end)
+		devCard:Label(UI.tf("Selux v%s  ·  Sprache und Größe gelten für alle Scripts.", UI.VERSION))
 
 		task.spawn(function()
 			while page.holder.Parent do
@@ -3169,7 +3169,7 @@ function UI.Window(options)
 		-- single wide list of commits is all a HOME page would be, and the
 		-- interesting half is "is my farm actually running".
 		local card = page:Card("CHANGELOG", 1):Accent():Icon(UI.icon.clock)
-		card:Label("laedt ...")
+		card:Label("lädt ...")
 		local body2 = card.rowHolder
 
 		-- Deliberately does NOT repeat wins / rate / rebirths: those are already in
@@ -3177,7 +3177,7 @@ function UI.Window(options)
 		-- same screen is just noise. What is not up there is which page you are
 		-- on, how long this session has been running and where the script came
 		-- from - so that is what goes here.
-		local live = page:Card("LAEUFT GERADE", 2):Icon(UI.icon.loop)
+		local live = page:Card("LÄUFT GERADE", 2):Icon(UI.icon.loop)
 		local liveTitle = live:Label("-")
 		local liveSub = live:Label("")
 		local liveMeta = live:Label("")
@@ -3318,15 +3318,15 @@ function UI.Window(options)
 				pcall(function()
 					(setclipboard or toclipboard or set_clipboard)(r.text)
 				end)
-				reportHint.set("Von dieser Verbindung kamen zuletzt zu viele Meldungen, diese wurde NICHT zugestellt. Sie liegt in der Zwischenablage - fueg sie im Discord unter #support ein, oder probier es gleich nochmal.")
+				reportHint.set("Von dieser Verbindung kamen zuletzt zu viele Meldungen, diese wurde NICHT zugestellt. Sie liegt in der Zwischenablage - füg sie im Discord unter #support ein, oder probier es gleich nochmal.")
 			elseif how == "doppelt" then
 				setFmt(reportBtn, "SCHON GEMELDET  #%s", r.id)
 				reportBtn.BackgroundColor3 = UI.theme.warn
-				reportHint.set("Dieses Problem wurde fuer dieses Spiel gerade schon gemeldet - es ist angekommen, aber nicht doppelt.")
+				reportHint.set("Dieses Problem wurde für dieses Spiel gerade schon gemeldet - es ist angekommen, aber nicht doppelt.")
 			elseif how == "clipboard" then
 				setFmt(reportBtn, "KOPIERT  #%s", r.id)
 				reportBtn.BackgroundColor3 = UI.theme.good
-				reportHint.set(UI.tf("In die Zwischenablage kopiert - bitte im Discord unter #support einfuegen. Nummer #%s", r.id))
+				reportHint.set(UI.tf("In die Zwischenablage kopiert - bitte im Discord unter #support einfügen. Nummer #%s", r.id))
 			else
 				setFmt(reportBtn, "GEMELDET - DANKE  #%s", r.id)
 				reportBtn.BackgroundColor3 = UI.theme.good
