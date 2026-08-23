@@ -51,7 +51,7 @@ local plr = Players.LocalPlayer
 
 local UI = {}
 
-UI.VERSION = "3.0"
+UI.VERSION = "3.1"
 UI.BRAND = "SELUX"
 UI.DISCORD = "discord.gg/ARdpzFuKMm"
 UI.REPO = "seltonmt012/sel01-rbx"
