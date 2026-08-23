@@ -172,8 +172,13 @@ local CONFIG = {
 
 	-- recoil -------------------------------------------------------------------
 	rcs        = false,
+	rcsCurve   = false,       -- set once the spray-curve defaults have been applied
 	rcsStrength = 70,         -- the ONE number: drives rcsPitch and rcsYaw
-	rcsMode    = "Measured",  -- Measured | Pattern | Both
+	-- Both, not Measured: the measured residual carries the vertical kick well
+	-- and the sideways half not at all, because a player's own mouse is moving
+	-- horizontally the whole time and drowns it. The spray curve is where left
+	-- and right actually come from.
+	rcsMode    = "Both",      -- Measured | Pattern | Both
 	rcsPitch   = 70,
 	rcsYaw     = 70,
 	rcsAfter   = 1,
@@ -1899,22 +1904,58 @@ local sensYaw, sensPitch = 0, 0
 local patLast, patShot = nil, 0
 local patScale = 0
 
-local function patternStep(dt)
-	local cfg = myWeapon()
-	if not cfg or type(cfg.Recoil) ~= "table" or type(cfg.Recoil.Pattern) ~= "function" then
+-- THE SPRAY CURVE, and it is the reason the correction only ever worked
+-- downwards. cfg.Recoil.Pattern(cfg, shot) is a red herring: sampled for shots 1
+-- to 14 it returned the SAME tiny vector every time (x = -0.01), so there was
+-- nothing horizontal in it to correct with and the sideways half of the spray was
+-- simply never seen.
+--
+-- The real curve is Database.Custom.Weapons.SprayPatterns.<weapon>, and it is not
+-- a module: it is a PART carrying one Attachment per bullet, named "1" to "30",
+-- whose Position is that bullet's offset. The AK reads exactly like its
+-- counterpart in the game it is copied from - straight up to y 8, then out to
+-- x -3.7 around bullet 15, back across to +2.3 by 20, and left again at the end.
+--
+-- Positions are cumulative, so the correction for a shot is the DIFFERENCE to the
+-- one before it.
+local sprayCache = {}
+
+local function sprayCurve(name)
+	if not name or name == "" or not SprayFolder then return nil end
+	local hit = sprayCache[name]
+	if hit ~= nil then return hit or nil end
+	local part = SprayFolder:FindFirstChild(name)
+	if not part then
+		sprayCache[name] = false
+		return nil
+	end
+	local curve = {}
+	for i = 1, 64 do
+		local a = part:FindFirstChild(tostring(i))
+		if not a then break end
+		curve[i] = Vector2.new(a.Position.X, a.Position.Y)
+	end
+	if #curve < 2 then
+		sprayCache[name] = false
+		return nil
+	end
+	sprayCache[name] = curve
+	return curve
+end
+
+local function patternStep()
+	local curve = sprayCurve(STATE.weapon)
+	if not curve then
 		patLast, patShot = nil, 0
 		return nil
 	end
 	local shot = math.max(1, STATE.shots)
-	local ok, fn = pcall(cfg.Recoil.Pattern, cfg, shot)
-	if not ok or type(fn) ~= "function" then return nil end
-
-	local t = os.clock() - lastShotAt
-	local ok2, here = pcall(fn, t)
-	if not ok2 or typeof(here) ~= "Vector2" then return nil end
+	-- Past the end of the table the pattern is flat in this game as well, so the
+	-- last entry is held rather than wrapping round to the start.
+	local here = curve[math.min(shot, #curve)]
 
 	local step = nil
-	if patLast and patShot == shot then
+	if patLast and shot > patShot then
 		step = here - patLast
 	end
 	patLast, patShot = here, shot
@@ -1949,7 +1990,7 @@ local function rcsPass(dt)
 	end
 	STATE.sensY, STATE.sensP = sensYaw, sensPitch
 
-	local step = patternStep(dt)
+	local step = patternStep()
 	STATE.patY = step and step.X or 0
 	STATE.patP = step and step.Y or 0
 
@@ -2417,6 +2458,17 @@ end
 -- by themselves and nothing below had to be told about any of this.
 UI.config("bloxstrike", CONFIG)
 
+-- One-time migration, and it exists because saved settings are a good feature
+-- with a sharp edge: a file written before the spray curve was found still says
+-- Source = Measured and a yaw capped at three quarters, so the sideways
+-- correction that was just added would never run for anybody who had used the
+-- panel before. The flag is saved with the rest, so this happens exactly once.
+if not CONFIG.rcsCurve then
+	CONFIG.rcsCurve = true
+	CONFIG.rcsMode = "Both"
+	CONFIG.rcsYaw = CONFIG.rcsPitch
+end
+
 local win = UI.Window({
 	name = "BloxStrikePanel",
 	title = "BLOX", accentTitle = "STRIKE", subtitle = "seltonmt",
@@ -2764,11 +2816,11 @@ end, "pulls the camera back down while you spray", UI.theme.warn))
 local function setStrength(v)
 	CONFIG.rcsStrength = v
 	CONFIG.rcsPitch = v
-	-- The horizontal kick is only partly a pattern; the rest of what pushes a
-	-- burst sideways is SPREAD, which no camera movement can cancel. Pulling yaw
-	-- as hard as pitch therefore fights a random number and looks like wobble, so
-	-- it is deliberately taken at three quarters.
-	CONFIG.rcsYaw = math.floor(v * 0.75)
+	-- Full strength on yaw as well, now that left and right come from the game's
+	-- own spray curve instead of from a residual that never contained them. What
+	-- is left over sideways is SPREAD, and that one is random - it belongs to the
+	-- SPRAY card, not to this slider.
+	CONFIG.rcsYaw = v
 	for _, key in ipairs({ "rcsStrength", "rcsPitch", "rcsYaw" }) do
 		local handle = CTL[key]
 		if handle then pcall(function() handle:set(CONFIG[key]) end) end
@@ -3264,6 +3316,9 @@ win:Refresh()
 
 _G.__BSTRIKE_DBG = {
 	CONFIG = CONFIG, STATE = STATE,
+	-- the spray curve and its per-shot step, so the sideways correction can be
+	-- checked from the console without waiting for a firefight
+	sprayCurve = sprayCurve, patternStep = patternStep,
 	alive = alive, isEnemy = isEnemy, visible = visible, charOf = charOf,
 	teamOf = teamOf, equippedOf = equippedOf, armorOf = armorOf, decode = decode,
 	weaponCfg = weaponCfg, isGun = isGun, myWeapon = myWeapon,
