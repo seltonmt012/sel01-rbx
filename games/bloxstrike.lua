@@ -272,6 +272,7 @@ local STATE = {
 	kickY      = 0, kickP = 0, kickPeak = 0,
 	patY       = 0, patP = 0, patScale = 0, patN = 0,
 	underCross = "-",
+	aimDps     = 0, aimDpsPeak = 0,
 	lastKey    = "-",
 	map        = "-", gamemode = "-", gamestate = "-",
 	timer      = 0, buyTimer = 0,
@@ -1524,6 +1525,7 @@ end
 local function aimPass(dt)
 	if _G.__BSTRIKE ~= GEN then return end
 	aimWroteCamera = false
+	STATE.aimDps = 0
 
 	local blocked = assistBlocked()
 	STATE.paused = blocked or ""
@@ -1534,7 +1536,27 @@ local function aimPass(dt)
 		return
 	end
 
-	if not aimActive() or not gunGate(CONFIG.aimOnlyGun) or not adsGate(CONFIG.aimAds) then
+	-- Each gate names ITSELF in the readout. Between rounds this game clears
+	-- `CurrentEquipped` and leaves you holding only a knife, so "Firearms only"
+	-- correctly blocks - but with a single shared early return the panel showed an
+	-- armed aim, a visible target 52 px from the crosshair and a camera that never
+	-- moved, with nothing anywhere saying why. That is the exact "it does nothing
+	-- and nothing says why" failure this genre keeps producing.
+	if not aimActive() then
+		STATE.target = "-"
+		stickyTarget = nil
+		if engagement then endEngagement() end
+		return
+	end
+	if not gunGate(CONFIG.aimOnlyGun) then
+		STATE.paused = "no firearm held"
+		STATE.target = "-"
+		stickyTarget = nil
+		if engagement then endEngagement() end
+		return
+	end
+	if not adsGate(CONFIG.aimAds) then
+		STATE.paused = "scope condition"
 		STATE.target = "-"
 		stickyTarget = nil
 		if engagement then endEngagement() end
@@ -1669,6 +1691,16 @@ local function aimPass(dt)
 			stepYaw, stepPitch = stepYaw * k, stepPitch * k
 		end
 	end
+
+	-- How fast the ASSIST is turning the camera, in degrees per second, and only
+	-- the assist's own contribution. Measuring the camera as a whole cannot answer
+	-- this: a test that did so read 216 deg/s against a 120 deg/s cap and the
+	-- number was the player's wrist, not the script. This is the step the script
+	-- actually applied, so it is the only honest way to check the cap - and it is
+	-- worth having on screen anyway.
+	local applied = math.deg(math.sqrt(stepYaw * stepYaw + stepPitch * stepPitch))
+	STATE.aimDps = applied / math.max(dt, 1e-4)
+	if STATE.aimDps > STATE.aimDpsPeak then STATE.aimDpsPeak = STATE.aimDps end
 
 	camera.CFrame = CFrame.new(pos)
 		* CFrame.fromOrientation(curPitch + stepPitch, curYaw + stepYaw, 0)
@@ -1980,8 +2012,15 @@ task.spawn(function()
 			trigWasHeld = true
 			STATE.trigOn = true
 
-			if not gunGate(CONFIG.trigOnlyGun) then return end
-			if not adsGate(CONFIG.trigAds) then return end
+			-- Same rule as the aim: every gate says which one it was.
+			if not gunGate(CONFIG.trigOnlyGun) then
+				STATE.underCross = "-- no firearm held"
+				return
+			end
+			if not adsGate(CONFIG.trigAds) then
+				STATE.underCross = "-- scope condition"
+				return
+			end
 			if CONFIG.trigBurst > 0 and trigShots >= CONFIG.trigBurst then return end
 
 			local now = os.clock() * 1000
@@ -2497,7 +2536,7 @@ end)
 fireCard:Toggle("Draw FOV", CONFIG.aimCircle, function(v) CONFIG.aimCircle = v end)
 fireCard:Toggle("Draw second FOV", CONFIG.aimCircle2, function(v) CONFIG.aimCircle2 = v end)
 
-local aimOut = aimPage:Card("TARGET", 1):Readout(5)
+local aimOut = aimPage:Card("TARGET", 1):Readout(6)
 
 -- TRIGGER ----------------------------------------------------------------------
 
@@ -2827,6 +2866,8 @@ task.spawn(function()
 					"  weapon   " .. STATE.weapon
 						.. (cfg and (isGun(cfg) and "  (firearm)" or "  (no shots)") or ""),
 					"  blocked  " .. ((STATE.paused ~= "") and STATE.paused or "no"),
+					string.format("  turning  %.0f deg/s   peak %.0f   cap %d",
+						STATE.aimDps, STATE.aimDpsPeak, CONFIG.humTurnCap),
 				})
 			end)
 
