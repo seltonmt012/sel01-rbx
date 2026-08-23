@@ -8,7 +8,7 @@
 -- they are - they keep passing "Auto rebirth" and only this file decides what
 -- the player reads.
 --
--- 1221 entries.
+-- 1222 entries.
 
 return {
 	["%d Min"] = "%d min",
@@ -63,6 +63,7 @@ return {
 	["Ohne das startet Selux nur in dem Spiel, in dem du es aufrufst."] = "Kung wala ito, sa laro lang na pinatakbo mo magsisimula ang Selux.",
 	["PROBLEM MELDEN"] = "MAG-REPORT NG PROBLEMA",
 	["Panel-Größe: PC oder Handy"] = "Laki ng panel: PC o telepono",
+	["Ready"] = "Handa",
 	["SCHON GEMELDET  #%s"] = "NAIREPORT NA  #%s",
 	["Script kaputt oder Spiel geupdatet? Ein Klick reicht - wenn du willst, schreib kurz dazu was nicht geht."] = "Script broken or the game updated? One click is enough - and if you like, add a line about what is wrong.",
 	["Selux v%s  ·  Sprache und Größe gelten für alle Scripts."] = "Selux v%s  ·  ang wika at laki ay para sa lahat ng script.",

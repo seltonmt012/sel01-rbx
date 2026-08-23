@@ -8,7 +8,7 @@
 -- they are - they keep passing "Auto rebirth" and only this file decides what
 -- the player reads.
 --
--- 1221 entries.
+-- 1222 entries.
 
 return {
 	["%d Min"] = "%d min",

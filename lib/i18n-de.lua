@@ -8,7 +8,7 @@
 -- they are - they keep passing "Auto rebirth" and only this file decides what
 -- the player reads.
 --
--- 1221 entries.
+-- 1222 entries.
 
 return {
 	["* means scoped, _ means crouching"] = "* heißt gezoomt, _ heißt geduckt",
@@ -490,6 +490,7 @@ return {
 	["Reaction max (ms)"] = "Reaktion max (ms)",
 	["Reaction min (ms)"] = "Reaktion min (ms)",
 	["Reaction spread (ms)"] = "Reaktions-Streuung (ms)",
+	["Ready"] = "Bereit",
 	["Rebirth at"] = "Rebirth ab",
 	["Rebirth batch"] = "Wiedergeburten pro Schritt",
 	["Rebirth hold"] = "Rebirth halten",

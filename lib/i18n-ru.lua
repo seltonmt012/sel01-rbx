@@ -8,7 +8,7 @@
 -- they are - they keep passing "Auto rebirth" and only this file decides what
 -- the player reads.
 --
--- 1221 entries.
+-- 1222 entries.
 
 return {
 	["%d Min"] = "%d мин",
@@ -582,6 +582,7 @@ return {
 	["Reaction max (ms)"] = "Реакция макс (мс)",
 	["Reaction min (ms)"] = "Реакция мин (мс)",
 	["Reaction spread (ms)"] = "Разброс реакции (мс)",
+	["Ready"] = "Готово",
 	["Rebirth"] = "Ребёрн",
 	["Rebirth at"] = "Ребёрн при",
 	["Rebirth batch"] = "Ребёрнов за раз",

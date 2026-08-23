@@ -58,7 +58,6 @@ _G.__CBLOX = GEN
 --------------------------------------------------------------------------------
 
 local CONFIG = {
-	esp        = true,     -- master switch for everything drawn in the world
 	box        = true,     -- 2D bounding box around the player
 	boxFilled  = false,    -- tinted fill inside the box
 	name       = true,     -- player name above the box
@@ -149,6 +148,34 @@ local CONFIG = {
 	rcsAfter   = 1,        -- start compensating from this shot on
 	rcsMaxDeg  = 4,        -- hard cap per frame, degrees
 }
+
+-- There is no master switch on this panel and there deliberately is not one:
+-- every drawing has its own row, so a second switch above them could only ever
+-- mean "the row you just moved does nothing", which is what it was reported as.
+-- The render pass still wants a cheap way out when the whole list is off, and
+-- this is it - the flags themselves rather than a flag about the flags.
+local DRAWINGS = {
+	"box",
+	"boxFilled",
+	"name",
+	"health",
+	"hpText",
+	"weapon",
+	"distance",
+	"headDot",
+	"skeleton",
+	"tracer",
+	"teamESP",
+	"chams",
+}
+
+local function anyDrawing()
+	for _, key in ipairs(DRAWINGS) do
+		if CONFIG[key] then return true end
+	end
+	return false
+end
+
 
 local STATE = {
 	note      = "",
@@ -530,7 +557,7 @@ local function renderPass()
 		trigCircle.Radius = CONFIG.trigFov
 	end
 
-	if not CONFIG.esp then
+	if not anyDrawing() then
 		hideAll()
 		clearChams()
 		STATE.targets = 0
@@ -1518,49 +1545,34 @@ local win = UI.Window({
 })
 _G.__CBLOX_WIN = win
 
-win:SetMaster(CONFIG.esp, "ESP running")
-win:OnMaster(function(on)
-	CONFIG.esp = on
-	note(on and "ESP on" or "ESP off")
-end)
 
--- Switching a drawing ON while the master switch is off used to do NOTHING: the
--- render pass is gated on CONFIG.esp, so the row moved, the panel looked armed
--- and the screen stayed empty. Reported by a user, and it reads like a broken
--- toggle even though it is exactly what the gate says. Same trap one page over -
--- auto fire with the aim itself switched off.
+
+-- "Auto fire" switched on while the aim itself is off does nothing, and from the
+-- outside that reads as a dead toggle rather than as a gate. Enabling one of
+-- these arms the aim with it.
 --
--- Watched from ONE place instead of being wired into thirty callbacks: what
--- matters is the transition off -> on, and a poll sees that however the flag was
--- changed - a toggle, a preset, or the console. Seeded from the current values,
--- so a panel that starts up with drawings already on does not arm itself.
-local ARM = {
-	{ master = "esp", strip = true, note = "ESP was off - switched on with it",
-	  keys = { "box", "boxFilled", "name", "health", "hpText", "weapon", "distance", "headDot", "skeleton", "tracer", "teamESP", "chams" } },
-	{ master = "aim", note = "Aim was off - switched on with it",
-	  keys = { "aimFire", "aimCircle", "aimCircle2" } },
-}
+-- Watched from ONE place instead of being wired into every callback: what matters
+-- is the transition off -> on, and a poll sees that however the flag was changed -
+-- a toggle, a preset, or the console. Seeded from the current values, so a panel
+-- that starts up with auto fire already on does not arm itself.
+local ARM_AIM = { "aimFire", "aimCircle", "aimCircle2" }
 
 task.spawn(function()
 	local was = {}
-	for _, group in ipairs(ARM) do
-		for _, key in ipairs(group.keys) do was[key] = CONFIG[key] and true or false end
-	end
+	for _, key in ipairs(ARM_AIM) do was[key] = CONFIG[key] and true or false end
 	while _G.__CBLOX == GEN do
-		for _, group in ipairs(ARM) do
-			for _, key in ipairs(group.keys) do
-				local on = CONFIG[key] and true or false
-				if on and not was[key] and not CONFIG[group.master] then
-					CONFIG[group.master] = true
-					if group.strip then pcall(function() win:SetMaster(true) end) end
-					note(group.note)
-				end
-				was[key] = on
+		for _, key in ipairs(ARM_AIM) do
+			local on = CONFIG[key] and true or false
+			if on and not was[key] and not CONFIG.aim then
+				CONFIG.aim = true
+				note("Aim was off - switched on with it")
 			end
+			was[key] = on
 		end
 		task.wait(0.2)
 	end
 end)
+
 
 
 -- ESP ---------------------------------------------------------------------------
@@ -1966,6 +1978,9 @@ task.spawn(function()
 				win:SetStat(1, tostring(STATE.ctWins) .. ":" .. tostring(STATE.tWins), "rounds")
 				win:SetStat(2, tostring(STATE.alive.ct) .. "v" .. tostring(STATE.alive.t), "alive")
 				win:SetStat(3, tostring(STATE.targets), "drawn")
+				-- The strip title used to be the master switch's caption. With the
+				-- switch gone it carries what the script is actually doing.
+				win:SetNote(STATE.note ~= "" and STATE.note or "Ready")
 				win:SetStatus(string.format("%s   %ds   %s",
 					STATE.map, STATE.timer,
 					STATE.armed and "BOMB ARMED" or ("bomb: " .. STATE.bomb)))
