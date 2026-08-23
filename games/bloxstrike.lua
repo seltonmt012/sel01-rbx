@@ -172,6 +172,7 @@ local CONFIG = {
 
 	-- recoil -------------------------------------------------------------------
 	rcs        = false,
+	rcsStrength = 70,         -- the ONE number: drives rcsPitch and rcsYaw
 	rcsMode    = "Measured",  -- Measured | Pattern | Both
 	rcsPitch   = 70,
 	rcsYaw     = 70,
@@ -2741,32 +2742,83 @@ local trigOut = trigPage:Card("STATUS", 1):Readout(5)
 
 local rcsPage = win:Page("RECOIL", UI.icon.wave)
 
+-- One number, not seven. The page used to open on Source / Pitch % / Yaw % /
+-- Start at shot / Max correction / Learn scale / Manual scale, and the honest
+-- feedback was that even the author could not say which of them to move to shoot
+-- straighter. Everything that is really one decision - "how much of the kick do
+-- you want taken out" - is now a single strength, the three buttons cover the
+-- cases people actually want, and the seven knobs are still there, one card
+-- further down, for anyone who wants them.
+-- The saved settings may carry a Pitch that was set by hand on the advanced card
+-- long before this slider existed. Showing a strength of 70 over a pitch of 54
+-- would be a panel lying about its own state, so the strength is read back OUT of
+-- the pitch here, before the control is built with it.
+CONFIG.rcsStrength = CONFIG.rcsPitch
+
 local rcsCard = rcsPage:Card("RECOIL CONTROL", 1):Accent()
-reg("rcs", rcsCard:Toggle("RCS enabled", CONFIG.rcs, function(v)
+reg("rcs", rcsCard:Toggle("Recoil control", CONFIG.rcs, function(v)
 	CONFIG.rcs = v
 	note(v and "rcs on" or "rcs off")
-end, "camera side only", UI.theme.warn))
-rcsCard:Label("Measured learns from your own mouse, Pattern uses the game's own curve")
-rcsCard:Dropdown("Source", { "Measured", "Pattern", "Both" }, CONFIG.rcsMode,
+end, "pulls the camera back down while you spray", UI.theme.warn))
+
+local function setStrength(v)
+	CONFIG.rcsStrength = v
+	CONFIG.rcsPitch = v
+	-- The horizontal kick is only partly a pattern; the rest of what pushes a
+	-- burst sideways is SPREAD, which no camera movement can cancel. Pulling yaw
+	-- as hard as pitch therefore fights a random number and looks like wobble, so
+	-- it is deliberately taken at three quarters.
+	CONFIG.rcsYaw = math.floor(v * 0.75)
+	for _, key in ipairs({ "rcsStrength", "rcsPitch", "rcsYaw" }) do
+		local handle = CTL[key]
+		if handle then pcall(function() handle:set(CONFIG[key]) end) end
+	end
+end
+
+reg("rcsStrength", rcsCard:Slider("Strength %", 0, 100, CONFIG.rcsStrength,
+	setStrength, "0 = off, 100 = the whole measured kick is taken back out"))
+rcsCard:Button("OFF", function()
+	CONFIG.rcs = false
+	if CTL.rcs then pcall(function() CTL.rcs:set(false) end) end
+	note("rcs off")
+end)
+rcsCard:Button("NORMAL", function()
+	CONFIG.rcs = true
+	if CTL.rcs then pcall(function() CTL.rcs:set(true) end) end
+	setStrength(70)
+	note("rcs normal")
+end, UI.theme.good)
+rcsCard:Button("MAX", function()
+	CONFIG.rcs = true
+	if CTL.rcs then pcall(function() CTL.rcs:set(true) end) end
+	setStrength(100)
+	note("rcs max")
+end, UI.theme.warn)
+rcsCard:Label("This cancels RECOIL - the kick that walks your view up. It cannot cancel SPREAD, the random cone that grows with every bullet. The SPRAY card is what that one needs.")
+
+local advCard = rcsPage:Card("ADVANCED", 1)
+advCard:Label("Nothing here is needed to use it - the strength above drives Pitch and Yaw for you")
+advCard:Dropdown("Source", { "Measured", "Pattern", "Both" }, CONFIG.rcsMode,
 	function(v) CONFIG.rcsMode = v end)
-reg("rcsPitch", rcsCard:Slider("Pitch %", 0, 100, CONFIG.rcsPitch,
+reg("rcsPitch", advCard:Slider("Pitch %", 0, 100, CONFIG.rcsPitch,
 	function(v) CONFIG.rcsPitch = v end,
 	"share of the vertical kick that is taken back out"))
-reg("rcsYaw", rcsCard:Slider("Yaw %", 0, 100, CONFIG.rcsYaw,
+reg("rcsYaw", advCard:Slider("Yaw %", 0, 100, CONFIG.rcsYaw,
 	function(v) CONFIG.rcsYaw = v end))
-rcsCard:Slider("Start at shot", 1, 10, CONFIG.rcsAfter, function(v) CONFIG.rcsAfter = v end,
+advCard:Slider("Start at shot", 1, 10, CONFIG.rcsAfter, function(v) CONFIG.rcsAfter = v end,
 	"the first bullet has no recoil, so there is nothing to cancel")
-rcsCard:Slider("Max correction (deg)", 1, 15, CONFIG.rcsMaxDeg, function(v)
+advCard:Slider("Max correction (deg)", 1, 15, CONFIG.rcsMaxDeg, function(v)
 	CONFIG.rcsMaxDeg = v
 end, "hard per-frame cap so the correction cannot oscillate")
-rcsCard:Toggle("Learn pattern scale", CONFIG.rcsPatAuto, function(v)
+advCard:Toggle("Learn pattern scale", CONFIG.rcsPatAuto, function(v)
 	CONFIG.rcsPatAuto = v
 end, "one pattern unit in camera radians, measured while you spray",
 	UI.theme.good)
-rcsCard:Slider("Manual scale (x100)", 1, 100, CONFIG.rcsPatScale * 100, function(v)
+advCard:Slider("Manual scale (x100)", 1, 100, CONFIG.rcsPatScale * 100, function(v)
 	CONFIG.rcsPatScale = v / 100
 end, "only used when the learning above is off")
 
+local sprayOut = rcsPage:Card("SPRAY", 2):Accent():Readout(9)
 local rcsOut = rcsPage:Card("MEASUREMENT", 2):Readout(8)
 local wpnOut = rcsPage:Card("WEAPON", 2):Readout(9)
 
@@ -3084,6 +3136,53 @@ task.spawn(function()
 					})
 				end
 			end)
+
+			-- The SPRAY card, and the reason it exists: "recoil" and "spread" are
+			-- two different things and only one of them can be cancelled. Recoil is
+			-- the kick that walks the view up, it follows a pattern, and the RCS
+			-- takes it back out. Spread is a random cone that grows with every
+			-- bullet - no camera movement can touch it, and the only levers are how
+			-- many bullets you send and whether you are moving. So the numbers that
+			-- actually decide your accuracy get their own card instead of hiding in
+			-- one line of the weapon block.
+			pcall(function()
+				if not cfg then
+					sprayOut:set({ "  SPRAY", "  no weapon data" })
+					return
+				end
+				local spr = cfg.Spread or {}
+				local per = tonumber(spr.PerShot) or 0
+				local rec = tonumber(spr.RecoverySpeed) or 0
+				-- Range is a NumberRange, not a Vector2. tostring prints them almost
+				-- identically ("0.25 2.25" against "0.25, 2.25"), which is exactly
+				-- how the first version ended up reading a cone of zero and telling
+				-- the player a full reset takes 0.00s.
+				local range = spr.Range
+				local lo, hi = 0, 0
+				if typeof(range) == "NumberRange" then lo, hi = range.Min, range.Max
+				elseif typeof(range) == "Vector2" then lo, hi = range.X, range.Y end
+				local room = math.max(hi - lo, 0)
+				-- How many bullets before the cone is half way to its worst. That is
+				-- the number worth knowing: past it, more bullets buy nothing.
+				local burst = (per > 0 and room > 0) and math.max(1, math.floor(room * 0.5 / per)) or 0
+				local acc = math.min(per * (STATE.shots or 0), room)
+				sprayOut:set({
+					"  SPRAY",
+					burst > 0 and string.format("  keep bursts to %d shots at range", burst)
+						or "  this weapon has no bullet spread",
+					string.format("  now      %.2f of %.2f   after %d shots", lo + acc, hi, STATE.shots or 0),
+					string.format("  per shot +%.2f   recovers %.1f/s", per, rec),
+					rec > 0 and string.format("  a full reset takes %.2fs of not shooting", room / rec)
+						or "  no recovery value",
+					string.format("  moving   x%.2f   jumping  x%s",
+						tonumber(spr.MovementMultiplier) or 1, tostring(spr.JumpShotMinimum or "-")),
+					"  standing still is worth more than any setting here",
+					string.format("  recoil   %.0f%% of the kick reaches the camera",
+						(tonumber((cfg.Recoil or {}).CameraScale) or 0) * 100),
+					"  that share is all the RCS can ever take back",
+				})
+			end)
+
 
 			pcall(function()
 				humOut:set({
