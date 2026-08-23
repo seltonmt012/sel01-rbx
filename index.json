@@ -304,6 +304,17 @@
 			"detect": "local st = workspace:FindFirstChild('Status') return st ~= nil and st:FindFirstChild('HasBomb') ~= nil and st:FindFirstChild('MapName') ~= nil"
 		},
 		{
+			"alias": "bloxstrike",
+			"name": "BloxStrike",
+			"file": "games/bloxstrike.lua",
+			"places": [
+				114234929420007
+			],
+			"status": "ok",
+			"note": "5v5 bomb defusal; no Humanoid anywhere - characters live in workspace.Characters and carry Health/Dead/CameraCFrame as attributes, and the team is a Player attribute rather than Player.Team",
+			"detect": "local rs = game:GetService('ReplicatedStorage') local db = rs:FindFirstChild('Database') local cu = db and db:FindFirstChild('Custom') local w = cu and cu:FindFirstChild('Weapons') return w ~= nil and w:FindFirstChild('SprayPatterns') ~= nil and workspace:GetAttribute('sv_maxspeed') ~= nil"
+		},
+		{
 			"alias": "trainclimb",
 			"name": "Training To Climb",
 			"file": "games/trainclimb.lua",
@@ -335,6 +346,17 @@
 			"status": "ok",
 			"note": "every remote has an empty name; the client blanks them after binding, so everything goes through Library.Imported.Network by name",
 			"detect": "local rs = game:GetService('ReplicatedStorage') local lib = rs:FindFirstChild('Library') local cfg = lib and lib:FindFirstChild('Configs') return cfg ~= nil and cfg:FindFirstChild('Farmers') ~= nil and cfg:FindFirstChild('Farmer RNG') ~= nil and rs:FindFirstChild('Replication') ~= nil"
+		},
+		{
+			"alias": "arsenal",
+			"name": "Arsenal",
+			"file": "games/arsenal.lua",
+			"places": [
+				286090429
+			],
+			"status": "ok",
+			"note": "shooter - ESP, aim assist, humanisation, trigger, recoil, hitbox",
+			"detect": "local rs = game:GetService('ReplicatedStorage') return rs:FindFirstChild('Melees') ~= nil and rs:FindFirstChild('Levels') ~= nil and rs:FindFirstChild('KillIcons') ~= nil and rs:FindFirstChild('Viewmodels') ~= nil"
 		},
 		{
 			"alias": "minemountain",
