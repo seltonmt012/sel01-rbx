@@ -535,6 +535,17 @@ local function combatants()
 	return list
 end
 
+-- THE MODEL YOU AIM AT AND THE MODEL YOU CAN SEE ARE TWO DIFFERENT MODELS, and
+-- anything visual has to use this one. `MercHitboxes_<name>` is 15 parts and
+-- every single one is Transparency 1 - measured - so a Highlight adorned there
+-- renders nothing whatsoever, which is exactly what a broken cham looks like.
+-- `MercVisual_<name>` is the body: 21 parts, 16 of them visible.
+local function visualOf(entry)
+	if not MercPlayers then return nil end
+	local owner = entry.model:GetAttribute("RigOwner") or entry.name
+	return MercPlayers:FindFirstChild("MercVisual_" .. tostring(owner))
+end
+
 -- The hitbox rig has NO HumanoidRootPart - that is on the R6 decoy, not here - so
 -- anything reaching for one finds nil and quietly draws nothing. UpperTorso is
 -- the root in this game.
@@ -847,9 +858,23 @@ local HITBOX_PARTS = { "Head", "UpperTorso", "LowerTorso",
 -- Keyed by the rig MODEL rather than by a Player. Rigs are created and destroyed
 -- on every respawn while the Player object stays, so a Players-keyed pool would
 -- keep drawing the last frame of a body that is gone.
+--
+-- ...and because they are destroyed on every respawn, a set that is merely
+-- FORGOTTEN when its rig goes away leaks 37 C-side Drawing allocations per death.
+-- Measured on a live match: 155 orphaned objects inside a few minutes, against 74
+-- actually in use. So a dead set goes on a free list and the next rig to appear
+-- takes it, which caps the pool at the peak number of simultaneous bodies instead
+-- of the total number ever seen.
+local spare = {}
+
 local function objectsFor(model)
 	local set = drawn[model]
 	if set then return set end
+	set = table.remove(spare)
+	if set then
+		drawn[model] = set
+		return set
+	end
 	set = {
 		outline = make("Square", { Thickness = 3, Filled = false, ZIndex = 1,
 			Color = COLOUR.black, Transparency = 0.6 }),
@@ -1376,11 +1401,14 @@ local function renderPass()
 					-- throwing, and the property writes are wrapped as well, because an
 					-- Adornee whose rig was destroyed between the two lines is a second
 					-- way to lose the pass.
+					-- Adorned to the VISUAL rig, never to the hitbox rig - see visualOf.
+					-- A Highlight on 15 fully transparent parts draws nothing at all.
 					if CONFIG.chams and not chamsBroken then
-						local hl = chamFor(model)
+						local skin = visualOf(entry)
+						local hl = skin and chamFor(model) or nil
 						if hl then
 							pcall(function()
-								hl.Adornee = model
+								hl.Adornee = skin
 								applyCham(hl, base)
 							end)
 						end
@@ -1396,7 +1424,8 @@ local function renderPass()
 	end
 
 	-- Rigs are destroyed and rebuilt on every respawn, so a pool keyed by model
-	-- would grow without bound and keep drawing a body that is gone.
+	-- would grow without bound and keep drawing a body that is gone. The set is
+	-- handed to the free list rather than dropped - see objectsFor.
 	for model, set in pairs(drawn) do
 		if not seenModels[model] or not model.Parent then
 			hideSet(set)
@@ -1404,6 +1433,7 @@ local function renderPass()
 				local hl = highlights[model]
 				if hl then pcall(function() hl:Destroy() end) highlights[model] = nil end
 				drawn[model] = nil
+				spare[#spare + 1] = set
 			end
 		end
 	end
