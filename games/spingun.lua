@@ -14,6 +14,10 @@
         RequestOpenCase(<case>)        -> returns the GUN NAME, +1 OwnedGuns
         RequestEquipBest()             -> the server seats and ranks them itself
         RequestUpgradeGun(<uuid>)      -> +1 level on that gun
+        RequestApplySkinMachine(uuid, "Machine_N") / RequestCollectGunSkinMachine
+        RequestPlayerUpgrade("Money"|"Damage")     -> ruby, +10% income each
+        RequestAutoSell(rarity)        -> toggle; the RETURN is the new state
+        RequestRebirth()               -> +50% money, +1 slot, a case unlock
 
     Verified facts this script is built on (do not re-derive):
 
@@ -90,6 +94,77 @@
         ("Rebirth 3" ... "Rebirth 6"). Rebirth rewards are +50% money, +1 gun
         slot and a case unlock, and it KEEPS the guns and their levels -
         measured across a 0 -> 1 rebirth with five guns at levels 1..26.
+      * SKINS ARE THE BIGGEST MULTIPLIER IN THE GAME AND COST ONLY TIME.
+        RequestApplySkinMachine(uuid, "Machine_N") puts a gun into one of the
+        plot's machines; it comes back wearing a skin worth 1.25x (Paper) to
+        36x (Neon_Moss), rolled 55.11 / 27.53 / 10.08 / 4.54 / 1.94 / 0.75 /
+        0.05 percent by skin rarity - about 4.3x expected, computed here from
+        SkinsData rather than hardcoded. Ready is StartTime +
+        GunRarityBasedTime[rarity], both server side, verified against the
+        machine's own TimerLabel (90s of 300 showed "3m 31s"). The timer runs
+        300s at rarity 1, 43,200s at 9 and 604,800s - a week - at 24.
+        THE MACHINE TAKES THE GUN OFF THE PLOT (the record loses CurrentSlot),
+        so the default feeds it SPARES only and lets RequestEquipBest seat the
+        result. Machine time is the scarce resource, so candidates rank on
+        value gained per SECOND OF MACHINE TIME, which favours mid rarities.
+        A gun already inside a machine still has no skin and no slot, so it
+        passes the filter and wins the ranking every pass while the server
+        refuses it - the free machines then never fill and the note reads
+        "applied 0" forever. Machine occupants are excluded up front.
+      * PLAYER UPGRADES COST RUBY. RequestPlayerUpgrade("Money"|"Damage") are
+        +10% income each per level. The shop PRINTS 100 ruby and the server
+        charged 25 - another label that lies. They are bought ROUND ROBIN, not
+        in a priority order: "Money, Damage" bought Money five times and Damage
+        never once, because Money was always affordable.
+      * SELLING IS THE WEAK POINT OF THIS SCRIPT AND IS DOCUMENTED AS SUCH.
+        The game's own auto-sell is a filter on what DROPS, not a cleanup: with
+        rarities 1-4 enabled, 161 spare guns of exactly those rarities sat in
+        the inventory untouched while storage stayed pinned at 180/200. And its
+        threshold is a RARITY, which is not value - a Spas_12 at rarity 3 with a
+        big mutation was legitimately seated on the plot (base 1560, ahead of
+        several r5 and r6 guns), and protecting rarity 3 for its sake also
+        protects 26 junk r3 guns. Rarity cannot express "sell the worthless
+        ones".
+        The real cleanup is sellTrip(), which drives the shop's own UI and DOES
+        work - 180 guns down to 37 in one pass. But the list controller WEDGES
+        after a scripted pass: it never rebuilt again (72 rows against a 97-gun
+        inventory, 3 of them resolving, the pad prompt inert) until the client
+        was rejoined, and one more trip wedged it again. So it is a one-shot
+        button and a last-resort attempt at 12% room, never a routine loop.
+        Expect to sell by hand at the pad on a long unattended run.
+      * STORAGE IS A HARD WALL AT 200. At the cap RequestOpenCase stops
+        answering ("Inventory full, sell some guns!") and every later open is
+        wasted; one session climbed 5 -> 158. Opening pauses near the cap.
+        RequestSellGuns was never solved - {uuid}, uuid and {[uuid]=true} are
+        all refused and the sell shop's list is only built when the pad opens
+        it - so the clearing is done by the game's own auto-sell instead, which
+        IS proven. It never enables a rarity that has a gun on the plot:
+        whether the server spares a seated gun was never verified, and being
+        wrong there sells the farm.
+      * THE REBIRTH LADDER IS GATED ON NAMED GUNS, NOT ON MONEY ALONE. Every
+        step wants one or two SPECIFIC guns plus a few "any gun of rarity N".
+        Left purely income-driven this sat at R1 with $10.4M idle, Diamond sold
+        out and Ruby locked behind R2, while R2 only needed a Glock_17 - about
+        eight Bronze cases. Rolling the cheapest case that can drop the missing
+        rarity found it on the first open and chained five rebirths.
+      * A MISSING GetData MUST NOT READ AS A FRESH ACCOUNT. One nil answer made
+        rebirth() report 0, which locked every case above Gold behind "not
+        unlocked yet"; with the weakest slot already worth more than Gold the
+        picker decided no case was worth buying and silently stopped spending
+        while the balance piled up. The rebirth level is kept sticky.
+      * THE UPGRADE PRICE IS PRINTED ABBREVIATED above a million - "$5.5M" next
+        to "$1,142". Reading only the digits turned 5,500,000 into 5, which made
+        a level 23 gun the cheapest upgrade on the plot with a 0s payback,
+        pinned it at the top of the ranking every pass and had the server refuse
+        it forever. The suffix ladder is CALIBRATED from the game's own
+        Library.FormatNumber.FormatCompact by rendering 1e3 .. 1e63 and keeping
+        the letters it answers with, so it matches the labels by construction.
+        An unknown suffix is REFUSED rather than dropped.
+      * THE PER-SLOT INCOME USED FOR PAYBACK IS MEASURED, NOT CONFIGURED. Each
+        collect knows what that slot had pending and how long since its own last
+        collect, which is an exact server-side rate for free. GunData's
+        Money_Per_Sec ran about 5x low against it, and using it made every
+        upgrade look five times worse than it was.
       * RequestPlaceGun(uuid, "Slot_5") returns false and stayed UNPROVEN.
         The slot's PlacePrompt is 10-stud gated and only opens the inventory
         UI; the real placement call was never captured. RequestEquipBest
@@ -108,6 +183,7 @@
 
 local Players           = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService        = game:GetService("RunService")
 
 local plr = Players.LocalPlayer
 
@@ -198,6 +274,10 @@ local CONFIG = {
     caseReserve   = 3,      -- only buy a case with this many times its price
     storageFloor  = 0.1,    -- stop opening with less than this fraction of
                             -- storage left, so a burst cannot hit the cap
+    reserveWindow = 600,    -- a rebirth reachable within this many seconds of
+                            -- income is fenced off from every other spender
+    trivial       = 0.001,  -- anything under this share of the balance ignores
+                            -- the reserve entirely
     beatFactor    = 1.0,    -- a case must expect to beat the weakest slot by this
 
     -- skins: the biggest multiplier in the game and it costs nothing but time
@@ -225,6 +305,13 @@ local CONFIG = {
     autoSell      = true,
     sellAdaptive  = true,   -- threshold follows the weakest rarity on the plot
     sellBelow     = 4,      -- fixed threshold when sellAdaptive is off
+    sellAt        = 0.12,   -- attempt a sell trip with less than this much room
+                            -- left. It is a LAST RESORT, not a routine: see the
+                            -- note on sellTrip - the shop's list wedges after a
+                            -- scripted pass and only a rejoin clears it.
+
+    -- safety
+    blockRobux    = true,   -- kill the Robux purchase popups at the source
 
     -- tuning
     openGap       = 0.6,    -- seconds between buy/open pairs
@@ -245,6 +332,8 @@ local STATE = {
     rebirthNote = "-",
     skinNote    = "-",
     rubyNote    = "-",
+    robuxNote   = "-",
+    robuxKilled = 0,
     skinsApplied = 0, skinsCollected = 0, rubyBuys = 0,
     parked      = {},   -- remote name -> true, anything that ever hit the cap
     rate        = 0,    -- measured $/s, from the banked counter
@@ -309,6 +398,46 @@ local function rf(name, ...)
     end
     if not ok then return nil, tostring(res) end
     return res
+end
+
+-- --------------------------------------------------------- Robux popups
+-- THE GAME SELLS ROBUX OFF THE BACK OF A REFUSED PURCHASE. Every case row in
+-- the shop carries a money price AND a Robux price, and the server pushes
+-- Remotes.Events.PromptPlayerPurchase / PromptPlayerGamepassPurchase to the
+-- client whenever a purchase path is not satisfied. Nothing here ever fires a
+-- paid remote, but a case that goes out of stock between the stock read and the
+-- buy is still a refusal, and the popup lands on the user - reported from a real
+-- session as "it keeps asking me to buy Robux and spin instead of using money".
+--
+-- Hooking MarketplaceService is NOT enough: the game draws its own panel from
+-- those events. The listeners themselves have to go, and the check is the count
+-- of connections whose Enabled is not false - the event still ARRIVES, only the
+-- handler is gone. They are re-swept on a timer because the client can rebuild
+-- them.
+local PROMPT_EVENTS = { "PromptPlayerPurchase", "PromptPlayerGamepassPurchase" }
+
+local function blockRobuxPrompts()
+    if not CONFIG.blockRobux then STATE.robuxNote = "off - popups allowed"; return end
+    local events = Remotes and Remotes:FindFirstChild("Events")
+    if not events then return end
+    local live, killed = 0, 0
+    for _, name in ipairs(PROMPT_EVENTS) do
+        local ev = events:FindFirstChild(name)
+        if ev and getconnections then
+            local ok, conns = pcall(getconnections, ev.OnClientEvent)
+            if ok then
+                for _, conn in ipairs(conns) do
+                    if conn.Enabled ~= false then
+                        local done = pcall(function() conn:Disable() end)
+                        if done then killed = killed + 1 else live = live + 1 end
+                    end
+                end
+            end
+        end
+    end
+    STATE.robuxKilled = STATE.robuxKilled + killed
+    STATE.robuxNote = ("popups blocked (%d handlers killed, %d still live)"):format(
+        STATE.robuxKilled, live)
 end
 
 -- ------------------------------------------------------------------- oracles
@@ -411,6 +540,20 @@ local function gunValue(g)
     local base = (GUNS[g.Name] and GUNS[g.Name].Money_Per_Sec) or 0
     local lvl  = tonumber(g.Level) or 1
     return base * mutMult(g) * skinMult(g) * (1.033 ^ (lvl - 1))
+end
+
+-- The same value with the LEVEL TERM STRIPPED OUT, and the difference matters.
+-- A case's expected draw is a level 1 gun, but the seated gun it has to beat is
+-- carrying 1.033^(level-1) on top - 2.5x by level 30. Comparing the two as they
+-- stand sets the bar 2.5x too high and rejects a genuinely rarer gun because a
+-- heavily upgraded common one currently out-earns it. What actually decides it
+-- is the RARITY the two start from, since whatever is drawn can be levelled the
+-- same way. So the picker's floor is the base value; only the payback maths,
+-- which is about money right now, uses the levelled one.
+local function gunBaseValue(g)
+    if not g then return 0 end
+    local base = (GUNS[g.Name] and GUNS[g.Name].Money_Per_Sec) or 0
+    return base * mutMult(g) * skinMult(g)
 end
 
 -- Everything the plot looks like right now, in one pass.
@@ -574,21 +717,135 @@ end
 -- The starvation guard, in the shape that finally worked in Sell Ores: reserve
 -- for the BEST-VALUE target rather than the cheapest, and let a trivially cheap
 -- step through rather than blocking a 6,000 purchase to save for a million.
+-- A case is an OPTION, not an average, and judging it by its mean is what made
+-- the script stop buying with $75M in the bank. You only ever need ONE draw
+-- above the weakest slot: a bad roll costs the case and nothing else, because
+-- the gun simply never gets seated. So the number that matters is the expected
+-- IMPROVEMENT over the floor -
+--     sum over rarities of  chance_r * max(0, avgMps_r - floor)
+-- - which keeps the fat tail of an expensive case worth something long after
+-- its mean has fallen below the plot. Comparing the mean instead threw away
+-- every case whose average was under the floor even when a quarter of its
+-- table was far above it.
+local function caseGain(name, floorValue)
+    local c = CASES[name]
+    if not c or not c.RarityChances then return 0 end
+    local gain = 0
+    for r, chance in pairs(c.RarityChances) do
+        local avg = AVG_MPS[r]
+        if chance > 0 and avg and avg > floorValue then
+            gain = gain + (chance / 100) * (avg - floorValue)
+        end
+    end
+    return gain
+end
+
+-- THE REBIRTH RESERVE, and it is the difference between a farm that climbs and
+-- one that oscillates. Measured: the balance sat at $98.6M against a $100M
+-- rebirth cost while cases and gun levels kept skimming it back down, so the
+-- rebirth never fired, the hunt that unlocks it never fired either, and the plot
+-- stayed frozen at R8 with everything worth buying sold out.
+--
+-- It follows the three rules this project learned the hard way in Sell Ores:
+--   * reserve for the BEST-VALUE target - the rebirth is +50% of the entire
+--     income plus a slot plus the next case tier, which no single case is;
+--   * engage on REACHABILITY FROM INCOME, not on a share of the balance. A
+--     "once you have 25% of it" rule switches off again as soon as the money is
+--     spent, so it never accumulates. price <= money + rate * window engages
+--     and stays engaged;
+--   * one shared guard that EVERY spender asks. Four ad-hoc reserve sums is
+--     four chances to forget one.
+-- Trivially cheap steps are let through on purpose: blocking a $2,500 case that
+-- repays in a second in order to save for a $100M rebirth is backwards.
+local function reserved()
+    if not CONFIG.autoRebirth and not CONFIG.huntRebirth then return 0, nil end
+    local plan = rebirthPlan()
+    if not plan.cost then return 0, nil end
+    local m = money()
+    if m >= plan.cost then return plan.cost, plan end          -- already there, hold it
+    local reach = m + (STATE.rate or 0) * CONFIG.reserveWindow
+    if reach >= plan.cost then return plan.cost, plan end       -- reachable, start saving
+    return 0, plan
+end
+
+local function spendable(cost)
+    local m = money()
+    local hold = reserved()
+    if hold <= 0 then return m end
+    if cost and cost <= m * CONFIG.trivial then return m end    -- trivially cheap
+    return math.max(0, m - hold)
+end
+
 local function pickCase()
     local c = census()
-    local floorValue = (c.weakest and c.weakest.value or 0) * CONFIG.beatFactor
+    local floorValue = (c.weakest and gunBaseValue(c.weakest.gun) or 0) * CONFIG.beatFactor
     -- an empty slot has nothing to beat
     if #c.free > 0 then floorValue = 0 end
 
     local list = candidates()
     if #list == 0 then return nil, "no case unlocked and in stock" end
 
+    -- Ranked on gain PER OPEN, not per dollar. Once the farm is running, money
+    -- is not the binding constraint - storage is (200 guns, and a full inventory
+    -- stops every case). Gain per dollar always favours Bronze, which is exactly
+    -- the junk that fills the inventory; gain per open buys the best thing the
+    -- balance can reach and leaves room for it. The reserve keeps it honest
+    -- while money IS tight.
     local m = money()
+
+    -- A REBIRTH THAT IS PAID FOR AND BLOCKED ON ONE GUN OUTRANKS ANY CASE.
+    -- R9 was affordable at $209M against a $100M cost and waiting on a single
+    -- AS_VAL, while the picker happily bought Amethyst for its 170/s of expected
+    -- improvement. The rebirth is worth +50% of the WHOLE income - about
+    -- +100K/s at that point - plus a slot and the next case tier. So when the
+    -- money is already there and only the named guns are missing, roll for those
+    -- first and let the income case wait.
+    do
+        local plan = rebirthPlan()
+        if CONFIG.huntRebirth and plan.cost and m >= plan.cost and not plan.ready then
+            local want = huntRarities()
+            if next(want) then
+                -- Ranked on CHANCE PER OPEN, not on price. Storage is the
+                -- constraint during a hunt, not money: Bronze drops rarity 6 at
+                -- 0.1% and Amethyst at 5%, so the cheap case needs fifty times
+                -- as many opens and fifty times as much inventory churn to find
+                -- the same gun. Price only decides ties and affordability.
+                local cheapest, bestChance
+                for _, e in ipairs(list) do
+                    local cfg = CASES[e.name]
+                    local chance = 0
+                    for r in pairs(want) do
+                        chance = math.max(chance, (cfg.RarityChances and cfg.RarityChances[r]) or 0)
+                    end
+                    -- spent out of the SURPLUS above the rebirth cost, so the
+                    -- hunt can never eat the rebirth it is hunting for
+                    if chance > 0 and (m - plan.cost) >= e.price * CONFIG.caseReserve then
+                        if not bestChance or chance > bestChance
+                           or (chance == bestChance and e.price < cheapest.price) then
+                            cheapest, bestChance = e, chance
+                        end
+                    end
+                end
+                if cheapest then
+                    local target = plan.missingGuns[1]
+                        or ("any r" .. tostring(plan.missingRarity[1] or "?"))
+                    return { name = cheapest.name, price = cheapest.price, ev = cheapest.ev,
+                             stock = cheapest.stock, gain = 0, hunting = true },
+                           nil, ("hunting %s for R%d (%.3g%% per open)"):format(
+                               target, plan.level, bestChance)
+                end
+            end
+        end
+    end
+
     local best, goal
     for _, e in ipairs(list) do
-        if e.ev >= floorValue then
+        e.gain = caseGain(e.name, floorValue)
+        if e.gain > 0 then
             if not goal or e.price < goal.price then goal = e end
-            if m >= e.price * CONFIG.caseReserve and not best then best = e end
+            if spendable(e.price) >= e.price * CONFIG.caseReserve then
+                if not best or e.gain > best.gain then best = e end
+            end
         end
     end
 
@@ -632,8 +889,8 @@ local function pickCase()
         end
         return nil, ("saving for %s ($%s)"):format(goal.name, fmt(goal.price))
     end
-    return nil, ("no case beats the weakest slot ($%s/s) - rebirth for a better one")
-        :format(fmt(c.weakest and c.weakest.value or 0))
+    return nil, ("no case can beat the weakest slot (base $%s/s) - rebirth for a better one")
+        :format(fmt(floorValue))
 end
 
 -- A case already sitting in OwnedCases is paid for, so it is opened before any
@@ -695,8 +952,8 @@ local function openOnce()
         STATE.caseNote = why or "-"
         return false
     end
-    STATE.caseNote = ("%s $%s  ev %s/s%s%s"):format(
-        pick.name, fmt(pick.price), fmt(pick.ev),
+    STATE.caseNote = ("%s $%s  gain %s/s%s%s"):format(
+        pick.name, fmt(pick.price), fmt(pick.gain or pick.ev),
         pick.stock and ("  stock " .. tostring(pick.stock)) or "",
         hunt and ("   " .. hunt) or "")
 
@@ -811,8 +1068,11 @@ local function upgradePass()
         return 0
     end
     local price = boardPrice(best.slot) or 0
-    if money() < price then
-        STATE.upgradeNote = ("%s needs $%s (payback %s)"):format(best.slot, fmt(price), secs(bestPay))
+    if spendable(price) < price then
+        local hold = reserved()
+        STATE.upgradeNote = ("%s needs $%s (payback %s)%s"):format(
+            best.slot, fmt(price), secs(bestPay),
+            hold > 0 and ("   $" .. fmt(hold) .. " held for rebirth") or "")
         return 0
     end
     if rf("RequestUpgradeGun", best.uuid) == true then
@@ -939,6 +1199,221 @@ local function syncAutoSell()
     end
 end
 
+-- ------------------------------------------------------------- sell trip
+-- The game's own auto-sell only culls what DROPS - it never touches guns that
+-- are already in the inventory. Measured: 161 spare r1-r4 guns sat there
+-- untouched through repeated syncs while storage was pinned at 180/200 and
+-- every case open was blocked. So the junk has to be sold for real.
+--
+-- RequestSellGuns could not be solved: {uuid}, uuid and {[uuid]=true} are all
+-- refused, and driving the shop's own Sell button captured NOTHING in an
+-- outgoing spy - the call does not cross a __namecall the hook can see. That is
+-- fine, because the UI path itself works and is fully drivable:
+--
+--   fireproximityprompt(Map.Shops.Sell)     -> opens the shop and BUILDS the list
+--   button.MouseButton1Click (not Activated) -> toggles that gun's checkmark
+--   ButtonsHolder.Sell.Activated             -> raises the confirm
+--   SellConfirm.Yes.Activated                -> sells
+--
+-- Every row carries the gun's UUID as an ATTRIBUTE (plus GunName, Locked and
+-- InSkinMachine), so the selection can be driven exactly. Verified: 180 -> 37
+-- guns in one trip for $35,680.
+--
+-- THE LIST ITSELF EXCLUDES PLACED GUNS - measured, 153 rows and 0 of them
+-- seated - so this route cannot sell the farm even if the filter below is
+-- wrong. The filter still protects skins, locks, machine occupants and the guns
+-- the next rebirth is waiting on, because those are all things the list does
+-- happily offer.
+local SELL_PAD = Vector3.new(269.37, 6.0, -7.94)
+
+local function keepSet()
+    local d = data()
+    local keep = {}
+    if not d then return keep end
+
+    -- the guns the next rebirth needs, one instance per requirement
+    local plan = rebirthPlan()
+    local req = RREQ[plan.level]
+    if req then
+        local used = {}
+        for _, e in pairs(req) do
+            for uuid, g in pairs(d.OwnedGuns or {}) do
+                local hit
+                if e.Type == "Gun" then hit = (g.Name == e.Key)
+                else hit = ((tonumber(g.Rarity) or 0) >= (tonumber(e.Key) or 99)) end
+                if hit and not used[uuid] then used[uuid] = true; keep[uuid] = true; break end
+            end
+        end
+    end
+    return keep
+end
+
+-- The case animation and the shop do not coexist: IsRolling is true almost
+-- continuously while the open loop runs at CONFIG.openGap, and a trip taken
+-- through that is a trip taken against a UI the game is busy with. Opening is
+-- held for the duration of the trip and restored afterwards, whatever happens.
+local sellBusy = false
+local function sellTrip()
+    if not CONFIG.autoSell then STATE.sellNote = "off"; return 0 end
+    if sellBusy then return 0 end
+    sellBusy = true
+    local wasOpen = CONFIG.autoOpen
+    CONFIG.autoOpen = false
+    local finished = false
+    task.delay(45, function()
+        if not finished then CONFIG.autoOpen = wasOpen; sellBusy = false end
+    end)
+    local function done(n)
+        finished = true
+        CONFIG.autoOpen = wasOpen
+        sellBusy = false
+        return n
+    end
+
+    local rolling = plr:FindFirstChild("IsRolling")
+    local waited = 0
+    while rolling and rolling.Value and waited < 12 do
+        task.wait(0.3); waited = waited + 0.3
+    end
+    local gui = plr:FindFirstChild("PlayerGui")
+    gui = gui and gui:FindFirstChild("SellShop")
+    local shops = workspace:FindFirstChild("Map")
+    shops = shops and shops:FindFirstChild("Shops")
+    local pad = shops and shops:FindFirstChild("Sell")
+    local prompt = pad and pad:FindFirstChildWhichIsA("ProximityPrompt", true)
+    if not gui or not prompt then STATE.sellNote = "sell shop not found"; return done(0) end
+
+    local char = plr.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    if not root then STATE.sellNote = "no character"; return done(0) end
+
+    -- Prompts validate against the SERVER's copy of the position, so the root
+    -- part is held on Heartbeat rather than written once.
+    local home = root.CFrame
+    local target = CFrame.new(SELL_PAD)
+    local pin = RunService.Heartbeat:Connect(function()
+        if root.Parent then root.CFrame = target end
+    end)
+    task.wait(1.2)
+
+    -- Fire it a few times: the prompt TOGGLES, so a single fire on an already
+    -- open shop closes it again, and a closed shop keeps its LAST list - 153
+    -- rows of which 8 still resolved against a 63-gun inventory. Acting on that
+    -- sells nothing and reports "kept 151", which reads exactly like a broken
+    -- filter.
+    --
+    -- gui.Enabled is NOT the open signal and testing it was a dead end: the very
+    -- trip that sold 143 guns ran with Enabled false the whole time. The list is
+    -- rebuilt on the trigger regardless, so the only honest readiness test is
+    -- the list itself - see the freshness loop below.
+    -- ONCE, not three times. Firing it repeatedly toggles the shop open/closed
+    -- in quick succession and that is what left the list controller wedged - it
+    -- stopped rebuilding at all ("sell list stayed stale") until the client was
+    -- rejoined. One fire, then let the freshness loop below decide whether it
+    -- worked; a second attempt only happens on the NEXT trip.
+    pcall(function() fireproximityprompt(prompt) end)
+    task.wait(1.2)
+    pin:Disconnect()
+    pcall(function() root.CFrame = home end)
+
+    local holder = gui:FindFirstChild("Container")
+    holder = holder and holder:FindFirstChild("Holder")
+    if not holder then STATE.sellNote = "sell list never built"; return done(0) end
+
+    local d = data(true)
+
+    -- "every row must resolve" was too strict and never passed: the game's own
+    -- auto-sell keeps culling in the background, so rows go stale WHILE the list
+    -- is being read (72 rows against 25 owned, seconds apart). Demanding a
+    -- perfectly fresh list means never selling anything.
+    --
+    -- So no freshness gate at all: a row whose UUID is not owned any more is
+    -- simply skipped. Stale rows are harmless - the gun is already gone - and
+    -- the ones that DO resolve are exactly the ones worth acting on. The only
+    -- wait is for at least one resolvable row to appear, which is what tells us
+    -- the list was built at all.
+    local usable = 0
+    for _ = 1, 20 do
+        usable = 0
+        for _, row in ipairs(holder:GetChildren()) do
+            if row:IsA("GuiButton") and row.Name ~= "Template" and row.Visible then
+                if (d.OwnedGuns or {})[row:GetAttribute("UUID")] then usable = usable + 1 end
+            end
+        end
+        if usable > 0 then break end
+        task.wait(0.25)
+        d = data(true)
+        if _G.__SPINGUN ~= GEN then return done(0) end
+    end
+    if usable == 0 then
+        STATE.sellNote = "sell list did not build - retrying next trip"
+        return done(0)
+    end
+    local keep = keepSet()
+    local threshold = sellThreshold()
+    local wanted, kept = 0, 0
+
+    for _, row in ipairs(holder:GetChildren()) do
+        if row:IsA("GuiButton") and row.Name ~= "Template" and row.Visible then
+            local uuid = row:GetAttribute("UUID")
+            local g = uuid and d.OwnedGuns and d.OwnedGuns[uuid]
+            local sellIt = false
+            if not g then
+                -- already sold or gone; leave the row alone entirely
+            elseif not keep[uuid]
+               and not g.Locked
+               and row:GetAttribute("Locked") ~= true
+               and row:GetAttribute("InSkinMachine") ~= true
+               and g.CurrentSlot == nil
+               and next(g.Skins or {}) == nil
+               and (tonumber(g.Rarity) or 99) < threshold then
+                sellIt = true
+            end
+            local mark = row:FindFirstChild("Checkmark")
+            local on = mark and mark.Visible or false
+            if g and on ~= sellIt then
+                local ok, conns = pcall(getconnections, row.MouseButton1Click)
+                if ok then
+                    for _, conn in ipairs(conns) do pcall(function() conn:Fire() end) end
+                end
+                task.wait(0.03)
+            end
+            if sellIt then wanted = wanted + 1 elseif g then kept = kept + 1 end
+        end
+        if _G.__SPINGUN ~= GEN then return done(0) end
+    end
+
+    if wanted == 0 then
+        STATE.sellNote = ("nothing under r%d to sell (%d kept)"):format(threshold, kept)
+        return done(0)
+    end
+
+    local buttons = gui.Container:FindFirstChild("ButtonsHolder")
+    local sellBtn = buttons and buttons:FindFirstChild("Sell")
+    if not sellBtn then STATE.sellNote = "sell button missing"; return done(0) end
+    local before = 0
+    for _ in pairs(d.OwnedGuns or {}) do before = before + 1 end
+
+    for _, conn in ipairs(getconnections(sellBtn.Activated)) do pcall(function() conn:Fire() end) end
+    task.wait(0.8)
+
+    local confirm = plr.PlayerGui:FindFirstChild("SellConfirm")
+    local yes = confirm and confirm:FindFirstChild("Yes", true)
+    if yes then
+        for _, conn in ipairs(getconnections(yes.Activated)) do pcall(function() conn:Fire() end) end
+        task.wait(1.5)
+    end
+
+    dataCache = nil
+    local after = 0
+    for _ in pairs((data(true) or {}).OwnedGuns or {}) do after = after + 1 end
+    local sold = before - after
+    STATE.sold = (STATE.sold or 0) + math.max(0, sold)
+    STATE.sellNote = ("sold %d below r%d   storage %d   (%d kept)"):format(
+        sold, threshold, after, kept)
+    return done(sold)
+end
+
 -- ------------------------------------------------------------------ rebirth
 local function reqText(n)
     local req = RREQ[n]
@@ -1037,7 +1512,15 @@ local function skinPass()
             local g = d.OwnedGuns and d.OwnedGuns[m.Gun]
             local need = SKIN_TIME[g and g.Rarity or 1] or math.huge
             if (now - m.StartTime) >= need then
-                if rf("RequestCollectGunSkinMachine", name) == true then
+                -- NOT `== true`. Remotes in this game answer with data, not with
+                -- booleans - RequestOpenCase returns the gun NAME - and this one
+                -- is no exception: the collect plainly worked (the gun came back
+                -- wearing Digital_Camo and the machine refilled) while a strict
+                -- `== true` scored it as a failure, left the counter at zero and
+                -- skipped the cache invalidation that the refill in the same pass
+                -- depends on. Anything that is not nil and not false is a yes.
+                local reply = rf("RequestCollectGunSkinMachine", name)
+                if reply ~= nil and reply ~= false then
                     collected = collected + 1
                     dataCache = nil
                 end
@@ -1105,8 +1588,17 @@ end
 -- a row and Damage never once, because Money was always affordable. Both are
 -- +10% income per level, so they are meant to climb together - the cursor moves
 -- on after every successful buy.
+-- The failed attempts are not free: the game prints "Not enough ruby! (x2)" in
+-- red across the middle of the screen every time, which is what the user sees.
+-- After a refusal the next try waits until the ruby balance has actually MOVED,
+-- so the loop stops hammering a price it cannot pay.
 local rubyCursor = 0
+local rubyBlockedAt = nil
 local function rubyPass()
+    if rubyBlockedAt and ruby() <= rubyBlockedAt then
+        STATE.rubyNote = ("ruby %d - waiting for more (last refusal at %d)"):format(ruby(), rubyBlockedAt)
+        return 0
+    end
     local order = {}
     for word in tostring(CONFIG.rubyOrder):gmatch("[%a_]+") do order[#order + 1] = word end
     if #order == 0 then order = { "Money", "Damage" } end
@@ -1119,12 +1611,14 @@ local function rubyPass()
             STATE.rubyBuys = STATE.rubyBuys + 1
             dataCache = nil
             task.wait(0.3)
+            rubyBlockedAt = nil
             STATE.rubyNote = ("bought %s   ruby %d -> %d   (%d total)"):format(
                 key, before, ruby(), STATE.rubyBuys)
             return 1
         end
         if _G.__SPINGUN ~= GEN then return 0 end
     end
+    rubyBlockedAt = before
     local u = (data() or {}).Upgrades
     STATE.rubyNote = ("ruby %d - nothing affordable (money lvl %s, damage lvl %s)"):format(
         before, tostring(u and u.MoneyLevel), tostring(u and u.DamageLevel))
@@ -1150,10 +1644,19 @@ loop(CONFIG.openGap, "autoOpen", function()
     if openOnce() and CONFIG.autoEquipBest then rf("RequestEquipBest") end
 end)
 loop(8,  "autoUpgrade", function() STATE.phase = "upgrade"; upgradePass() end)
+-- Swept rather than set once: the client can rebuild a listener at any time,
+-- and one rebuilt handler is one popup in the user's face.
+loop(15, "blockRobux",  function() blockRobuxPrompts() end)
 loop(20, "autoSkin",    function() STATE.phase = "skins"; skinPass() end)
 -- Re-synced rather than set once: the threshold follows the plot, and the plot
 -- changes every time RequestEquipBest seats something better.
+-- Two halves: the game's own toggle keeps NEW drops from piling up, and the
+-- trip clears what is already there. Only the trip actually frees storage.
 loop(120, "autoSell",   function() syncAutoSell() end)
+loop(45,  "autoSell",   function()
+    local room = storageRoom()
+    if room < CONFIG.sellAt then STATE.phase = "sell"; sellTrip() end
+end)
 loop(30, "autoRuby",    function() rubyPass() end)
 loop(45, "autoSpin",    function() spinPass() end)
 loop(90, "autoClaim",   function() claimPass() end)
@@ -1248,6 +1751,11 @@ cSkin:Toggle("Allow taking guns off the plot", CONFIG.skinPlaced, function(v) CO
     "a machine holds the gun for its whole timer - 12h at rarity 9", UI.theme.bad)
 cSkin:Toggle("Spend ruby", CONFIG.autoRuby, function(v) CONFIG.autoRuby = v end,
     "Money Boost and Gun Damage are +10% income each per level")
+cSkin:Toggle("Block Robux popups", CONFIG.blockRobux, function(v)
+    CONFIG.blockRobux = v
+    task.spawn(blockRobuxPrompts)
+end, "a refused purchase is how this game sells Robux - the handler is removed",
+    UI.theme.good)
 
 local cFree = spend:Card("FREE", 0)
 cFree:Toggle("Spin for ruby", CONFIG.autoSpin, function(v) CONFIG.autoSpin = v end,
@@ -1261,12 +1769,13 @@ local cSell = spend:Card("AUTO SELL", 0)
 cSell:Toggle("Use the game's auto sell", CONFIG.autoSell, function(v)
     CONFIG.autoSell = v
     task.spawn(syncAutoSell)
-end, "keeps storage under the 200 cap - a full inventory stops every case",
+end, "culls what DROPS below the threshold - it never clears what is already held",
     UI.theme.good)
 cSell:Toggle("Follow the plot", CONFIG.sellAdaptive, function(v)
     CONFIG.sellAdaptive = v
     if CONFIG.autoSell then task.spawn(syncAutoSell) end
-end, "threshold tracks the weakest rarity seated; a seated rarity is never sold")
+end, "tracks the weakest seated RARITY - one good low-rarity gun protects its whole tier")
+cSell:Button("Sell junk now (one shot)", function() task.spawn(sellTrip) end)
 cSell:Slider("Sell below rarity", 1, 12, CONFIG.sellBelow, function(v)
     CONFIG.sellBelow = math.floor(v)
     if CONFIG.autoSell then task.spawn(syncAutoSell) end
@@ -1306,6 +1815,7 @@ task.spawn(function()
             "SKINS + RUBY",
             "  " .. STATE.skinNote,
             "  " .. STATE.rubyNote,
+            "  " .. STATE.robuxNote,
             "PROGRESSION",
             "  " .. STATE.rebirthNote,
             ("  sell: %s%s"):format(STATE.sellNote,
@@ -1329,16 +1839,19 @@ _G.__SPINGUN_DBG = {
     CONFIG = CONFIG, STATE = STATE,
     rf = rf, data = data, stock = stock, census = census,
     money = money, ruby = ruby, spins = spins, rebirth = rebirth,
-    gunValue = gunValue, mutMult = mutMult, skinMult = skinMult,
+    gunValue = gunValue, gunBaseValue = gunBaseValue, mutMult = mutMult, skinMult = skinMult,
     candidates = candidates, pickCase = pickCase, openOnce = openOnce,
+    caseGain = caseGain,
     collectAll = collectAll, upgradePass = upgradePass, boardPrice = boardPrice,
     openOwned = openOwned, storageRoom = storageRoom,
     claimPass = claimPass, spinPass = spinPass, syncAutoSell = syncAutoSell,
     slotRate = function() return STATE.slotRate end,
     rebirthStep = rebirthStep, reqText = reqText, platform = platform,
     sellThreshold = sellThreshold, placedRarities = placedRarities,
+    sellTrip = sellTrip, keepSet = keepSet,
     rebirthPlan = rebirthPlan, huntRarities = huntRarities,
-    skinPass = skinPass, rubyPass = rubyPass,
+    reserved = reserved, spendable = spendable,
+    skinPass = skinPass, rubyPass = rubyPass, blockRobuxPrompts = blockRobuxPrompts,
     SKIN_TIME = SKIN_TIME, skinEV = function() return SKIN_EV end,
     fmt = fmt, secs = secs, parsePrice = parsePrice, SUFFIX = SUFFIX,
     CASES = CASES, CASE_EV = CASE_EV, AVG_MPS = AVG_MPS, UNLOCK = UNLOCK,
