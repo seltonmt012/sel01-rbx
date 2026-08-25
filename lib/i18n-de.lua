@@ -8,7 +8,7 @@
 -- they are - they keep passing "Auto rebirth" and only this file decides what
 -- the player reads.
 --
--- 1380 entries.
+-- 1381 entries.
 
 return {
 	["* means scoped, _ means crouching"] = "* heißt gezoomt, _ heißt geduckt",
@@ -448,6 +448,7 @@ return {
 	["Medium"] = "Mittel",
 	["Merge pets"] = "Pets fusionieren",
 	["Milestones + index"] = "Meilensteine + Index",
+	["Min hunt chance %"] = "Min. Jagd-Chance %",
 	["Min rarity"] = "Min Seltenheit",
 	["Mine phase (s)"] = "Minen-Phase (s)",
 	["Minimum rarity"] = "Mindest-Seltenheit",

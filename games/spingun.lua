@@ -279,6 +279,10 @@ local CONFIG = {
     trivial       = 0.001,  -- anything under this share of the balance ignores
                             -- the reserve entirely
     beatFactor    = 1.0,    -- a case must expect to beat the weakest slot by this
+    minHuntChance = 2.0,    -- percent per open; a hunt vehicle below this is
+                            -- refused rather than spammed
+    minOpenGain   = 0.05,   -- an owned case is only opened if its expected gain
+                            -- is at least this share of the plot's floor
 
     -- skins: the biggest multiplier in the game and it costs nothing but time
     autoSkin      = true,   -- keep every owned skin machine loaded
@@ -333,6 +337,7 @@ local STATE = {
     skinNote    = "-",
     rubyNote    = "-",
     robuxNote   = "-",
+    huntNote    = "-",
     robuxKilled = 0,
     skinsApplied = 0, skinsCollected = 0, rubyBuys = 0,
     parked      = {},   -- remote name -> true, anything that ever hit the cap
@@ -802,7 +807,14 @@ local function pickCase()
     -- first and let the income case wait.
     do
         local plan = rebirthPlan()
-        if CONFIG.huntRebirth and plan.cost and m >= plan.cost and not plan.ready then
+        local hold = reserved()
+        -- Engage while still SAVING, not only once the cost is banked. Gating on
+        -- "money >= cost" meant the hunt switched itself off every time the
+        -- balance dipped below the rebirth price - which is exactly when normal
+        -- case buying resumed and pushed it further down. The money and the gun
+        -- are two independent requirements; hunt for the gun the whole time and
+        -- pay for it out of the surplus above the reserve.
+        if CONFIG.huntRebirth and plan.cost and hold > 0 and not plan.ready then
             local want = huntRarities()
             if next(want) then
                 -- Ranked on CHANCE PER OPEN, not on price. Storage is the
@@ -817,22 +829,37 @@ local function pickCase()
                     for r in pairs(want) do
                         chance = math.max(chance, (cfg.RarityChances and cfg.RarityChances[r]) or 0)
                     end
-                    -- spent out of the SURPLUS above the rebirth cost, so the
-                    -- hunt can never eat the rebirth it is hunting for
-                    if chance > 0 and (m - plan.cost) >= e.price * CONFIG.caseReserve then
+                    -- A HOPELESS VEHICLE IS WORSE THAN WAITING. Bronze drops
+                    -- rarity 6 at 0.1%, which is ~1000 opens and ~1000 inventory
+                    -- slots churned for one gun, while Feiry does it in ~13 and
+                    -- Shadow in ~7. Below minHuntChance the hunt declines and
+                    -- the money goes on saving for a real vehicle instead.
+                    -- Spent out of the SURPLUS above the reserve, so the hunt
+                    -- can never eat the rebirth it is hunting for.
+                    if chance >= CONFIG.minHuntChance
+                       and (m - hold) >= e.price * CONFIG.caseReserve then
                         if not bestChance or chance > bestChance
                            or (chance == bestChance and e.price < cheapest.price) then
                             cheapest, bestChance = e, chance
                         end
                     end
                 end
-                if cheapest then
+                if not cheapest then
+                    -- nothing good enough on the shelf: say so instead of
+                    -- silently falling through to buying income cases
                     local target = plan.missingGuns[1]
                         or ("any r" .. tostring(plan.missingRarity[1] or "?"))
+                    STATE.huntNote = ("%s for R%d: no case at %.3g%%+ affordable yet"):format(
+                        target, plan.level, CONFIG.minHuntChance)
+                elseif cheapest then
+                    local target = plan.missingGuns[1]
+                        or ("any r" .. tostring(plan.missingRarity[1] or "?"))
+                    STATE.huntNote = ("%s for R%d via %s (%.3g%%, ~%.0f opens)"):format(
+                        target, plan.level, cheapest.name, bestChance, 100 / bestChance)
                     return { name = cheapest.name, price = cheapest.price, ev = cheapest.ev,
                              stock = cheapest.stock, gain = 0, hunting = true },
-                           nil, ("hunting %s for R%d (%.3g%% per open)"):format(
-                               target, plan.level, bestChance)
+                           nil, ("hunting %s via %s (%.3g%%, ~%.0f opens)"):format(
+                               target, cheapest.name, bestChance, 100 / bestChance)
                 end
             end
         end
@@ -900,18 +927,49 @@ end
 -- unopened (68 Diamond bought against 25 total rolls) while the script sat
 -- there deciding that no case was worth BUYING. Richest first, by expected
 -- value, so the good ones are not left behind if the inventory cap ever bites.
-local function openOwned()
+-- AN OWNED CASE IS FREE TO KEEP BUT NOT FREE TO OPEN. The case itself costs
+-- nothing to sit in OwnedCases, but opening it spends an INVENTORY SLOT, and
+-- storage - not money - is what stops the farm. Measured on a developed plot:
+-- 393 Bronze, 94 Gold, 84 Silver and 60 Diamond cases in stock, all bought
+-- earlier, each expected to produce a gun worth about 8 against a plot floor of
+-- 450. Grinding through those is what "it keeps spinning bad cases" looks like:
+-- hundreds of opens, hundreds of junk guns, storage full, and nothing gained.
+--
+-- So an owned case is opened only if it can actually help - either its expected
+-- improvement clears minOpenGain of the floor, or it is a decent vehicle for the
+-- rarity the next rebirth is waiting on. Everything else stays in the inventory,
+-- where it costs nothing and is still there after the next rebirth raises the
+-- ceiling and makes it worth opening.
+local function openOwned(floorValue, huntWant)
     local d = data()
     local owned = d and d.OwnedCases
     if not owned then return false end
-    local best
+    local bar = (floorValue or 0) * CONFIG.minOpenGain
+    local best, skipped = nil, 0
     for name, count in pairs(owned) do
         if (tonumber(count) or 0) > 0 and CASES[name] and not CASES[name].RobuxOnly then
-            local ev = CASE_EV[name] or 0
-            if not best or ev > best.ev then best = { name = name, ev = ev, count = count } end
+            local gain = caseGain(name, floorValue or 0)
+            local chance = 0
+            for r in pairs(huntWant or {}) do
+                chance = math.max(chance, (CASES[name].RarityChances and CASES[name].RarityChances[r]) or 0)
+            end
+            local worth = (gain >= bar) or (chance >= CONFIG.minHuntChance)
+            if worth then
+                local score = gain + chance * 1000   -- a hunt vehicle outranks raw income
+                if not best or score > best.score then
+                    best = { name = name, ev = CASE_EV[name] or 0, count = count, score = score }
+                end
+            else
+                skipped = skipped + count
+            end
         end
     end
-    if not best then return false end
+    if not best then
+        if skipped > 0 then
+            STATE.caseNote = ("%d owned cases held back - none beats %s/s"):format(skipped, fmt(bar))
+        end
+        return false
+    end
     local got = rf("RequestOpenCase", best.name)
     if type(got) == "string" then
         STATE.opens = STATE.opens + 1
@@ -942,11 +1000,24 @@ end
 
 local function openOnce()
     local room, used, cap = storageRoom()
-    if room <= CONFIG.storageFloor then
+    local c = census()
+    local floorValue = (c.weakest and gunBaseValue(c.weakest.gun) or 0) * CONFIG.beatFactor
+    if #c.free > 0 then floorValue = 0 end
+    local plan = rebirthPlan()
+    local hunting = CONFIG.huntRebirth and not plan.ready and reserved() > 0
+    local huntWant = hunting and huntRarities() or {}
+
+    -- A hunt needs a HANDFUL of slots, not a fifth of the inventory. Holding a
+    -- ~7-open hunt for the next rebirth behind the same guard that stops routine
+    -- opening throws away the single most valuable action available, so the
+    -- guard tightens to a few free slots while a hunt is on.
+    local floorRoom = hunting and math.min(CONFIG.storageFloor, 8 / math.max(cap, 1))
+                               or CONFIG.storageFloor
+    if room <= floorRoom then
         STATE.caseNote = ("storage %d/%d - waiting for auto-sell"):format(used, cap)
         return false
     end
-    if openOwned() then return true end
+    if openOwned(floorValue, huntWant) then return true end
     local pick, why, hunt = pickCase()
     if not pick then
         STATE.caseNote = why or "-"
@@ -1733,6 +1804,9 @@ end)
 cCase:Slider("Beat weakest by", 1, 5, CONFIG.beatFactor, function(v)
     CONFIG.beatFactor = v
 end)
+cCase:Slider("Min hunt chance %", 0.1, 20, CONFIG.minHuntChance, function(v)
+    CONFIG.minHuntChance = v
+end)
 
 local spend = win:Page("SPEND", UI.icon.coin)
 
@@ -1818,6 +1892,7 @@ task.spawn(function()
             "  " .. STATE.robuxNote,
             "PROGRESSION",
             "  " .. STATE.rebirthNote,
+            "  " .. STATE.huntNote,
             ("  sell: %s%s"):format(STATE.sellNote,
                 #parked > 0 and ("   PARKED: " .. table.concat(parked, ", ")) or ""),
         })
@@ -1841,9 +1916,9 @@ _G.__SPINGUN_DBG = {
     money = money, ruby = ruby, spins = spins, rebirth = rebirth,
     gunValue = gunValue, gunBaseValue = gunBaseValue, mutMult = mutMult, skinMult = skinMult,
     candidates = candidates, pickCase = pickCase, openOnce = openOnce,
-    caseGain = caseGain,
+    caseGain = caseGain, openOwned = openOwned,
     collectAll = collectAll, upgradePass = upgradePass, boardPrice = boardPrice,
-    openOwned = openOwned, storageRoom = storageRoom,
+    storageRoom = storageRoom,
     claimPass = claimPass, spinPass = spinPass, syncAutoSell = syncAutoSell,
     slotRate = function() return STATE.slotRate end,
     rebirthStep = rebirthStep, reqText = reqText, platform = platform,

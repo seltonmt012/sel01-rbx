@@ -8,7 +8,7 @@
 -- they are - they keep passing "Auto rebirth" and only this file decides what
 -- the player reads.
 --
--- 1380 entries.
+-- 1381 entries.
 
 return {
 	["%d Min"] = "%d мин",
@@ -527,6 +527,7 @@ return {
 	["Medium"] = "Средний",
 	["Merge pets"] = "Слить питомцев",
 	["Milestones + index"] = "Вехи + индекс",
+	["Min hunt chance %"] = "Мин. шанс охоты %",
 	["Min rarity"] = "Мин редкость",
 	["Mine phase (s)"] = "Фаза добычи (с)",
 	["Minimum rarity"] = "Мин редкость",
