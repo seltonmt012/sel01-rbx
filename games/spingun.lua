@@ -1047,9 +1047,20 @@ local function skinPass()
     end
 
     -- 2. load every free machine with the best candidate
-    d = data(collected > 0)
+    d = data(true)
     if not d then return end
+
+    -- A gun sitting INSIDE a machine still has no skin and no slot, so it passes
+    -- the candidate filter and - being the best of the spares, which is exactly
+    -- why it was loaded in the first place - it wins the ranking every pass. The
+    -- server then refuses it, nothing is recorded against it, and the next pass
+    -- picks it again: the free machines never got filled and the note read
+    -- "applied 0" forever. Every uuid already in a machine is excluded up front.
     local taken = {}
+    for _, m in pairs(d.SkinsMachines or {}) do
+        if m.Gun then taken[m.Gun] = true end
+    end
+
     for name, m in pairs(d.SkinsMachines or {}) do
         if m.Owned and not m.Gun then
             local best, bestScore
