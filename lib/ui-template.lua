@@ -51,7 +51,7 @@ local plr = Players.LocalPlayer
 
 local UI = {}
 
-UI.VERSION = "3.5"
+UI.VERSION = "3.6"
 UI.BRAND = "SELUX"
 UI.DISCORD = "discord.gg/ARdpzFuKMm"
 UI.REPO = "seltonmt012/sel01-rbx"
@@ -1050,6 +1050,184 @@ function UI.configReset(alias)
 	record.saved = nil
 	record.note = "zurückgesetzt"
 	return true
+end
+
+--------------------------------------------------------------------------------
+-- Sharing a config: one code out, one code in
+--------------------------------------------------------------------------------
+--
+-- No game script gains a line for this, for the same reason none gained one for
+-- saving: UI.config already holds the live table AND the script's own defaults,
+-- and cfgMerge already knows how to take a foreign table safely. Export and
+-- import are those two pieces pointed at a string instead of at a file.
+--
+-- WHAT IS IN THE CODE IS THE DIFFERENCE TO THE DEFAULTS, not the whole table.
+-- Two reasons, and the second matters more than the size:
+--
+--   * size - a full config serialises to about 2 KB, which base64 turns into
+--     2.7 KB and Discord will not take in one message. What somebody actually
+--     changed is usually a handful of keys.
+--   * meaning - the code says "these are the switches I moved". A later update
+--     that changes a default therefore still reaches whoever imports it, instead
+--     of being pinned to the exporter's version of the defaults forever.
+--
+-- The walk is over DEFAULTS, never over the live table, so a key that is not
+-- part of the script's declared config cannot leave the machine even if
+-- something else put it there.
+local function cfgDiff(live, defaults, depth)
+	depth = depth or 1
+	local out, n = {}, 0
+	for k, base in pairs(defaults) do
+		local now = live[k]
+		if type(base) == "table" then
+			if type(now) == "table" and depth < CFG_DEPTH then
+				local sub, count = cfgDiff(now, base, depth + 1)
+				if count > 0 then
+					out[k] = sub
+					n = n + count
+				end
+			end
+		elseif now ~= nil and now ~= base and type(now) == type(base)
+			and cfgLiteral(now) ~= nil then
+			out[k] = now
+			n = n + 1
+		end
+	end
+	return out, n
+end
+
+-- Base64, because the payload is Lua source and Discord's markdown eats it:
+-- underscores and asterisks in a raw table literal come out the other side as
+-- italics with characters missing, and the paste is silently corrupt. Roblox has
+-- no base64 of its own, so here it is.
+local B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+local B64DEC
+
+local function b64encode(data)
+	local out, i = {}, 1
+	while i <= #data do
+		local a = string.byte(data, i)
+		local b = string.byte(data, i + 1)
+		local c = string.byte(data, i + 2)
+		local bits = a * 65536 + (b or 0) * 256 + (c or 0)
+		local c1 = math.floor(bits / 262144) % 64
+		local c2 = math.floor(bits / 4096) % 64
+		local c3 = math.floor(bits / 64) % 64
+		local c4 = bits % 64
+		out[#out + 1] = string.sub(B64, c1 + 1, c1 + 1)
+		out[#out + 1] = string.sub(B64, c2 + 1, c2 + 1)
+		out[#out + 1] = b and string.sub(B64, c3 + 1, c3 + 1) or "="
+		out[#out + 1] = c and string.sub(B64, c4 + 1, c4 + 1) or "="
+		i = i + 3
+	end
+	return table.concat(out)
+end
+
+local function b64decode(text)
+	if not B64DEC then
+		B64DEC = {}
+		for i = 1, 64 do B64DEC[string.sub(B64, i, i)] = i - 1 end
+	end
+	-- Everything that is not an alphabet character goes, which is what makes a
+	-- code survive being wrapped across lines by Discord or a forum post.
+	text = string.gsub(text, "[^A-Za-z0-9+/=]", "")
+	local out, i = {}, 1
+	while i <= #text do
+		local s1 = string.sub(text, i, i)
+		local s2 = string.sub(text, i + 1, i + 1)
+		local s3 = string.sub(text, i + 2, i + 2)
+		local s4 = string.sub(text, i + 3, i + 3)
+		local c1, c2 = B64DEC[s1], B64DEC[s2]
+		if c1 == nil or c2 == nil then return nil end
+		local c3, c4 = B64DEC[s3], B64DEC[s4]
+		local bits = c1 * 262144 + c2 * 4096 + (c3 or 0) * 64 + (c4 or 0)
+		out[#out + 1] = string.char(math.floor(bits / 65536) % 256)
+		if s3 ~= "" and s3 ~= "=" then
+			out[#out + 1] = string.char(math.floor(bits / 256) % 256)
+		end
+		if s4 ~= "" and s4 ~= "=" then
+			out[#out + 1] = string.char(bits % 256)
+		end
+		i = i + 4
+	end
+	return table.concat(out)
+end
+
+-- Not a hash for security - the merge below is what makes a hostile code
+-- harmless. This only catches a TRUNCATED paste, which is the realistic failure:
+-- somebody copies half a wrapped line and a partial config imports cleanly
+-- because every key in it happens to be valid. No bit operations, so the same
+-- code runs under Luau and under the plain 5.4 the test harness uses.
+local function cfgSum(text)
+	local h = 7
+	for i = 1, #text do
+		h = (h * 31 + string.byte(text, i)) % 1000000007
+	end
+	return h
+end
+
+UI.SHARE_PREFIX = "SELUX1."
+
+-- Returns code, count  or  nil, reason
+function UI.configExport(alias)
+	local record = cfgRecord(alias)
+	if not record then return nil, "unknown" end
+	local diff, count = cfgDiff(cfgView(record), record.defaults, 1)
+	if count == 0 then return nil, "unchanged" end
+	local body = cfgSerialise(diff)
+	local payload = record.alias .. "\1" .. tostring(cfgSum(body)) .. "\1" .. body
+	return UI.SHARE_PREFIX .. b64encode(payload), count
+end
+
+-- Returns true, count  or  false, reason
+--
+-- The reason is never swallowed. A code from another script merges to exactly
+-- nothing - every key is unknown, so cfgMerge correctly ignores all of it - and
+-- from the outside that is a button that does nothing. The alias is checked
+-- first so it can say WHICH script the code belongs to.
+function UI.configImport(code, alias)
+	local record = cfgRecord(alias)
+	if not record then return false, "unknown" end
+	if type(code) ~= "string" then return false, "empty" end
+	code = string.gsub(code, "%s", "")
+	if code == "" then return false, "empty" end
+	if string.sub(code, 1, #UI.SHARE_PREFIX) ~= UI.SHARE_PREFIX then
+		return false, "prefix"
+	end
+
+	local raw = b64decode(string.sub(code, #UI.SHARE_PREFIX + 1))
+	if not raw then return false, "garbled" end
+	local gotAlias, gotSum, body = string.match(raw, "^([^\1]*)\1([^\1]*)\1(.*)$")
+	if not gotAlias then return false, "garbled" end
+	if gotAlias ~= record.alias then return false, "wrong:" .. gotAlias end
+	if tostring(cfgSum(body)) ~= gotSum then return false, "truncated" end
+	if string.sub(body, 1, 1) ~= "{" then return false, "garbled" end
+
+	local chunk
+	if setfenv and loadstring then
+		chunk = loadstring("return " .. body)
+		if chunk then pcall(setfenv, chunk, {}) end
+	elseif load then
+		local made, err = load("return " .. body, "selux-share", "t", {})
+		chunk = made
+	end
+	if not chunk then return false, "garbled" end
+	local fine, value = pcall(chunk)
+	if not fine or type(value) ~= "table" then return false, "garbled" end
+
+	-- The same merge the saved file goes through, and it is the whole security
+	-- story: only keys this script declares, only where the type matches, only
+	-- boolean / number / string and tables of them, three levels deep, loaded in
+	-- an empty environment. A hostile code can move your own sliders and nothing
+	-- else - it cannot define a function, reach an Instance or run anything.
+	local before = cfgSerialise(cfgView(record))
+	cfgMerge(record.live, value, record.defaults, 1)
+	local after = cfgSerialise(cfgView(record))
+
+	local _, count = cfgDiff(value, record.defaults, 1)
+	if after == before then return true, 0 end
+	if UI.saveOn then pcall(UI.configSave, record.alias, true) end
+	return true, count
 end
 
 -- The flag itself: the repo copy for everybody, the workspace copy while
@@ -2957,6 +3135,51 @@ function UI.Window(options)
 				}
 			end
 
+			---------------------------------------------------------- Input
+			--
+			-- Added for the config share code and deliberately narrow: one line of
+			-- text with a placeholder, no validation, no submit handling. The
+			-- placeholder goes through setPlaceholder rather than being written
+			-- directly, or it freezes in whatever language it was born in.
+			function card:Input(placeholder, onChange)
+				local r = row(nil, nil, 0)
+				r.title:Destroy()
+				r.inner.Size = UDim2.new(1, -22, 0, 34)
+				r.inner.AutomaticSize = Enum.AutomaticSize.None
+
+				local box = frame(r.inner, UDim2.new(1, 0, 0, 34), nil, UI.theme.void)
+				box.ZIndex = 5
+				corner(box, 8)
+				stroke(box, UI.theme.band, 0)
+
+				local input = Instance.new("TextBox")
+				input.Size = UDim2.new(1, -20, 1, 0)
+				input.Position = UDim2.fromOffset(10, 0)
+				input.BackgroundTransparency = 1
+				input.ClearTextOnFocus = false
+				input.Text = ""
+				setPlaceholder(input, placeholder or "")
+				input.Font = UI.font.mono
+				input.TextSize = UI.small(11)
+				input.TextColor3 = UI.theme.text
+				input.PlaceholderColor3 = UI.theme.dimmer
+				input.TextXAlignment = Enum.TextXAlignment.Left
+				input.TextTruncate = Enum.TextTruncate.AtEnd
+				input.ZIndex = 6
+				input.Parent = box
+
+				if onChange then
+					input:GetPropertyChangedSignal("Text"):Connect(function()
+						task.spawn(onChange, input.Text)
+					end)
+				end
+				return {
+					get = function() return input.Text end,
+					set = function(a, b) input.Text = tostring(arg(a, b) or "") end,
+					box = input,
+				}
+			end
+
 			---------------------------------------------------------- Readout
 			function card:Readout(lines, colourFor)
 				local count = lines or 10
@@ -3113,6 +3336,72 @@ function UI.Window(options)
 					cfgState.set("Auf Standard zurückgesetzt - Script neu starten.")
 				end
 			end, UI.theme.bad)
+		end
+
+		-- Sharing. Third card rather than more buttons on the first: exporting is
+		-- not maintenance, it is something you do once and hand to somebody else,
+		-- and it needs a paste field that the other two cards have no use for.
+		if record then
+			local shareCard = page:Card("TEILEN", 0):Icon(UI.icon.loop)
+			shareCard:Label("Gib deine Einstellungen als Code weiter. Der Code enthält nur, was du gegenüber dem Standard geändert hast, und er gilt nur für dieses eine Script.")
+			local shareState = shareCard:Label("")
+			local shareBox = shareCard:Input("SELUX1....")
+
+			shareCard:Button("Export - Code erzeugen", function()
+				local code, count = UI.configExport(record.alias)
+				if not code then
+					shareState.set(count == "unchanged"
+						and "Nichts zu teilen - alles steht noch auf Standard."
+						or "Export nicht möglich.")
+					return
+				end
+				shareBox.set(code)
+				-- The clipboard is a convenience, not the feature: setclipboard is
+				-- missing on some executors, so the code is in the box either way
+				-- and the line below says which of the two happened.
+				local copied = false
+				if setclipboard then copied = pcall(setclipboard, code) end
+				shareState.set(UI.tf(copied
+					and "%d Einstellungen kopiert - Code steckt in der Zwischenablage."
+					or "%d Einstellungen - Code steht im Feld, von dort kopieren.", count))
+			end, UI.theme.good)
+
+			shareCard:Button("Import - Code aus dem Feld übernehmen", function()
+				local ok, info = UI.configImport(shareBox.get(), record.alias)
+				if not ok then
+					local wrong = type(info) == "string" and string.match(info, "^wrong:(.+)$")
+					if wrong then
+						shareState.set(UI.tf("Dieser Code gehört zu %s, nicht zu diesem Script.", wrong))
+					elseif info == "truncated" then
+						shareState.set("Code ist unvollständig - beim Kopieren abgeschnitten.")
+					elseif info == "prefix" then
+						shareState.set("Das ist kein Selux-Code.")
+					elseif info == "empty" then
+						shareState.set("Erst einen Code in das Feld einfügen.")
+					else
+						shareState.set("Code nicht lesbar.")
+					end
+					return
+				end
+				if info == 0 then
+					shareState.set("Der Code enthält nichts, was hier anders wäre.")
+					return
+				end
+				shareState.set(UI.tf("%d Einstellungen übernommen - Panel wird neu aufgebaut.", info))
+				-- Same reason as reset: nothing maps a switch on screen back to a
+				-- CONFIG key, so the only honest repaint is to build the panel again.
+				local reload = _G.__SEL and _G.__SEL.reload
+				if type(reload) == "function" then
+					task.delay(0.6, function()
+						pcall(function() window:Destroy() end)
+						pcall(reload)
+					end)
+				else
+					shareState.set(UI.tf("%d Einstellungen übernommen - Script neu starten.", info))
+				end
+			end, UI.theme.warn)
+
+			shareCard:Label("Ein fremder Code kann nur Schalter setzen, die dieses Script selbst kennt, und nur mit dem passenden Typ. Er wird ohne Umgebung geladen und kann nichts ausführen.")
 		end
 
 		-- The two switches that are NOT per script: they belong to the executor and

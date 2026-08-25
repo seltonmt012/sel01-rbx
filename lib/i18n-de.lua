@@ -8,7 +8,7 @@
 -- they are - they keep passing "Auto rebirth" and only this file decides what
 -- the player reads.
 --
--- 1381 entries.
+-- 1398 entries.
 
 return {
 	["* means scoped, _ means crouching"] = "* heißt gezoomt, _ heißt geduckt",
