@@ -380,6 +380,152 @@ local function byAlias(alias)
 end
 
 --------------------------------------------------------------------------------
+-- the key system
+--------------------------------------------------------------------------------
+--
+-- Entries carrying `"paid": true` are not fetched from the repo at all - their
+-- source never goes there, because index.json names every file and a path that
+-- is written down is not hidden. They come from the key API instead, and only
+-- against a key that API issued itself.
+--
+-- ONE key for ALL paid games, not one per script: the alias is just a parameter
+-- on the request. Nothing about the entry point changes - the same single
+-- loadstring, the same loader, the same registry with free and paid side by
+-- side.
+--
+-- Everything here degrades quietly. No key config in the registry, no `paid`
+-- flags, or an unreachable API and the loader behaves exactly as it did before.
+
+local KEY_FILE = "selux-key.txt"
+
+local function keyConfig()
+    local cfg = INDEX.key
+    if type(cfg) ~= "table" then return nil end
+    if type(cfg.api) ~= "string" or cfg.api == "" then return nil end
+    return cfg
+end
+
+-- Stable per installation and present on every executor, unlike `gethwid`, which
+-- several do not have at all. It is hashed on the server, never stored raw.
+local function hwid()
+    local ok, id = pcall(function()
+        return game:GetService("RbxAnalyticsService"):GetClientId()
+    end)
+    if ok and type(id) == "string" and #id > 4 then return id end
+    local ok2, id2 = pcall(function() return gethwid and gethwid() end)
+    if ok2 and type(id2) == "string" and #id2 > 4 then return id2 end
+    -- Last resort. It still binds the key to *something*, and a player whose
+    -- executor exposes neither is better off with a working panel.
+    return "fallback-" .. tostring(game.PlaceId)
+end
+
+-- The stored expiry is for the countdown ONLY. A client clock is not evidence -
+-- the server holds the real deadline as the KV record's own lifetime, so a user
+-- winding the PC back gets a refusal, not four more hours.
+local function readKey()
+    local raw = readFlag(KEY_FILE)
+    if type(raw) ~= "string" or raw == "" then return nil end
+    local key, exp = string.match(raw, "^([^;]+);?(%d*)$")
+    if not key or key == "" then return nil end
+    return key, tonumber(exp) or 0
+end
+
+local function saveKey(key, expires)
+    pcall(writefile, KEY_FILE, tostring(key) .. ";" .. tostring(expires or 0))
+end
+
+local function encode(text)
+    local ok, out = pcall(function() return HttpService:UrlEncode(tostring(text)) end)
+    if ok then return out end
+    return tostring(text)
+end
+
+-- Asks the server whether a key is good, and binds it to this machine the first
+-- time it is used. Returns ok, expiry-or-reason.
+local function redeem(key)
+    local cfg = keyConfig()
+    if not cfg then return false, "no key config in the registry" end
+    local body = httpGet(cfg.api .. "/redeem?k=" .. encode(key) .. "&h=" .. encode(hwid()))
+    if not body then return false, "key server unreachable" end
+    local ok, data = pcall(function() return HttpService:JSONDecode(body) end)
+    if not ok or type(data) ~= "table" then return false, "bad reply from key server" end
+    if data.ok then return true, tonumber(data.expires) or 0 end
+    return false, tostring(data.error or "invalid key")
+end
+
+local keyWindow
+
+-- Shown instead of the game script. It is the same panel template every script
+-- uses, so the hub has exactly one look.
+local function keyPanel(entry, reason)
+    local cfg = keyConfig()
+    local U = ui()
+    if not U or not cfg then
+        notify("key required for " .. tostring(entry.alias) .. " - " .. tostring(reason), 12)
+        return
+    end
+    if keyWindow then pcall(function() keyWindow:Destroy() end) end
+
+    local win = U.Window({
+        name = "SeluxKeyPanel",
+        title = "SE", accentTitle = "LUX", subtitle = "key",
+        badge = "🔑", width = 820, height = 582,
+    })
+    keyWindow = win
+
+    local page = win:Page("KEY", U.icon.shield)
+    local card = page:Card(string.upper(tostring(entry.name or entry.alias)), 0):Accent()
+    card:Label("Dieses Skript ist geschützt. Hol dir einen Key über einen der "
+        .. "beiden Links, füg ihn unten ein und drück EINLÖSEN. Ein Key gilt "
+        .. tostring(cfg.hours or 4) .. " Stunden und schaltet ALLE geschützten Skripte frei.")
+
+    local status = page:Card("STATUS", 0):Readout(4)
+    local function say(line, extra)
+        pcall(function() status:set({ line, extra or "", "", "" }) end)
+    end
+    say(reason and ("  " .. reason) or "  Kein gültiger Key gefunden.")
+
+    local links = page:Card("SCHRITT 1 - KEY HOLEN", 1)
+    for _, link in ipairs(type(cfg.links) == "table" and cfg.links or {}) do
+        if type(link) == "table" and type(link.url) == "string" then
+            links:Button(tostring(link.label or "LINK"), function()
+                -- openUrl walks every opener an executor might have and only
+                -- falls back to the clipboard - it says which one happened.
+                local how = U.openUrl(link.url)
+                say("  " .. tostring(link.label) .. " geöffnet (" .. tostring(how) .. ")",
+                    how == "clipboard" and "  Link liegt in der Zwischenablage - im Browser einfügen." or "")
+            end)
+        end
+    end
+
+    local enter = page:Card("SCHRITT 2 - EINLÖSEN", 2)
+    local box = enter:Input("SELUX-XXXXX-XXXXX-XXXXX")
+    enter:Button("EINLÖSEN", function()
+        local typed = box.get and box.get() or ""
+        typed = string.gsub(tostring(typed), "%s", "")
+        if typed == "" then say("  Bitte erst den Key einfügen.") return end
+        say("  Prüfe...")
+        local ok, info = redeem(typed)
+        if not ok then say("  Abgelehnt: " .. tostring(info)) return end
+        saveKey(typed, info)
+        say("  Key angenommen. Skript wird geladen...")
+        task.delay(0.4, function()
+            pcall(function() win:Destroy() end)
+            keyWindow = nil
+            if _G.__SEL and _G.__SEL.loadGame then _G.__SEL.loadGame(entry, "key") end
+        end)
+    end, U.theme.good)
+    enter:Button("Key vergessen", function()
+        pcall(function() if delfile and isfile and isfile(KEY_FILE) then delfile(KEY_FILE) end end)
+        pcall(writefile, KEY_FILE, "")
+        say("  Gespeicherter Key gelöscht.")
+    end, U.theme.bad)
+
+    pcall(function() win:Home() end)
+    win:Refresh()
+end
+
+--------------------------------------------------------------------------------
 -- loading a game script
 --------------------------------------------------------------------------------
 
@@ -394,7 +540,37 @@ local function loadGame(entry, why)
     end
     if not entry then return false end
 
-    local body, from = fetch(entry.file)
+    local body, from
+    if entry.paid then
+        -- A paid script is never in the repo, so there is nothing to fall back
+        -- to and nothing to cache: the key API is the only source. If the key is
+        -- missing, expired or bound elsewhere the panel goes up instead and the
+        -- game script is simply not loaded.
+        local cfg = keyConfig()
+        if not cfg then
+            notify("'" .. tostring(entry.alias) .. "' is key-protected but the registry has no key config", 10)
+            return false
+        end
+        local key = readKey()
+        if not key then
+            keyPanel(entry, "Kein Key gespeichert.")
+            return false
+        end
+        local ok, info = redeem(key)
+        if not ok then
+            keyPanel(entry, tostring(info))
+            return false
+        end
+        body = httpGet(cfg.api .. "/s?a=" .. encode(entry.alias)
+            .. "&k=" .. encode(key) .. "&h=" .. encode(hwid()))
+        from = "key"
+        if not body or #body < 32 then
+            keyPanel(entry, "Key server lieferte nichts.")
+            return false
+        end
+    else
+        body, from = fetch(entry.file)
+    end
     if not body then
         notify("could not fetch " .. tostring(entry.file), 8)
         return false
@@ -499,6 +675,18 @@ _G.__SEL = {
     game = nil,
     fetch = fetch,
     load = function(alias) return loadGame(alias, "manual") end,
+    -- The key panel calls this to retry the load once a key is accepted, and it
+    -- has to go through the handle rather than the local: keyPanel is defined
+    -- ABOVE loadGame, so the upvalue would still be nil when it runs. Same trap
+    -- as every shared helper in games/ that was added below its first caller.
+    loadGame = loadGame,
+    key = {
+        read = readKey,
+        redeem = redeem,
+        hwid = hwid,
+        panel = keyPanel,
+        forget = function() pcall(writefile, KEY_FILE, "") end,
+    },
     list = function()
         local out = {}
         for _, entry in ipairs(INDEX.games) do

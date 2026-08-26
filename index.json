@@ -2,6 +2,13 @@
 	"hub": "sel01",
 	"version": 1,
 	"ui": "lib/ui-template.lua",
+	"key": {
+		"api": "https://key.kryon.run",
+		"hours": 4,
+		"links": [
+			{ "label": "LINKVERTISE", "url": "https://link-target.net/185150/6YiN1NcVDCdp" }
+		]
+	},
 	"games": [
 		{
 			"alias": "lootevo",
@@ -245,6 +252,18 @@
 			"detect": "local rs = game:GetService('ReplicatedStorage') local sh = rs:FindFirstChild('shared') local cl = rs:FindFirstChild('client') if not (sh and cl) then return false end return sh:FindFirstChild('Remotes') ~= nil and cl:FindFirstChild('ClientPlayerData') ~= nil and sh:FindFirstChild('Fish', true) ~= nil"
 		},
 		{
+			"alias": "stealegg",
+			"name": "Steal An Egg",
+			"file": "games/stealegg.lua",
+			"places": [
+				107778070777162
+			],
+			"status": "ok",
+			"paid": true,
+			"note": "real anti-cheat: walking only, no teleport/fly/noclip/speed writes",
+			"detect": "local rs = game:GetService('ReplicatedStorage') local n = rs:FindFirstChild('Network') if not n then return false end return n:FindFirstChild('Eggs: RequestAreaEggCarry') ~= nil and n:FindFirstChild('Treadmills: RequestUpgrade') ~= nil"
+		},
+		{
 			"alias": "eggfarm",
 			"name": "Grow a Chicken Fighter",
 			"file": "games/eggfarm.lua",
@@ -412,6 +431,17 @@
 			"status": "ok",
 			"note": "the visible character is an R6 decoy - the real body is workspace.MercPlayers.MercHitboxes_<name>; the game ships an IntegrityController that REPORTS over SessionTelemetry, so the script hooks no metamethod, no FireServer, writes no RecoilSpring and parents no BodyMover",
 			"detect": "local rs = game:GetService('ReplicatedStorage') if game.Workspace:FindFirstChild('MercPlayers') == nil then return false end local reg = rs:FindFirstChild('Registries') local m = rs:FindFirstChild('Modules') local c = m and m:FindFirstChild('Client') local ctl = c and c:FindFirstChild('Controllers') return reg ~= nil and reg:FindFirstChild('Weapons') ~= nil and ctl ~= nil and ctl:FindFirstChild('IntegrityController') ~= nil"
+		},
+		{
+			"alias": "cutgrass",
+			"name": "+1 Cut Grass Adventure",
+			"file": "games/cutgrass.lua",
+			"places": [
+				90086669327265
+			],
+			"status": "ok",
+			"note": "this game has a REAL anti-cheat: twenty honeypot remotes in DataService.RE where one call is an instant record at risk 100, plus speed/teleport and uncut-grass-traversal checks. The script never warps, never writes WalkSpeed, refuses the honeypot names by name at runtime, and stops itself on AntiCheatService.IncidentWarning",
+			"detect": "local rs = game:GetService('ReplicatedStorage') local s = rs:FindFirstChild('Shared') local c = s and s:FindFirstChild('Configs') return c ~= nil and c:FindFirstChild('Grass') ~= nil and c:FindFirstChild('Zone') ~= nil and c:FindFirstChild('AntiCheat') ~= nil and game.Workspace:FindFirstChild('Zones') ~= nil"
 		}
 	]
 }

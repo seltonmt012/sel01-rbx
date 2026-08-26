@@ -120,13 +120,36 @@
     file uses the same list plus its own POV rig, so the wall check answers the
     question the shot asks.
 
-  * **The camera write STICKS.** Measured at `RenderPriority.Camera + 1` with
-    `CameraType.Scriptable`: a 15 deg yaw write read **0.00 deg** against the
-    wanted CFrame and **14.99 deg** against the previous one, three RenderStepped
-    later. The same write issued OUTSIDE a render step was reverted to 0.03 deg -
-    which is the false-negative that would have sent this to `mousemoverel` for
-    no reason, so it was tested the right way round. The mouse path is still a
-    dropdown, for the update that turns the controller authoritative.
+  * **THE CAMERA CONTROLLER IS AUTHORITATIVE. Camera writes do NOTHING here, and
+    the first measurement of this said the opposite.** Worth writing down because
+    the wrong test looks exactly like a right one:
+
+        WRONG - write `want` every frame from a Camera+1 binding, then read the
+        camera back and compare. It matches perfectly, because you are painting
+        over the controller every single frame. This is what was measured first
+        and it produced the claim "the write sticks".
+
+        RIGHT - (a) write a small nudge each frame and compare what you LEFT
+        against what the NEXT frame finds, and (b) write once, unbind, and see
+        whether it survives.
+
+    Measured properly: a 0.5 deg nudge came back **0.4977 deg** different on the
+    next frame - a 100% revert, every frame, over 281 samples. A single 20 deg
+    write read **19.94 deg away from the target** and **0.08 deg from where it
+    started** five frames later. The controller rebuilds the CFrame from angles
+    it keeps itself, exactly like BloxStrike.
+
+    The symptom is the BloxStrike signature: the assist reports plenty of degrees
+    per second of work while the view never moves, so the panel looks busy and
+    nothing happens.
+
+  * **So the view is moved with `mousemoverel`, and it persists.** Measured:
+    `mousemoverel(60, 0)` turned **-2.47 deg** of yaw, `(-60, 0)` turned
+    **+2.47**, `(200, 0)` turned **-8.08**, and `(0, 30)` turned **-1.05 deg** of
+    pitch - about **0.041 deg per pixel**, still there a full second later.
+    Positive x turns right and lowers yaw; positive y looks down. `aimPath`
+    therefore defaults to Mouse; the Camera option is kept only so the difference
+    can be demonstrated, and it is labelled as doing nothing.
 
   * **The shot state is published by the client and needs no inferring.**
     `GunController.Weapon` carries `MagAmmo`, `MaxMagSize`, `FireRate`,
@@ -249,11 +272,18 @@ local CONFIG = {
 	aimReady   = true,     -- only assist while the gun can actually fire
 	aimAds     = "Always",
 	aimCurve   = "Ease out",
-	aimPath    = "Camera", -- Camera | Mouse
+	aimPath    = "Mouse",  -- Mouse | Camera  (Camera does NOTHING here - see below)
+	-- Weapon = drive the BULLET onto the target, Crosshair = the old, wrong way.
+	aimAlign   = "Weapon",
 
-	aimFov     = 120,
-	aimSmoothH = 25,
-	aimSmoothV = 25,
+	-- MEASURED over 18s on a live match, 340 target-frames: the MEDIAN enemy sits
+	-- 597 px from the crosshair, and a 120 px circle passed only 39 of them while
+	-- 143 fell outside it. Nothing was blocking the assist - the window was simply
+	-- far smaller than the distances this game actually produces. 250 is the value
+	-- that turns "it does nothing" into "it helps", without becoming a snap.
+	aimFov     = 250,
+	aimSmoothH = 14,
+	aimSmoothV = 16,
 
 	aimFire    = false,
 	aimHitPct  = 100,
@@ -282,6 +312,9 @@ local CONFIG = {
 	-- Camera side ONLY. This never touches RecoilSpring, which is the field the
 	-- anticheat samples every 0.35s.
 	rcs        = false,
+	-- Predicted uses the game's OWN per-weapon formula (read out of FPSController
+	-- line 1110). Measured is the generic residual method and is the fallback.
+	rcsMode    = "Predicted",
 	rcsPct     = 70,
 	rcsMaxDeg  = 3,
 	rcsHoriz   = true,
@@ -328,7 +361,7 @@ end
 
 local PRESETS = {
 	["Legit"] = {
-		aimFov = 45, aimSmoothH = 40, aimSmoothV = 55, aimPart = "Head",
+		aimFov = 110, aimSmoothH = 30, aimSmoothV = 40, aimPart = "Head",
 		aimFire = false, aimVisible = true, aimCurve = "Human",
 		trigDelayMin = 110, trigDelayMax = 240, trigRefireMs = 200, trigHitPct = 85,
 		rcs = true, rcsPct = 45, rcsFirst = 2,
@@ -338,7 +371,7 @@ local PRESETS = {
 		humMoveFov = 45,
 	},
 	["Normal"] = {
-		aimFov = 120, aimSmoothH = 25, aimSmoothV = 25, aimPart = "Head",
+		aimFov = 250, aimSmoothH = 14, aimSmoothV = 16, aimPart = "Head",
 		aimFire = false, aimVisible = true, aimCurve = "Ease out",
 		trigDelayMin = 40, trigDelayMax = 110, trigRefireMs = 60, trigHitPct = 100,
 		rcs = true, rcsPct = 70, rcsFirst = 1,
@@ -348,7 +381,7 @@ local PRESETS = {
 		humMoveFov = 70,
 	},
 	["Raw"] = {
-		aimFov = 400, aimSmoothH = 2, aimSmoothV = 2, aimPart = "Head",
+		aimFov = 600, aimSmoothH = 2, aimSmoothV = 2, aimPart = "Head",
 		aimFire = true, aimVisible = true, aimCurve = "Linear",
 		trigDelayMin = 0, trigDelayMax = 10, trigRefireMs = 30, trigHitPct = 100,
 		rcs = true, rcsPct = 100, rcsFirst = 0,
@@ -365,7 +398,7 @@ local STATE = {
 	target     = "-", targetPart = "-",
 	trigHits   = 0, trigOn = false,
 	underCross = "-",
-	aimDps     = 0, aimDpsPeak = 0,
+	aimDps     = 0, aimDpsPeak = 0, gunOffset = -1, aimError = 0, aimPending = 0,
 	lastKey    = "-",
 	paused     = "",
 	deployed   = false,
@@ -378,7 +411,7 @@ local STATE = {
 	chams      = "-",
 	kickPeak   = 0, kickNow = 0, kickN = 0, kickHoriz = 0,
 	sens       = 0, sensYaw = 0,
-	rcsApplied = 0,
+	rcsApplied = 0, rcsUnit = 0, rcsUnitN = 0, rcsDebt = 0, rcsPredV = 0,
 	dmgBody = 0, dmgHead = 0, shotsToBody = 0,
 }
 
@@ -939,18 +972,57 @@ end
 -- `{nil, CoreGui}` and ipairs stops at the hole, so CoreGui is never tried.
 
 local chamsFolder = nil
-local chamsBroken = nil
+local chamsBroken = nil     -- kept only so old reads stay valid; never set now
+local chamsReason = nil     -- why the last attempt failed, for the panel
+local chamsFails, chamsNextTry = 0, 0
 
+-- NEVER LATCH THIS PERMANENTLY. That was two separate bugs, both reported.
+--
+-- First version gave up on the FIRST failure. The very first Instance touch of a
+-- run throws "The current thread cannot access 'Instance' (lacking capability
+-- Plugin)" - the known once-per-run identity hiccup - so the chams toggle sat
+-- there doing nothing for the whole session while creating a Highlight by hand
+-- seconds later worked every time. Reported as "chams do not work".
+--
+-- Second version allowed five tries and then latched. That is still wrong,
+-- because a MAP OR LOBBY CHANGE throws on every Instance touch for as long as it
+-- lasts: five failures inside a couple of seconds, and the chams were dead for
+-- the rest of the session again. Reported as "in a new lobby the chams are gone
+-- again".
+--
+-- So there is no permanent state any more. The failure reason is kept for the
+-- panel to show, the retry backs off to a ten second ceiling, and it never stops
+-- trying. One Instance.new attempt every ten seconds costs nothing, and an
+-- executor that genuinely cannot do it simply keeps saying so.
+local function chamsGiveUp(err)
+	chamsFails = chamsFails + 1
+	local wait = (chamsFails <= 2) and 0.35 or math.min(2 ^ (chamsFails - 2), 10)
+	chamsNextTry = os.clock() + wait
+	chamsReason = tostring(err):sub(1, 60)
+end
+
+-- A READ THAT THROWS IS NOT PROOF THE FOLDER IS GONE, and treating it as such is
+-- what destroyed the chams over and over.
+--
+-- `.Parent` on an instance living under `gethui()` can throw on its own - the
+-- comment two functions down already said so. The first version returned false
+-- when the pcall failed, chamsRoot then took that as "rebuild", and rebuild
+-- DESTROYED the folder every other frame together with every Highlight inside
+-- it. From the outside: the chams keep disappearing, and the frame spikes from
+-- tearing down and re-creating instances every frame made the aim feel worse
+-- while it was happening. Both were the same defect.
+--
+-- So a throw means UNKNOWN, and unknown keeps what we have.
 local function chamsAlive()
-	local ok, alive = pcall(function()
-		return chamsFolder ~= nil and chamsFolder.Parent ~= nil
-	end)
-	return ok and alive == true
+	if chamsFolder == nil then return false end
+	local ok, alive = pcall(function() return chamsFolder.Parent ~= nil end)
+	if not ok then return true end       -- cannot tell; do not tear anything down
+	return alive == true
 end
 
 local function chamsRoot()
 	if chamsAlive() then return chamsFolder end
-	if chamsBroken then return nil end
+	if os.clock() < chamsNextTry then return nil end
 
 	local roots = {}
 	local ok, hidden = pcall(function() return gethui and gethui() or nil end)
@@ -960,8 +1032,12 @@ local function chamsRoot()
 	for _, root in ipairs(roots) do
 		local made = nil
 		pcall(function()
+			-- REUSE, never rebuild. A stale folder from a PREVIOUS run is cleared
+			-- once, at load, by the teardown block further up - not here, where
+			-- doing it means throwing away the container the current run is using
+			-- and every Highlight parented to it.
 			local previous = root:FindFirstChild("SeluxTTKChams")
-			if previous then previous:Destroy() end
+			if previous then made = previous return end
 			local folder = Instance.new("Folder")
 			folder.Name = "SeluxTTKChams"
 			folder.Parent = root
@@ -974,8 +1050,24 @@ local function chamsRoot()
 		end
 	end
 
-	chamsBroken = "no container this executor will accept"
+	chamsGiveUp("no container this executor will accept")
 	return nil
+end
+
+-- Clear a PREVIOUS run's container exactly once, here, before anything uses one.
+-- The old run's Highlights are orphaned - its render loop is dead - so they would
+-- otherwise stay on screen with nothing updating them, which is the same class of
+-- leak the Drawing pool has.
+for _, root in ipairs({ (function()
+	local ok, h = pcall(function() return gethui and gethui() or nil end)
+	return ok and h or nil
+end)(), CoreGui }) do
+	if root then
+		pcall(function()
+			local previous = root:FindFirstChild("SeluxTTKChams")
+			if previous then previous:Destroy() end
+		end)
+	end
 end
 
 pcall(chamsRoot)
@@ -1001,6 +1093,7 @@ local function chamFor(model)
 		if ok and alive then return hl end
 	end
 	if chamsBroken then return nil end
+	if os.clock() < chamsNextTry then return nil end
 	local folder = chamsRoot()
 	if not folder then return nil end
 	local made = nil
@@ -1013,10 +1106,10 @@ local function chamFor(model)
 		made = h
 	end)
 	if not ok or not made then
-		chamsBroken = tostring(err):sub(1, 60)
-		note("chams off: " .. tostring(chamsBroken))
+		chamsGiveUp(err)
 		return nil
 	end
+	chamsFails, chamsReason = 0, nil
 	highlights[model] = made
 	return made
 end
@@ -1249,8 +1342,16 @@ local function renderPass()
 				if not onScreen then
 					hideSet(set)
 					local hl = highlights[model]
-					if hl and not CONFIG.chams then
-						pcall(function() hl.Enabled = false end)
+					if hl then
+						if CONFIG.chams then
+							-- MercVisual_<name> is replaced on every respawn while
+							-- MercHitboxes_<name> survives, so an Adornee set once goes
+							-- stale and the cham silently stops drawing for that player.
+							local skin = visualOf(entry)
+							if skin then pcall(function() hl.Adornee = skin end) end
+						else
+							pcall(function() hl.Enabled = false end)
+						end
 					end
 				else
 					count = count + 1
@@ -1650,6 +1751,38 @@ local lastKillAt = 0
 local stickyModel = nil
 local aimWroteView = false
 
+-- DEAD TIME, AND WHY THE ASSIST SHOOK.
+--
+-- `mousemoverel` does not move the view on the frame it is called - the game
+-- consumes it on the next one. So the error measured this frame STILL CONTAINS
+-- everything that was already requested last frame, and asking for it again puts
+-- two or three copies of the same correction in flight. The view then sails past
+-- the target, the error flips sign, and the whole thing oscillates. Reported as
+-- "it jerks back and forth really hard without me doing anything".
+--
+-- The weapon path makes it worse, because the gun follows the camera through a
+-- spring: that is a SECOND lag on top of the input one.
+--
+-- So: remember what has been asked for and not yet seen, subtract it from the
+-- raw error, and only ask for the difference.
+-- EXACTLY ONE FRAME, NOT AN ACCUMULATOR.
+--
+-- The first version banked every request and drew it down by however far the
+-- camera was seen to move. That stalls: the observed movement carries the
+-- PLAYER's mouse as well as ours, the pixel conversion is only an estimate, and
+-- anything the game did not deliver stayed on the books forever - so the
+-- correction was permanently reduced by a debt that could never be repaid, and
+-- the aim sat several degrees off the target without ever closing.
+--
+-- What is actually in flight is one frame's request, because that is when
+-- mousemoverel lands. Remembering just that is enough to stop the double-request
+-- oscillation and cannot deadlock.
+local pendYaw, pendPitch = 0, 0
+
+local function clearPending()
+	pendYaw, pendPitch = 0, 0
+end
+
 local function panelOpen()
 	local win = _G.__TTK_WIN
 	local root = win and win.root
@@ -1744,6 +1877,14 @@ local function approach(smooth, dt)
 	return 1 - (1 - base) ^ math.max(dt * 60, 0.0001)
 end
 
+-- A world direction expressed in the SAME yaw/pitch space `CFrame:ToOrientation`
+-- uses, so a gun-space error can be applied straight to the camera.
+-- LookVector for (pitch p, yaw y) is (-sin y cos p, sin p, -cos y cos p).
+local function dirYawPitch(v)
+	local u = v.Unit
+	return math.atan2(-u.X, -u.Z), math.asin(math.clamp(u.Y, -1, 1))
+end
+
 local function angleDelta(a, b)
 	local d = (b - a) % (math.pi * 2)
 	if d > math.pi then d = d - math.pi * 2 end
@@ -1779,8 +1920,13 @@ end
 local mouseMove = mousemoverel or (Input and Input.mousemoverel)
 	or (syn and syn.mousemoverel)
 
+-- Seeded from the measurement rather than a guess: mousemoverel(60,0) turned
+-- -2.47 deg of yaw and (200,0) turned -8.08, i.e. 0.041 deg per pixel, and
+-- (0,30) turned -1.05 deg of pitch. Positive x turns RIGHT and lowers yaw;
+-- positive y looks DOWN. The estimate still learns from there, because the
+-- player's own sensitivity setting moves it.
 local look = {
-	degPerPxX = 0.06, degPerPxY = 0.05,
+	degPerPxX = 0.041, degPerPxY = 0.038,
 	sentX = 0, sentY = 0, yaw = 0, pitch = 0,
 }
 
@@ -1834,6 +1980,7 @@ local function aimPass(dt)
 	if blocked then
 		STATE.target, STATE.targetPart = "-", "-"
 		stickyModel = nil
+		clearPending()
 		endEngagement()
 		return
 	end
@@ -1844,6 +1991,7 @@ local function aimPass(dt)
 	if not aimActive() then
 		STATE.target, STATE.targetPart = "-", "-"
 		stickyModel = nil
+		clearPending()
 		if engagement then endEngagement() end
 		return
 	end
@@ -1883,7 +2031,13 @@ local function aimPass(dt)
 			if part then
 				local sp = camera:WorldToViewportPoint(part.Position)
 				local px = (Vector2.new(sp.X, sp.Y) - centreOf()).Magnitude
-				if sp.Z > 0 and px <= CONFIG.aimFov * 1.35
+				-- A GENEROUS window on purpose. Aligning the WEAPON swings the camera
+				-- away from the target by however far the gun is off - up to 32 deg
+				-- in HighReady - so a tight screen-pixel check drops the lock the
+				-- instant the correction starts working, and the assist oscillates
+				-- between acquiring and losing the same player.
+				local keepPx = CONFIG.aimFov * ((CONFIG.aimAlign == "Weapon") and 4 or 1.35)
+				if sp.Z > 0 and px <= keepPx
 					and ((not CONFIG.aimVisible) or visibleTo(stickyModel, part)) then
 					pick = { entry = held, part = part, px = px }
 				end
@@ -1895,6 +2049,7 @@ local function aimPass(dt)
 	if not pick or not pick.part or not pick.part.Parent then
 		STATE.target, STATE.targetPart = "-", "-"
 		stickyModel = nil
+		clearPending()
 		if engagement then endEngagement() end
 		return
 	end
@@ -1972,11 +2127,67 @@ local function aimPass(dt)
 
 	local curPitch, curYaw = cf:ToOrientation()
 	learnSensitivity(curYaw, curPitch)
-	local want = CFrame.lookAt(pos, aimAt)
-	local wantPitch, wantYaw = want:ToOrientation()
 
-	local dYaw = angleDelta(curYaw, wantYaw)
-	local dPitch = angleDelta(curPitch, wantPitch)
+	-- THE BULLET DOES NOT LEAVE THE CROSSHAIR, AND THIS IS THE WHOLE FIX.
+	--
+	-- FPSController line 1110 is the shot:
+	--     BulletController:Discharge(name, CameraPOV.GetEyePosition(),
+	--                                GunController:GetFireDirection(),
+	--                                GunController:GetActiveProjectileMuzzleWorldCFrame())
+	-- so `GetFireDirection()` IS the bullet. Measured against the camera's own
+	-- look vector over 180 samples, split by stance:
+	--
+	--     AimAmount 0.0 (HighReady, hip)   32.09 deg average
+	--     AimAmount 0.9                     6.92 deg
+	--     AimAmount 1.0 (full ADS)          6.39 deg   (min 1.54, max 8.74)
+	--
+	-- The gun is never aligned with the crosshair, not even fully aimed. So
+	-- putting the CROSSHAIR on somebody puts the BULLET about six degrees off at
+	-- best and thirty-two off at worst, high and to one side - which is exactly
+	-- how it was reported: "mostly above it and to the right".
+	--
+	-- The correction is therefore the angle between where the gun points and
+	-- where we want it to point, applied to the camera - the gun rides the camera,
+	-- so closing the gun's error by turning the camera converges.
+	local dYaw, dPitch
+	local fireDir, muzzlePos
+	if CONFIG.aimAlign == "Weapon" and GunCtl then
+		local okD, fd = pcall(function() return GunCtl:GetFireDirection() end)
+		local okM, mz = pcall(function()
+			return GunCtl:GetActiveProjectileMuzzleWorldCFrame()
+		end)
+		if okD and typeof(fd) == "Vector3" and fd.Magnitude > 0.001 then
+			fireDir = fd
+			if okM and typeof(mz) == "CFrame" then muzzlePos = mz.Position end
+		end
+	end
+
+	if fireDir then
+		local wantDir = (aimAt - (muzzlePos or pos))
+		if wantDir.Magnitude > 0.001 then
+			local fy, fp = dirYawPitch(fireDir)
+			local wy, wp = dirYawPitch(wantDir)
+			dYaw   = angleDelta(fy, wy)
+			dPitch = wp - fp
+			STATE.gunOffset = math.deg(math.acos(math.clamp(
+				fireDir.Unit:Dot(cf.LookVector), -1, 1)))
+		end
+	end
+
+	if not dYaw then
+		-- Crosshair mode, and the fallback when the controller cannot be read.
+		local want = CFrame.lookAt(pos, aimAt)
+		local wantPitch, wantYaw = want:ToOrientation()
+		dYaw = angleDelta(curYaw, wantYaw)
+		dPitch = angleDelta(curPitch, wantPitch)
+		STATE.gunOffset = -1
+	end
+	STATE.aimError = math.deg(math.sqrt(dYaw * dYaw + dPitch * dPitch))
+
+	-- what is already on its way
+	dYaw   = dYaw - pendYaw
+	dPitch = dPitch - pendPitch
+	STATE.aimPending = math.deg(math.sqrt(pendYaw * pendYaw + pendPitch * pendPitch))
 
 	local progress = math.clamp(math.max(math.abs(dYaw), math.abs(dPitch)) / 0.5, 0, 1)
 	local shape = curveFactor(progress)
@@ -2010,6 +2221,11 @@ local function aimPass(dt)
 	if STATE.aimDps > STATE.aimDpsPeak then STATE.aimDpsPeak = STATE.aimDps end
 
 	aimWroteView = moveLook(stepYaw, stepPitch, curYaw, curPitch, pos)
+	if aimWroteView then
+		pendYaw, pendPitch = stepYaw, stepPitch
+	else
+		pendYaw, pendPitch = 0, 0
+	end
 end
 
 --------------------------------------------------------------------------------
@@ -2041,6 +2257,56 @@ end
 -- mid-game, and both numbers are on the panel so the whole thing can be checked
 -- rather than believed.
 
+-- THE GAME'S OWN RECOIL, REPRODUCED FROM ITS OWN SOURCE.
+--
+-- FPSController, in the same Fired handler that sends the shot:
+--
+--   scale      = CameraRecoilMult * aimScale * GetAttachmentRecoilMult()
+--   aimScale   = CameraRecoilAimMult == 1 and 1
+--                or 1 + AimAmount * (CameraRecoilAimMult - 1)
+--   ramp       = clamp((ShotIndex - 1) / 8, 0, 1) * 0.85 + 0.45
+--   vertical   = 1.55 * RecoilPitchMult * scale * ramp
+--   horizontal = (random() - 0.5)
+--                * (0.85 * (1 + bloom * 2 * (1 + AimAmount * 1.5)))
+--                * scale * RecoilYawMult
+--
+-- So the VERTICAL kick is fully deterministic - weapon constants, the shot index
+-- and how far you are aimed in, nothing else - and can be cancelled before it is
+-- even measured. The HORIZONTAL one is a fresh `math.random()` per shot and is
+-- therefore NOT predictable at all; only its envelope is. Anything claiming to
+-- pre-empt horizontal recoil in this game is guessing.
+--
+-- What one of these units is worth in camera degrees is NOT documented, so it is
+-- not hard-coded: the ratio of the measured pitch residual to the predicted
+-- vertical is learned while firing and shown on the panel, exactly the way
+-- BloxStrike's pattern scale was.
+local function recoilModel()
+	local w = myWeapon()
+	local def = myDef()
+	if not w or not def or not GunCtl then return 0, 0, 1 end
+	local aim = tonumber(GunCtl.AimAmount) or 0
+	local aimScale = 1
+	local cra = tonumber(def.CameraRecoilAimMult)
+	if cra and cra ~= 1 then aimScale = 1 + aim * (cra - 1) end
+	local attMult = 1
+	local okA, a = pcall(function() return GunCtl:GetAttachmentRecoilMult() end)
+	if okA and type(a) == "number" and a > 0 then attMult = a end
+	local scale = (tonumber(def.CameraRecoilMult) or 1) * aimScale * attMult
+	local shot = tonumber(w.ShotIndex) or 1
+	local ramp = math.clamp((shot - 1) / 8, 0, 1) * 0.85 + 0.45
+	local vertical = 1.55 * (tonumber(def.RecoilPitchMult) or 1) * scale * ramp
+	local bloom = 0
+	local okB, b = pcall(function() return GunCtl:GetEffectiveBloomFraction() end)
+	if okB and type(b) == "number" then bloom = b end
+	-- the envelope, not a prediction: the sign and size are a coin flip per shot
+	local horizEnv = 0.5 * (0.85 * (1 + bloom * 2 * (1 + aim * 1.5)))
+		* scale * (tonumber(def.RecoilYawMult) or 1)
+	return vertical, horizEnv, scale
+end
+
+-- degrees of camera pitch per unit of the formula above. Learned, never assumed.
+local unitDeg, unitSamples = 0, 0
+
 local mouseDX, mouseDY = 0, 0
 UserInputService.InputChanged:Connect(function(input)
 	if _G.__TTK ~= GEN then return end
@@ -2052,7 +2318,10 @@ end)
 
 local lastYaw, lastPitch = nil, nil
 local sensPitch, sensYaw = 0, 0
+local rcsAccX, rcsAccY = 0, 0
+local rcsWroteView = false
 local lastMag, magDropAt, sprayShots = nil, 0, 0
+local sprayPred, sprayRes, pitchDebt = 0, 0, 0
 
 -- The shot counter is READ, not inferred. MagAmmo dropping by one is a shot and
 -- rising is a reload, and `Weapon.ShotIndex` is the client's own spray position.
@@ -2068,14 +2337,33 @@ local function shotWatch()
 	if lastMag ~= nil then
 		if mag < lastMag then
 			magDropAt = os.clock()
-			sprayShots = sprayShots + (lastMag - mag)
+			local fired = lastMag - mag
+			sprayShots = sprayShots + fired
+			-- Book what the game is ABOUT to add, per shot, from its own formula.
+			local predV = recoilModel()
+			sprayPred = sprayPred + predV * fired
+			if unitDeg > 0 then
+				pitchDebt = pitchDebt + predV * unitDeg * fired
+			end
 		elseif mag > lastMag then
 			sprayShots = 0
 		end
 	end
 	lastMag = mag
 	-- The same ~0.35s gap a real spray gets before it is treated as a new one.
-	if os.clock() - magDropAt > 0.35 then sprayShots = 0 end
+	-- The end of a spray is also when the unit scale is learned: total measured
+	-- pitch against total predicted units, which is far steadier than trying to
+	-- match a single shot's impulse to a single frame's residual.
+	if os.clock() - magDropAt > 0.35 then
+		if sprayPred > 0.001 and sprayRes > 0.05 then
+			local ratio = sprayRes / sprayPred
+			if ratio > 0.001 and ratio < 20 then
+				unitDeg = (unitDeg == 0) and ratio or (unitDeg * 0.75 + ratio * 0.25)
+				unitSamples = unitSamples + 1
+			end
+		end
+		sprayShots, sprayPred, sprayRes = 0, 0, 0
+	end
 	STATE.mag = mag
 	STATE.magMax = tonumber(w.MaxMagSize) or 0
 	STATE.shotIndex = tonumber(w.ShotIndex) or sprayShots
@@ -2087,6 +2375,7 @@ end
 
 local function recoilPass(dt)
 	if _G.__TTK ~= GEN then return end
+	rcsWroteView = false
 	local cf = camera.CFrame
 	local pitch, yaw = cf:ToOrientation()
 	local mx, my = mouseDX, mouseDY
@@ -2099,7 +2388,7 @@ local function recoilPass(dt)
 
 	local recent = firedRecently(0.3)
 
-	if not recent and not aimWroteView then
+	if not recent and not aimWroteView and not rcsWroteView then
 		if math.abs(my) > 2 then
 			local s = -dPitch / my
 			sensPitch = sensPitch == 0 and s or (sensPitch * 0.9 + s * 0.1)
@@ -2129,7 +2418,13 @@ local function recoilPass(dt)
 		STATE.kickPeak = STATE.kickNow
 	end
 
-	if not CONFIG.rcs then STATE.rcsApplied = 0 return end
+	-- feed the learner: the pitch the kick actually produced this frame
+	if resPitch > 0 then sprayRes = sprayRes + math.deg(resPitch) end
+	STATE.rcsUnit = unitDeg
+	STATE.rcsUnitN = unitSamples
+	STATE.rcsDebt = pitchDebt
+
+	if not CONFIG.rcs then STATE.rcsApplied = 0 pitchDebt = 0 return end
 	if assistBlocked() then STATE.rcsApplied = 0 return end
 	if not deployed() then STATE.rcsApplied = 0 return end
 	-- The first shot of a spray has no pattern to walk down yet, and cancelling
@@ -2138,16 +2433,52 @@ local function recoilPass(dt)
 
 	local share = CONFIG.rcsPct / 100
 	local cap = math.rad(CONFIG.rcsMaxDeg)
-	local fixPitch = math.clamp(-resPitch * share, -cap, cap)
-	local fixYaw   = CONFIG.rcsHoriz and math.clamp(-resYaw * share, -cap, cap) or 0
+	local fixPitch, fixYaw
+
+	if CONFIG.rcsMode == "Predicted" and unitDeg > 0 then
+		-- Pay off the booked kick. The debt is in DEGREES already, because it was
+		-- booked through the learned unit scale, and it is paid down at whatever
+		-- the per-frame clamp allows so a nine-shot burst does not arrive as one
+		-- jerk.
+		local want = math.rad(pitchDebt) * share
+		fixPitch = -math.clamp(want, 0, cap)
+		pitchDebt = math.max(0, pitchDebt + math.deg(fixPitch) / math.max(share, 0.01))
+	else
+		fixPitch = math.clamp(-resPitch * share, -cap, cap)
+	end
+	-- The horizontal component is a fresh math.random() per shot in this game, so
+	-- there is nothing to predict - it can only be answered after the fact, from
+	-- the measured residual, in either mode.
+	fixYaw = CONFIG.rcsHoriz and math.clamp(-resYaw * share, -cap, cap) or 0
 	if math.abs(fixPitch) < 1e-6 and math.abs(fixYaw) < 1e-6 then
 		STATE.rcsApplied = 0
 		return
 	end
 
-	camera.CFrame = CFrame.new(cf.Position)
-		* CFrame.fromOrientation(pitch + fixPitch, yaw + fixYaw, 0)
-	lastPitch, lastYaw = pitch + fixPitch, yaw + fixYaw
+	-- THROUGH THE MOUSE, not the CFrame. A camera write here is reverted by the
+	-- controller on the very next frame exactly like the aim's was - it would have
+	-- reported a healthy "cancelling 0.8 deg" on the panel while doing precisely
+	-- nothing to the recoil.
+	--
+	-- The corrections are small (a 0.05 deg fix is 1.2 px at the measured
+	-- 0.041 deg/px) and the OS rounds a sub-pixel request away, so the fraction is
+	-- carried instead of discarded. Without the accumulator every correction below
+	-- about half a degree is silently lost, which is most of them.
+	local dx = -math.deg(fixYaw) / math.max(look.degPerPxX, 0.002)
+	local dy = -math.deg(fixPitch) / math.max(look.degPerPxY, 0.002)
+	rcsAccX, rcsAccY = rcsAccX + dx, rcsAccY + dy
+	local sendX = (rcsAccX >= 0) and math.floor(rcsAccX) or math.ceil(rcsAccX)
+	local sendY = (rcsAccY >= 0) and math.floor(rcsAccY) or math.ceil(rcsAccY)
+	if sendX == 0 and sendY == 0 then
+		STATE.rcsApplied = 0
+		return
+	end
+	rcsAccX, rcsAccY = rcsAccX - sendX, rcsAccY - sendY
+	if not (mouseMove and pcall(mouseMove, sendX, sendY)) then
+		STATE.rcsApplied = 0
+		return
+	end
+	rcsWroteView = true
 	STATE.rcsApplied = math.deg(math.sqrt(fixPitch * fixPitch + fixYaw * fixYaw))
 end
 
@@ -2177,32 +2508,67 @@ end
 -- What the shot would hit, asked the way the shot asks it: from the eye position
 -- the client uses, along the camera's own look direction, with the game's own
 -- exclude list and no collision group - which is exactly how Discharge casts.
+-- THE SHOT DOES NOT COME OUT OF THE CROSSHAIR, so neither does this ray.
+--
+-- FPSController fires
+--   BulletController:Discharge(name, CameraPOV.GetEyePosition(),
+--                              GunController:GetFireDirection(),
+--                              GunController:GetActiveProjectileMuzzleWorldCFrame())
+-- and Discharge starts the bullet at the MUZZLE, travelling along GetFireDirection.
+-- The muzzle sits about 3.3 studs from the eye and the barrel is up to 32 degrees
+-- off the camera, so a ray cast from the eye along the camera's look vector is a
+-- different ray entirely - it answers a question the gun never asks. That is a
+-- real defect and it was found by comparing the two side by side.
+local function shotRay(dirOverride)
+	if not GunCtl then return nil end
+	local okD, fd = pcall(function() return GunCtl:GetFireDirection() end)
+	local okM, mz = pcall(function()
+		return GunCtl:GetActiveProjectileMuzzleWorldCFrame()
+	end)
+	if not (okD and okM) then return nil end
+	if typeof(fd) ~= "Vector3" or typeof(mz) ~= "CFrame" then return nil end
+	if fd.Magnitude < 0.001 then return nil end
+	local dir = dirOverride or fd.Unit
+	losParams.FilterDescendantsInstances = excludeList()
+	local origin = mz.Position
+	return workspace:Raycast(origin, dir * weaponRange(), losParams), origin, fd.Unit
+end
+
 local function underCrosshair()
 	local range = weaponRange()
-	local cf = camera.CFrame
-	local origin = cf.Position
-	if CameraPOV and CameraPOV.GetEyePosition then
-		local ok, eye = pcall(CameraPOV.GetEyePosition)
-		if ok and typeof(eye) == "Vector3" then origin = eye end
+	local baseHit, origin, fireDir = shotRay()
+	if not fireDir then
+		-- No readable gun state: fall back to the camera so the panel still shows
+		-- something rather than going blank, and say nothing stronger than that.
+		local cf = camera.CFrame
+		origin = cf.Position
+		fireDir = cf.LookVector
 	end
 
-	local points = { origin + cf.LookVector * range }
+	local dirs = { fireDir }
 	if CONFIG.trigFov > 0 then
 		-- A single centre ray only ever works on a stationary target. The ring is
-		-- built in SCREEN space and converted back, so the spacing is what the user
-		-- set in pixels rather than a distance-dependent world offset.
-		local mid = centreOf()
-		local r = CONFIG.trigFov
+		-- built around the FIRE direction, in the plane perpendicular to it, sized
+		-- from the pixel setting through the camera's own field of view.
+		local vp = camera.ViewportSize
+		local perPx = math.rad(camera.FieldOfView) / math.max(vp.Y, 1)
+		local spread = CONFIG.trigFov * perPx
+		local up = Vector3.new(0, 1, 0)
+		local right = fireDir:Cross(up)
+		if right.Magnitude < 0.001 then right = Vector3.new(1, 0, 0) end
+		right = right.Unit
+		local realUp = right:Cross(fireDir).Unit
 		for i = 0, 5 do
 			local a = math.rad(i * 60)
-			local ray = camera:ViewportPointToRay(mid.X + math.cos(a) * r,
-				mid.Y + math.sin(a) * r)
-			table.insert(points, ray.Origin + ray.Direction * range)
+			dirs[#dirs + 1] = (fireDir
+				+ right * math.sin(spread) * math.cos(a)
+				+ realUp * math.sin(spread) * math.sin(a)).Unit
 		end
 	end
 
-	for _, pt in ipairs(points) do
-		local hit = bulletRay(pt)
+	for _, dir in ipairs(dirs) do
+		local hit = select(1, shotRay(dir))
+		if not hit and dir == fireDir then hit = baseHit end
 		if hit and hit.Instance then
 			local rig = rigFromHit(hit.Instance)
 			if rig and rig.Name:sub(1, 13) == "MercHitboxes_"
@@ -2648,11 +3014,14 @@ reg("aimPart", aimCard:Dropdown("Aim at", { "Head", "Body", "Nearest" },
 	CONFIG.aimPart, function(v) CONFIG.aimPart = v end))
 aimCard:Dropdown("Pick target by", { "Crosshair", "Closest", "Lowest HP" },
 	CONFIG.aimPick, function(v) CONFIG.aimPick = v end)
+aimCard:Label("Align: this game's gun does not point where the crosshair points. Measured against the camera - 32.1 deg average in HighReady, and still 6.4 deg fully aimed down sights. Weapon drives the BULLET onto the target, which is the one that hits; Crosshair is the naive version and is kept only for comparison.")
+reg("aimAlign", aimCard:Dropdown("Align", { "Weapon", "Crosshair" }, CONFIG.aimAlign,
+	function(v) CONFIG.aimAlign = v end))
 aimCard:Label("Travel curve: Human starts slow, is fastest mid-flick, settles slowly")
 reg("aimCurve", aimCard:Dropdown("Travel curve", { "Ease out", "Linear", "Human" },
 	CONFIG.aimCurve, function(v) CONFIG.aimCurve = v end))
-aimCard:Label("View path: the camera write was MEASURED to stick here - 0.00 deg off the wanted CFrame three frames later, with CameraType Scriptable. Mouse is the fallback if an update ever changes that.")
-aimCard:Dropdown("View path", { "Camera", "Mouse" }, CONFIG.aimPath,
+aimCard:Label("View path: this game rebuilds the camera from angles it keeps itself, so writing camera.CFrame does NOTHING - measured, a 0.5 deg nudge is 100% reverted on the very next frame and a 20 deg write is gone in five. Mouse is the only path that works here: mousemoverel(60,0) turns 2.47 deg and it stays. Camera is kept only so you can see the difference.")
+aimCard:Dropdown("View path", { "Mouse", "Camera" }, CONFIG.aimPath,
 	function(v) CONFIG.aimPath = v end)
 
 local tuneCard = aimPage:Card("TUNING", 2)
@@ -2757,7 +3126,7 @@ do
 local recPage = win:Page("RECOIL", UI.icon.wave)
 
 local rcsCard = recPage:Card("RECOIL CONTROL", 1):Accent()
-rcsCard:Label("This does NOT touch the game's recoil spring. It measures your own sensitivity while you are not firing, subtracts it from the camera movement while you are, and pushes the leftover back - so it cancels the kick without writing a single value the game owns.")
+rcsCard:Label("This does NOT touch the game's recoil spring - that field is what the anticheat samples every 0.35s. It measures your own sensitivity while you are not firing, subtracts it from the camera movement while you are, and pushes the leftover back through the MOUSE, because a camera write is reverted by this game on the next frame.")
 reg("rcs", rcsCard:Toggle("Recoil control", CONFIG.rcs, function(v)
 	CONFIG.rcs = v
 	note(v and "recoil control on" or "recoil control off")
@@ -2956,8 +3325,11 @@ task.spawn(function()
 						STATE.targets, STATE.enemies, STATE.friends),
 					"  deployed   " .. tostring(STATE.deployed)
 						.. "   aiming " .. tostring(STATE.aiming),
-					"  chams      " .. (chamsBroken and ("OFF - " .. tostring(chamsBroken))
-						or (CONFIG.chams and "on" or "available, switched off")),
+					"  chams      " .. (CONFIG.chams
+						and ((chamsFails > 0 and chamsReason)
+							and string.format("retrying (%d fails) - %s", chamsFails, chamsReason)
+							or "on")
+						or "switched off"),
 				})
 			end)
 
@@ -2995,7 +3367,11 @@ task.spawn(function()
 						STATE.aimDps, STATE.aimDpsPeak, CONFIG.humTurnCap),
 					"  gun      " .. (shotReady() and "ready" or "not ready")
 						.. string.format("   %d/%d", STATE.mag, STATE.magMax),
-					"  the turn figure is the step THIS script applied, not the camera",
+					string.format("  align    %s   barrel %s off crosshair   err %.2f  inflight %.2f",
+						CONFIG.aimAlign,
+						(STATE.gunOffset >= 0) and string.format("%.1f", STATE.gunOffset)
+							or "n/a",
+						STATE.aimError, STATE.aimPending),
 				})
 			end)
 
@@ -3166,7 +3542,8 @@ _G.__TTK_DBG = {
 	newEngagement = newEngagement, endEngagement = endEngagement,
 	applyPreset = applyPreset, PRESETS = PRESETS, CTL = CTL,
 	drawn = drawn, highlights = highlights, hideAll = hideAll, clearChams = clearChams,
-	chamFor = chamFor, chamsRoot = chamsRoot,
+	chamFor = chamFor, chamsRoot = chamsRoot, visualOf = visualOf,
+	chamsState = function() return chamsReason, chamsFails, chamsNextTry end,
 	note = note, panelOpen = panelOpen,
 	GunCtl = GunCtl, Hostility = Hostility, BodyDamage = BodyDamage,
 	WEAPONS = WEAPONS, CameraPOV = CameraPOV,
