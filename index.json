@@ -256,12 +256,13 @@
 			"name": "Steal An Egg",
 			"file": "games/stealegg.lua",
 			"places": [
-				107778070777162
+				107778070777162,
+				133470009013038
 			],
 			"status": "ok",
 			"paid": true,
-			"note": "real anti-cheat: walking only, no teleport/fly/noclip/speed writes",
-			"detect": "local rs = game:GetService('ReplicatedStorage') local n = rs:FindFirstChild('Network') if not n then return false end return n:FindFirstChild('Eggs: RequestAreaEggCarry') ~= nil and n:FindFirstChild('Treadmills: RequestUpgrade') ~= nil"
+			"note": "both places run the Shared.Remotes / Client.EggState build (the old Network build is gone); real anti-cheat: walking only, no teleport/fly/noclip/speed writes",
+			"detect": "local rs = game:GetService('ReplicatedStorage') local cl = rs:FindFirstChild('Client') local sh = rs:FindFirstChild('Shared') local dt = rs:FindFirstChild('Data') return cl ~= nil and cl:FindFirstChild('EggState') ~= nil and cl:FindFirstChild('AssetRoster') ~= nil and dt ~= nil and dt:FindFirstChild('Guards') ~= nil and dt:FindFirstChild('Treadmills') ~= nil and sh ~= nil and sh:FindFirstChild('Remotes') ~= nil"
 		},
 		{
 			"alias": "eggfarm",
