@@ -55,6 +55,23 @@
     * `Upgrade(branch, node)` is the hex tree: `("Main", "LuckI")` charged $500
       and moved the player attribute `RollLuck` 1 -> 1.3.  Branches are Main,
       Gnomes, Plants, Player, Pets; every node carries `Price` and `Requires`.
+    * **The item shop is a second economy and it was missed entirely.**
+      `Configs.ItemShop` holds 8 sprinklers / fertilizers / watering cans /
+      coffees, 2 to 3 of them in stock per 300s restock, bought with
+      `InvokeServer("Purchase", "<Item Name>")` - verified 2026-08-27, the
+      balance moved exactly the config price and the stock fell by one.  They
+      land as Tools in the Backpack (`type`, `ItemName`, `Id`) and are placed
+      with the SAME `Place` call as a gnome, the type in front:
+      `Place("Sprinkler", "Basic Sprinkler", CFrame, "1")`.  All of them except
+      the cans are timed area buffs, 120-300s over 11-25 studs, so they belong
+      at the centre of the crops and not on the clear edge a gnome gets.
+    * **Pets are NOT rolled on the podium** - an earlier guess in this file
+      said they probably were, and it was wrong.  They walk around the middle
+      of the map as `WorldPet_<Name>` under `workspace.PetSpawns.Pets`, 120 to
+      600 studs from the garden, and carry a server-side `BuyPetPrompt`
+      (12 studs, no line of sight).  Price is flat per species out of
+      `Configs.Pets`; the `RolledRarity` on the model only decides the 1/N
+      shown overhead.  They despawn after a few minutes.
 
     Never touched: Auto Roll is a **gamepass** (the client answers
     `prompt("Auto Roll", "gamepass")`), `RequestLuckSpin` returns a product id
@@ -103,6 +120,10 @@ local CfgPlants   = requireIdent(Configs:WaitForChild("Plants", 20))
 local CfgTree     = requireIdent(Configs:WaitForChild("Upgrade Tree", 20))
 local CfgRebirths = requireIdent(Configs:WaitForChild("Rebirths", 20))
 local CfgExpand   = requireIdent(Configs:WaitForChild("Expand", 20))
+local CfgShop     = requireIdent(Configs:WaitForChild("ItemShop", 20))
+local CfgPets     = requireIdent(Configs:WaitForChild("Pets", 20))
+local CfgSprink   = requireIdent(Configs:WaitForChild("Sprinklers", 20))
+local CfgFert     = requireIdent(Configs:WaitForChild("Fertilizer", 20))
 
 ----------------------------------------------------------------------------
 -- config / state
@@ -122,6 +143,10 @@ local CONFIG = {
     autoFreeGnome = true,   -- the free gnome timer
     autoRebirth   = false,  -- UNVERIFIED, see rebirthOnce()
 
+    autoGear      = true,   -- buy the item shop's restock
+    autoGearUse   = true,   -- and put it to work: place, give or water
+    autoBuyPets   = true,   -- fetch a pet out of the field, see buyWorldPet()
+
     collectGap    = 0.06,   -- 25/25 credited at 0.05, this leaves headroom
     collectBatch  = 40,     -- per pass, so the loop stays responsive
     sellAt        = 0.85,   -- sell once the inventory is this full
@@ -130,6 +155,11 @@ local CONFIG = {
     buyMargin     = 1.0,    -- buy when income/s beats the weakest placed x this
     expandKeep    = 3.0,    -- only expand while cash stays >= price * this
     reserveWindow = 90,     -- seconds of income a reserved gnome may be away
+
+    gearMode      = "Sprinklers + fertilizer",  -- which shop types, see GEAR_MODES
+    gearKeep      = 3.0,    -- only buy gear while cash stays >= price * this
+    petRarity     = "Common",      -- lowest pet rarity worth walking over for
+    petKeep       = 2.0,    -- only buy a pet while cash stays >= price * this
 }
 
 local STATE = {
@@ -141,6 +171,8 @@ local STATE = {
     placeFails = 0, plotFull = false, gnomeCap = 0, swaps = 0,
     rate = 0, reserve = 0, observed = 0,
     pets = 0, petsPlaced = 0, petCap = 3,
+    gearBought = 0, gearUsed = 0, gearLive = 0, lastGear = "-", restock = 0,
+    petsBought = 0, petsOwned = 0, petSeen = 0, petBest = "-", petReserve = 0, petSwaps = 0,
 }
 
 _G.__ROLLGNOME = (_G.__ROLLGNOME or 0) + 1
@@ -178,16 +210,24 @@ local function inventory()
     return type(inv) == "table" and inv or {}
 end
 
+-- One inventory holds the lot: crops, gnomes, pets and everything bought out of
+-- the item shop, each entry tagged with its own `type` ("Plant" / "Farmer" /
+-- "Pet" / "Sprinkler" / "Fertilizer" / "GnomeItem" / "WateringCan").  The two
+-- extra return values are appended, so the older callers that take one or two
+-- of them are untouched.
 local function inventoryCounts()
-    local plants, farmers, total = 0, 0, 0
+    local plants, farmers, total, pets, gear = 0, 0, 0, 0, 0
     for _, item in pairs(inventory()) do
         total = total + 1
         if type(item) == "table" then
-            if item.type == "Farmer" then farmers = farmers + 1
-            elseif item.type == "Plant" then plants = plants + 1 end
+            local kind = item.type
+            if kind == "Farmer" then farmers = farmers + 1
+            elseif kind == "Plant" then plants = plants + 1
+            elseif kind == "Pet" then pets = pets + 1
+            elseif kind then gear = gear + 1 end
         end
     end
-    return plants, farmers, total
+    return plants, farmers, total, pets, gear
 end
 
 local function inventoryMax()
@@ -606,12 +646,30 @@ end
 -- (`max_equipped_pets`), they sit in `Plot.ClientPets`, and `PickupPet(uid)`
 -- takes one back.
 --
--- Where pets COME FROM is not verified.  The podium rolls out of `Farmer RNG`
--- during the day, there is a matching `Pet RNG` and a `Night RNG`, and the RNG
--- controller branches on `ReplicatedStorage.IsDay` - so the machine very
--- likely hands out pets after dark.  This account has never owned one, so the
--- script only places what turns up and claims nothing about how it got there.
+-- Where pets come from was guesswork here for a long time and the guess was
+-- WRONG: it is not the podium and it has nothing to do with `IsDay`.  Pets
+-- walk around the middle of the map and are bought where they stand - see
+-- buyWorldPet() further down.
 ----------------------------------------------------------------------------
+
+-- The rarity ladder out of the game's own config, and the one every pet
+-- decision is ranked on: which one to walk over for, which of the ones already
+-- owned comes off the plot when a better one turns up.
+local PET_TIERS = {
+    Common = 1, Uncommon = 2, Rare = 3, Epic = 4,
+    Legendary = 5, Mythic = 6, Godly = 7, IMPOSSIBLE = 8,
+}
+local PET_CHOICES = { "Common", "Uncommon", "Rare", "Epic", "Legendary", "Mythic" }
+
+local function petTier(name)
+    local cfg = CfgPets[name]
+    return (type(cfg) == "table" and PET_TIERS[cfg.rarity]) or 0
+end
+
+local function petPrice(name)
+    local cfg = CfgPets[name]
+    return (type(cfg) == "table" and tonumber(cfg.price)) or math.huge
+end
 
 local function maxPets()
     return tonumber(data().max_equipped_pets) or 3
@@ -627,6 +685,8 @@ local function placedPets()
     return n
 end
 
+-- Rarest first, so a Frog waiting in the backpack is offered a slot before a
+-- second Dog is.
 local function heldPetTools()
     local backpack = LocalPlayer:FindFirstChild("Backpack")
     if not backpack then return {} end
@@ -636,9 +696,35 @@ local function heldPetTools()
             tools[#tools + 1] = tool
         end
     end
+    table.sort(tools, function(a, b)
+        return petTier(a:GetAttribute("PetName") or a.Name)
+             > petTier(b:GetAttribute("PetName") or b.Name)
+    end)
     return tools
 end
 
+-- `Data.pets` holds ONLY the equipped ones: a PickupPet removes the entry
+-- outright and the pet comes back as a Tool in the backpack, which is where
+-- the loose ones are counted from instead.  Measured - equipped went 3 -> 2
+-- and the entry vanished rather than flipping a flag.
+local function weakestPlacedPet()
+    local worstUid, worstName, worstTier
+    for uid, entry in pairs(data().pets or {}) do
+        if type(entry) == "table" and entry.name then
+            local tier = petTier(entry.name)
+            if not worstTier or tier < worstTier then
+                worstUid, worstName, worstTier = uid, entry.name, tier
+            end
+        end
+    end
+    return worstUid, worstName, worstTier or 0
+end
+
+-- Once the garden holds its three, this turns into the same swap the gnomes
+-- do: the weakest one standing is picked back up and the better one takes its
+-- place.  Without it three Dogs bought in the first minute would lock the
+-- slots for ever and a Frog could never get in - which is most of what "auto
+-- buy RARE pets" has to mean.
 local function placePets()
     local character = LocalPlayer.Character
     local humanoid = character and character:FindFirstChildOfClass("Humanoid")
@@ -649,7 +735,22 @@ local function placePets()
 
     local seated = 0
     for _, tool in ipairs(tools) do
-        if not alive() or placedPets() >= maxPets() then break end
+        if not alive() then break end
+
+        if placedPets() >= maxPets() then
+            local worstUid, worstName, worstTier = weakestPlacedPet()
+            local mine = petTier(tool:GetAttribute("PetName") or tool.Name)
+            if not worstUid or mine <= worstTier then break end
+            fire("PickupPet", worstUid)
+            task.wait(1.0)
+            if placedPets() >= maxPets() then
+                note("pet swap: the %s would not come off the plot", tostring(worstName))
+                break
+            end
+            STATE.petSwaps = STATE.petSwaps + 1
+            note("swapping the %s out for a %s", tostring(worstName),
+                tostring(tool:GetAttribute("PetName") or tool.Name))
+        end
 
         humanoid:EquipTool(tool)
         task.wait(0.35)
@@ -771,8 +872,16 @@ local function gnomeReserve()
     return reserve
 end
 
+-- Declared here and defined down with the pets: the tree, the shop and the
+-- expansions must not spend a pet's money, and all three of them are written
+-- above the pet code.
+local petReserve
+
+-- What the OTHER spenders are allowed to touch.  The two holders spend past
+-- their own reserve (buyFromPodium works off money(), buyWorldPet off money()
+-- minus the gnome reserve), exactly as buyFromPodium always has.
 local function spendable()
-    return money() - gnomeReserve()
+    return money() - gnomeReserve() - (petReserve and petReserve() or 0)
 end
 
 local function buyTreeNode()
@@ -810,6 +919,514 @@ local function buyTreeNode()
         note("upgrade %s: %s", bestKey, tostring(result))
     end
     return false
+end
+
+----------------------------------------------------------------------------
+-- the item shop ("gear")
+--
+-- Measured 2026-08-27 on notpolpne: `InvokeServer("Purchase", "<Item Name>")`
+-- answered `true`, the balance went 2,788 -> 788 (exactly the config price of
+-- the Basic Sprinkler), `timedShop.stock["Basic Sprinkler"]` fell 1 -> 0 and a
+-- Tool carrying `type = "Sprinkler"`, `ItemName` and `Id` appeared in the
+-- Backpack.  So the shop is bought like anything else in this game and the
+-- item lands in the same inventory as the gnomes.
+--
+-- The shop restocks every 300s (`Settings.RestockDuration`) with 2 to 3 of its
+-- 8 entries; `ReplicatedStorage:GetAttribute("RestockSecondsLeft")` counts it
+-- down.  Everything in it except the watering cans is a TIMED AREA BUFF - 120
+-- to 300 seconds over 11 to 25 studs - which is why a purchase is followed
+-- immediately by a placement, and why the placement goes in the MIDDLE of the
+-- crops rather than on the tidy clear square a gnome gets.  A sprinkler
+-- dropped where placementSpots() puts a gnome covers the empty margin of the
+-- plot and nothing else.
+----------------------------------------------------------------------------
+
+-- The four things the shop sells are used in three different ways and every
+-- one of them was measured on 2026-08-27:
+--
+--   Sprinkler / Fertilizer   Place(kind, name, CFrame, "1")
+--                            an area buff standing on the plot for 120-300s
+--   GnomeItem (the coffee)   GiveFarmerItem(<Workers model>, <Tool>)
+--                            SINGLE gnome: the target's `GnomeSpeed` went
+--                            1 -> 1.5, the config multi exactly, while the
+--                            thirteen other gnomes on the plot stayed at 1
+--   WateringCan              WaterPlant(<Plants model>)
+--                            SINGLE plant and the can is consumed:
+--                            `SecondsUntilReady` fell 81 -> 57 and the can
+--                            left the inventory
+--
+-- **These last two take INSTANCES, not the uid strings**, and that cost an
+-- hour: a spy that prints its arguments with tostring() renders a Model named
+-- after its uid and a Tool named "Gnome Coffee" as exactly the two strings you
+-- would have guessed, so the captured payload read as `(uid, "Gnome Coffee")`
+-- and the server silently ignored every replay of it.  Print typeof() beside
+-- the value or the capture is a guess wearing a measurement's clothes.
+--
+-- All three need the Tool in the hand first, the same rule as a gnome.  The
+-- watering cans are the worst buy in the shop by a distance - $17,500 for
+-- about twenty seconds off one crop, once - so the default mode leaves them.
+local GEAR_MODES = {
+    ["Sprinklers + fertilizer"] = { Sprinkler = true, Fertilizer = true },
+    ["Sprinklers only"]         = { Sprinkler = true },
+    ["Everything"]              = { Sprinkler = true, Fertilizer = true, GnomeItem = true, WateringCan = true },
+}
+
+local GEAR_KINDS     = { Sprinkler = true, Fertilizer = true, GnomeItem = true, WateringCan = true }
+local GEAR_PLACEABLE = { Sprinkler = true, Fertilizer = true }
+
+local function gearWanted(kind)
+    local set = GEAR_MODES[CONFIG.gearMode] or GEAR_MODES["Sprinklers + fertilizer"]
+    return set[kind] == true
+end
+
+local function shopStock()
+    local shop = data().timedShop
+    local stock = type(shop) == "table" and shop.stock or nil
+    return type(stock) == "table" and stock or {}
+end
+
+local function shopEntries()
+    local items = type(CfgShop) == "table" and CfgShop.Items or nil
+    return type(items) == "table" and items or {}
+end
+
+-- How many of a kind are running on the plot right now.  `sprinklers` and
+-- `fertilizer` in the oracle carry a `timeRemaining`, so this is the honest
+-- "is a buff live" reading rather than a counter of our own.
+local function gearLive()
+    local n = 0
+    for _, key in ipairs({ "sprinklers", "fertilizer" }) do
+        local t = data()[key]
+        if type(t) == "table" then for _ in pairs(t) do n = n + 1 end end
+    end
+    return n
+end
+
+local function placedGear(kind)
+    local t = data()[kind == "Fertilizer" and "fertilizer" or "sprinklers"]
+    local n = 0
+    if type(t) == "table" then for _ in pairs(t) do n = n + 1 end end
+    return n
+end
+
+local function buyGear()
+    local stock = shopStock()
+    local cash, budget = money(), spendable()
+    local bestName, bestPrice = nil, math.huge
+
+    for name, entry in pairs(shopEntries()) do
+        if type(entry) == "table" and (tonumber(stock[name]) or 0) > 0 and gearWanted(entry.type) then
+            local price = tonumber(entry.price)
+            -- A timed buff over an empty garden is money set on fire: the
+            -- Basic Sprinkler runs its 120 seconds whether or not anything is
+            -- growing under it.  The watering cans have no duration, so they
+            -- are exempt from the gate.
+            local usable = entry.type == "WateringCan" or placedCount() >= 2
+            if price and usable and price < bestPrice
+                and price <= budget and cash >= price * CONFIG.gearKeep then
+                bestName, bestPrice = name, price
+            end
+        end
+    end
+
+    if not bestName then return false end
+
+    local before = tonumber(stock[bestName]) or 0
+    local result = invoke("Purchase", 8, bestName)
+    task.wait(0.6)
+    -- The balance cannot confirm this - the garden pays thousands a second
+    -- into the same number - so the stock falling is what counts.
+    if result == true or (tonumber(shopStock()[bestName]) or 0) < before then
+        STATE.gearBought = STATE.gearBought + 1
+        STATE.lastGear = bestName
+        note("bought %s ($%s)", bestName, tostring(bestPrice))
+        return true
+    end
+    note("shop: %s refused (%s)", bestName, tostring(result))
+    return false
+end
+
+-- Each item's own radius, out of the game's config.  11 studs for a Basic
+-- Sprinkler, 25 for Good Fertilizer.
+local function gearRange(kind, name)
+    local cfg = kind == "Fertilizer" and CfgFert or CfgSprink
+    local entry = type(cfg) == "table" and cfg[name] or nil
+    return (type(entry) == "table" and tonumber(entry.range)) or 11
+end
+
+-- WHERE a buff lands decides most of its worth, and the obvious answer is the
+-- wrong one.  The first version aimed at the centroid of the garden: measured
+-- on a plot spanning 38 x 41 studs with sixteen things standing in it, an
+-- 11 stud Basic Sprinkler dropped on the centroid covered **2 of 16** - the
+-- middle of a sparse rectangle is empty by definition.  So the square is
+-- chosen the same way the answer would be checked: walk the garden and take
+-- the spot with the most crops and gnomes inside this item's own range.
+--
+-- The fallbacks after the winner are kept half a radius apart from each other
+-- and from it, because the six best squares are otherwise the same cluster and
+-- a retry would offer the server the spot it just refused.
+local function gearSpots(range)
+    local minx, maxx, minz, maxz, y = gardenBounds()
+    if not minx then return {} end
+    local points = occupiedPoints()
+
+    local candidates = {}
+    for x = minx, maxx, 2 do
+        for z = minz, maxz, 2 do
+            local covered = 0
+            for _, point in ipairs(points) do
+                local dx, dz = point.X - x, point.Z - z
+                if dx * dx + dz * dz <= range * range then covered = covered + 1 end
+            end
+            candidates[#candidates + 1] = { x = x, z = z, n = covered }
+        end
+    end
+    table.sort(candidates, function(a, b) return a.n > b.n end)
+
+    local spacing = math.max(range * 0.5, 3)
+    local out = {}
+    for _, pick in ipairs(candidates) do
+        local far = true
+        for _, taken in ipairs(out) do
+            local dx, dz = taken.X - pick.x, taken.Z - pick.z
+            if math.sqrt(dx * dx + dz * dz) < spacing then far = false break end
+        end
+        if far then
+            out[#out + 1] = Vector3.new(pick.x, y, pick.z)
+            if #out >= 4 then break end
+        end
+    end
+    return out
+end
+
+local function gearTools()
+    local backpack = LocalPlayer:FindFirstChild("Backpack")
+    if not backpack then return {} end
+    local tools = {}
+    for _, tool in ipairs(backpack:GetChildren()) do
+        if tool:IsA("Tool") and GEAR_KINDS[tool:GetAttribute("type")] then
+            tools[#tools + 1] = tool
+        end
+    end
+    return tools
+end
+
+-- How many of a kind are still loose in the inventory.  The coffee and the can
+-- leave no trace on the plot, so this is the only thing that can confirm they
+-- were consumed.
+local function gearHeld(kind)
+    local n = 0
+    for _, item in pairs(inventory()) do
+        if type(item) == "table" and item.type == kind then n = n + 1 end
+    end
+    return n
+end
+
+-- Sprinkler and fertilizer: the same `Place` call a gnome takes, with the
+-- item's own type in front, and it was accepted on the first spot offered.
+local function seatGear(kind, name, spots)
+    for _, spot in ipairs(spots) do
+        local before = placedGear(kind)
+        fire("Place", kind, name, CFrame.new(spot), "1")
+        task.wait(0.7)
+        if placedGear(kind) > before then
+            note("placed %s", name)
+            return true
+        end
+    end
+    return false
+end
+
+-- The coffee is single target, so it goes to the gnome that earns most and has
+-- not already got one: `GnomeSpeed` reads 1 on a plain gnome and 1.5 while a
+-- coffee is running, which makes "already served" readable without a counter.
+local function bestCoffeeGnome()
+    local folder = folderOf("Workers")
+    if not folder then return nil end
+    local placed = placedFarmers()
+    local best, bestRate
+    for _, gnome in ipairs(folder:GetChildren()) do
+        local entry = placed[gnome.Name]
+        local farmer = (type(entry) == "table" and entry.name) or gnome:GetAttribute("FarmerName")
+        local speed = tonumber(gnome:GetAttribute("GnomeSpeed")) or 1
+        if farmer and speed <= 1 then
+            local rate = gnomeRate(farmer)
+            if not bestRate or rate > bestRate then best, bestRate = gnome, rate end
+        end
+    end
+    return best, bestRate
+end
+
+local function giveGnomeItem(tool, name, gnome)
+    local before = gearHeld("GnomeItem")
+    fire("GiveFarmerItem", gnome, tool)
+    task.wait(0.8)
+    if gearHeld("GnomeItem") < before then
+        note("gave the %s to a gnome", name)
+        return true
+    end
+    return false
+end
+
+-- One can, one plant, and the can is gone afterwards - so it goes on whatever
+-- is furthest from being ready, where the cut is worth the most.
+local function slowestPlant()
+    local folder = folderOf("Plants")
+    if not folder then return nil end
+    local best, worst
+    for _, model in ipairs(folder:GetChildren()) do
+        local left = tonumber(model:GetAttribute("SecondsUntilReady"))
+        if left and (not worst or left > worst) then best, worst = model, left end
+    end
+    return best, worst
+end
+
+local function waterOne(name, model)
+    local before = gearHeld("WateringCan")
+    fire("WaterPlant", model)
+    task.wait(0.8)
+    if gearHeld("WateringCan") < before then
+        note("watered a crop with the %s", name)
+        return true
+    end
+    return false
+end
+
+-- Same rule as the gnomes: the item has to be IN THE HAND, whichever of the
+-- three things happens to it next.
+--
+-- The target is worked out BEFORE the tool is equipped, and an item with no
+-- target is skipped rather than tried: a coffee held while every gnome already
+-- has one, or a can held with nothing growing, would otherwise cost an equip
+-- and a second of waiting on every single pass of the farm loop, for ever.
+local function useGear()
+    local character = LocalPlayer.Character
+    local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+    if not humanoid then return 0 end
+
+    local tools = gearTools()
+    if #tools == 0 then return 0 end
+
+    local used, touched = 0, false
+    for _, tool in ipairs(tools) do
+        if not alive() then break end
+        local kind = tool:GetAttribute("type")
+        local name = tool:GetAttribute("ItemName") or tool.Name
+
+        local spots, gnome, plant
+        if GEAR_PLACEABLE[kind] then       spots = gearSpots(gearRange(kind, name))
+        elseif kind == "GnomeItem" then    gnome = bestCoffeeGnome()
+        elseif kind == "WateringCan" then  plant = slowestPlant()
+        end
+
+        if (spots and #spots > 0) or gnome or plant then
+            touched = true
+            humanoid:EquipTool(tool)
+            task.wait(0.35)
+
+            local ok
+            if spots then       ok = seatGear(kind, name, spots)
+            elseif gnome then   ok = giveGnomeItem(tool, name, gnome)
+            elseif plant then   ok = waterOne(name, plant)
+            end
+
+            if ok then
+                used = used + 1
+                STATE.gearUsed = STATE.gearUsed + 1
+            else
+                note("gear %s: the server did not take it", name)
+                break
+            end
+        end
+    end
+
+    if touched then pcall(function() humanoid:UnequipTools() end) end
+    return used
+end
+
+----------------------------------------------------------------------------
+-- pets, and where they actually come from
+--
+-- NOT the podium.  Measured 2026-08-27: pets walk around the middle of the map
+-- as `WorldPet_<Name>` models under `workspace.PetSpawns.Pets`, 120 to 600
+-- studs from the garden, each one carrying `RolledRarity` (the 1/N it rolled),
+-- a `Huge` flag and a `BuyPetPrompt` ProximityPrompt on its HumanoidRootPart -
+-- ActionText "Buy", 12 studs, no line of sight, 0 client connections because
+-- the handler is server side.
+--
+-- The overhead price matches `Configs.Pets[name].price` exactly on every one
+-- of them (Cat 15,000 / Dog 25,000 / Cow 65,500 / Bee 750,000), so the roll
+-- decides the RARITY and never the cost.  They despawn on a timer of a few
+-- minutes, which is why this is checked on every pass of the farm loop rather
+-- than on the slow spending timer.
+----------------------------------------------------------------------------
+
+-- How long this one stays.  The overhead clock is the ONLY place the despawn
+-- is exposed - the model carries `RolledRarity`, `Huge` and `Mutations` and
+-- nothing else - and it matters, because reserving the balance for a pet that
+-- vanishes in ten seconds freezes the upgrade tree for nothing.
+local function petSecondsLeft(model)
+    local overhead = model:FindFirstChild("Overhead")
+    local label = overhead and overhead:FindFirstChild("Timer")
+    local text = label and label.Text or ""
+    local minutes, seconds = text:match("(%d+)m%s*(%d+)s")
+    if minutes then return tonumber(minutes) * 60 + tonumber(seconds) end
+    local only = text:match("(%d+)s")
+    return only and tonumber(only) or nil
+end
+
+local function worldPets()
+    local spawns = workspace:FindFirstChild("PetSpawns")
+    local folder = spawns and spawns:FindFirstChild("Pets")
+    if not folder then return {} end
+    local out = {}
+    for _, model in ipairs(folder:GetChildren()) do
+        local name = model.Name:match("^WorldPet_(.+)$")
+        if name and type(CfgPets[name]) == "table" then
+            out[#out + 1] = {
+                model  = model,
+                name   = name,
+                tier   = petTier(name),
+                price  = petPrice(name),
+                huge   = model:GetAttribute("Huge") == true,
+                rolled = tonumber(model:GetAttribute("RolledRarity")) or 0,
+                left   = petSecondsLeft(model),
+            }
+        end
+    end
+    return out
+end
+
+-- The rarity a pet in the field has to reach before it is worth the walk.
+--
+-- With a slot free that is just whatever the user asked for.  With all three
+-- taken it becomes the weakest pet STANDING, plus one - and the weakest one
+-- STANDING is the point.  Not the weakest one owned: a Common that a better
+-- pet already pushed off the plot is sitting loose in the inventory and will
+-- never be placed again, so letting it set the bar buys pet after pet that can
+-- never get in.
+local function petFloor()
+    local floor = PET_TIERS[CONFIG.petRarity] or 1
+    if placedPets() >= maxPets() then
+        floor = math.max(floor, select(3, weakestPlacedPet()) + 1)
+    end
+    return floor
+end
+
+-- Placed plus loose.  Only `max_equipped_pets` of them can ever stand in the
+-- garden, so buying past that is buying a decoration.
+local function ownedPets()
+    local _, _, _, pets = inventoryCounts()
+    return pets + placedPets()
+end
+
+-- Same shape as gnomeReserve() and for the same reason: without it the tree
+-- takes the balance down to nothing every six seconds and a $125,000 Frog
+-- standing in the field is never affordable for a single tick.  Measured
+-- 2026-08-27 - the balance hit $28,726 with a Frog in the field and was back
+-- at $3,684 twenty seconds later, all of it spent on gnomes and tree nodes.
+--
+-- And with the same two conditions that unfroze the gnome reserve, plus one
+-- this needed of its own: the pet must be worth buying, it must be REACHABLE
+-- from income, and it must still be there when the money arrives.
+function petReserve()
+    if not CONFIG.autoBuyPets then return 0 end
+    local floor = petFloor()
+    local cash, perSecond = money(), income()
+    local reserve = 0
+    for _, pet in ipairs(worldPets()) do
+        local window = math.min(CONFIG.reserveWindow, pet.left or CONFIG.reserveWindow)
+        local worthIt = pet.tier >= floor and (pet.left == nil or pet.left >= 20)
+        local reachable = pet.price <= cash + perSecond * window
+        if worthIt and reachable and pet.price > reserve then reserve = pet.price end
+    end
+    return reserve
+end
+
+-- The pet is halfway across the map and the prompt only reaches 12 studs, so
+-- the character is pinned on Heartbeat next to it for the moment the prompt
+-- fires and put straight back afterwards.  Pinning rather than a single CFrame
+-- write is what this project has had to do everywhere a prompt is involved:
+-- the server validates against ITS copy of the position, and a one-shot write
+-- can be replicated away before the prompt lands.
+local function fetchPet(pet)
+    if not fireproximityprompt then
+        note("pets: this executor has no fireproximityprompt")
+        return false
+    end
+    local root = pet.model:FindFirstChild("HumanoidRootPart")
+    local prompt = root and root:FindFirstChild("BuyPetPrompt")
+    if not prompt then return false end
+
+    local character = LocalPlayer.Character
+    local hrp = character and character:FindFirstChild("HumanoidRootPart")
+    if not hrp then return false end
+
+    local home = hrp.CFrame
+    local target = CFrame.new(pet.model:GetPivot().Position + Vector3.new(0, 4, 4))
+    local before = ownedPets()
+
+    local pin
+    pin = RunService.Heartbeat:Connect(function()
+        -- Self-releasing.  A re-execute bumps the generation and this has to
+        -- let go of the character on its own, or the next run finds the body
+        -- welded to a spot on the far side of the map by a connection nothing
+        -- holds a reference to any more.
+        if not alive() then pin:Disconnect() return end
+        local ch = LocalPlayer.Character
+        local body = ch and ch:FindFirstChild("HumanoidRootPart")
+        if body then body.CFrame = target end
+    end)
+
+    -- Wrapped so the pin is always released, whatever the prompt does.
+    pcall(function()
+        task.wait(0.8)
+        fireproximityprompt(prompt)
+        task.wait(1.2)
+    end)
+    pin:Disconnect()
+
+    pcall(function()
+        local ch = LocalPlayer.Character
+        local body = ch and ch:FindFirstChild("HumanoidRootPart")
+        if body then body.CFrame = home end
+    end)
+
+    if ownedPets() > before then
+        STATE.petsBought = STATE.petsBought + 1
+        STATE.petBest = pet.name
+        note("bought pet %s (1/%s, $%s)", pet.name, tostring(pet.rolled), tostring(pet.price))
+        return true
+    end
+    note("pet %s: not sold", pet.name)
+    return false
+end
+
+local function buyWorldPet()
+    local pets = worldPets()
+    STATE.petSeen = #pets
+    if #pets == 0 then return false end
+
+    local floor = petFloor()
+    -- Spends past its own reserve but never past the gnomes' one, the same
+    -- way buyFromPodium spends past the pet reserve and not past its own.
+    local cash = money()
+    local budget = cash - gnomeReserve()
+    local best
+
+    for _, pet in ipairs(pets) do
+        if pet.tier >= floor and pet.price <= budget and cash >= pet.price * CONFIG.petKeep then
+            -- Rarest first, a Huge one ahead of a plain one of the same tier.
+            if not best
+                or pet.tier > best.tier
+                or (pet.tier == best.tier and pet.huge and not best.huge) then
+                best = pet
+            end
+        end
+    end
+
+    if not best then return false end
+    return fetchPet(best)
 end
 
 ----------------------------------------------------------------------------
@@ -945,6 +1562,10 @@ local function census()
     STATE.reserve = gnomeReserve()
     STATE.pets = placedPets()
     STATE.petCap = maxPets()
+    STATE.petsOwned = ownedPets()
+    STATE.petReserve = petReserve()
+    STATE.gearLive = gearLive()
+    STATE.restock = tonumber(ReplicatedStorage:GetAttribute("RestockSecondsLeft")) or 0
     return plants, farmers
 end
 
@@ -993,9 +1614,22 @@ task.spawn(function()
                 placeGnomes()
             end
 
-            if CONFIG.autoPets and placedPets() < maxPets() and #heldPetTools() > 0 then
+            -- Before placing: a pet standing in the field despawns after a few
+            -- minutes, so the chance to buy one has to be taken on the pass it
+            -- appears on, not on the next spending tick.
+            if CONFIG.autoBuyPets then
+                STATE.phase = "pet hunt"
+                buyWorldPet()
+            end
+
+            if CONFIG.autoPets and #heldPetTools() > 0 then
                 STATE.phase = "pets"
                 placePets()
+            end
+
+            if CONFIG.autoGearUse and #gearTools() > 0 then
+                STATE.phase = "gear"
+                useGear()
             end
 
             if CONFIG.autoBuy then
@@ -1015,9 +1649,12 @@ end)
 
 -- Spending runs on its own timer so a slow purchase pass cannot hold up the
 -- harvest.
+-- The tree comes first because its nodes are permanent and the shop's are two
+-- to five minutes long.
 loop("spend", 6, function()
     if not CONFIG.auto then return end
     if CONFIG.autoUpgrade then buyTreeNode() end
+    if CONFIG.autoGear then buyGear() end
     if CONFIG.autoExpand then expandPlot() end
     rebirthOnce()
 end)
@@ -1096,6 +1733,33 @@ tuning:Slider("Placement clearance", 2, 8, math.floor(CONFIG.placeClear),
 local readoutCard = page:Card("STATUS", 0)
 local out = readoutCard:Readout(12)
 
+-- The item shop and the pet field are their own page: both are purchases made
+-- somewhere other than the garden, and the FARMING page was already full.
+local shopPage = win:Page("SHOP", UI.icon and UI.icon.bag or nil)
+
+local gear = shopPage:Card("GEAR", 1):Accent()
+gear:Toggle("Auto buy gear", CONFIG.autoGear, function(v) CONFIG.autoGear = v end,
+    "buys the item shop's stock, which restocks every 5 minutes")
+gear:Dropdown("Gear to buy", { "Sprinklers + fertilizer", "Sprinklers only", "Everything" },
+    CONFIG.gearMode, function(v) CONFIG.gearMode = v end)
+gear:Toggle("Auto use gear", CONFIG.autoGearUse, function(v) CONFIG.autoGearUse = v end,
+    "places sprinklers, hands the coffee to a gnome, waters with a can")
+gear:Slider("Gear cash multiple", 1, 10, math.floor(CONFIG.gearKeep),
+    function(v) CONFIG.gearKeep = v end,
+    "only buys while the balance covers the price this many times over")
+
+local petCard = shopPage:Card("PETS", 2)
+petCard:Toggle("Auto buy pets", CONFIG.autoBuyPets, function(v) CONFIG.autoBuyPets = v end,
+    "pets walk around the middle of the map and are bought where they stand")
+petCard:Dropdown("Lowest rarity", PET_CHOICES, CONFIG.petRarity,
+    function(v) CONFIG.petRarity = v end)
+petCard:Slider("Pet cash multiple", 1, 10, math.floor(CONFIG.petKeep),
+    function(v) CONFIG.petKeep = v end,
+    "only buys while the balance covers the price this many times over")
+petCard:Label("Anything below the chosen rarity is left standing in the field. Only three pets can be seated at once, so buying stops there.")
+
+local shopOut = shopPage:Card("STOCK", 0):Readout(13)
+
 local function abbreviate(n)
     n = tonumber(n) or 0
     local units = { "", "K", "M", "B", "T", "Qd", "Qn" }
@@ -1134,6 +1798,30 @@ task.spawn(function()
             "NOTE",
             "  " .. tostring(STATE.note),
         })
+
+        -- The shop page shows the server's own stock table rather than a
+        -- wishlist, so an item reading 0 really is sold out this restock.
+        local stock = shopStock()
+        local lines = {
+            "ITEM SHOP",
+            string.format("  restock in %ds   bought %d   used %d   live on the plot %d",
+                STATE.restock, STATE.gearBought, STATE.gearUsed, STATE.gearLive),
+        }
+        local names = {}
+        for name in pairs(shopEntries()) do names[#names + 1] = name end
+        table.sort(names)
+        for _, name in ipairs(names) do
+            local entry = shopEntries()[name]
+            local have = tonumber(stock[name]) or 0
+            lines[#lines + 1] = string.format("  %-20s $%-10s %s",
+                name, abbreviate(entry.price), have > 0 and ("x" .. have) or "-")
+        end
+        lines[#lines + 1] = "PETS"
+        lines[#lines + 1] = string.format("  in the field %d   placed %d/%d   owned %d   bought %d   swaps %d",
+            STATE.petSeen, STATE.pets, STATE.petCap, STATE.petsOwned,
+            STATE.petsBought, STATE.petSwaps)
+        lines[#lines + 1] = string.format("  held back for a pet $%s", abbreviate(STATE.petReserve))
+        shopOut:set(lines)
         pcall(function()
             win:SetStat(1, abbreviate(STATE.money), "cash")
             win:SetStat(2, tostring(STATE.gnomes), "gnomes")
@@ -1162,6 +1850,15 @@ _G.__ROLLGNOME_DBG = {
     heldPetTools = heldPetTools, placedPets = placedPets, maxPets = maxPets,
     plotRate = plotRate, observedRate = observedRate, income = income,
     claimFreeGnome = claimFreeGnome, rebirthOnce = rebirthOnce,
+    buyGear = buyGear, useGear = useGear, gearTools = gearTools,
+    seatGear = seatGear, giveGnomeItem = giveGnomeItem, waterOne = waterOne,
+    gearHeld = gearHeld, bestCoffeeGnome = bestCoffeeGnome, slowestPlant = slowestPlant,
+    shopStock = shopStock, shopEntries = shopEntries, gearRange = gearRange,
+    gearSpots = gearSpots, placedGear = placedGear, gearLive = gearLive,
+    worldPets = worldPets, buyWorldPet = buyWorldPet, fetchPet = fetchPet,
+    ownedPets = ownedPets, petTier = petTier, petPrice = petPrice,
+    weakestPlacedPet = weakestPlacedPet, petFloor = petFloor,
+    petReserve = petReserve, petSecondsLeft = petSecondsLeft, spendable = spendable,
     gnomeRate = gnomeRate, gnomePrice = gnomePrice, weakestPlaced = weakestPlaced,
     gardenFull = gardenFull, heldGnomeTools = heldGnomeTools, seatTool = seatTool,
     placedCount = placedCount, placedFarmers = placedFarmers,
