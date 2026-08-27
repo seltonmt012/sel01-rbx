@@ -499,6 +499,29 @@ local function rollOnce()
     task.wait(0.6)
 end
 
+-- Is anything standing on the podium still worth having?
+--
+-- This exists because rolling only when the podium is EMPTY deadlocks the whole
+-- ladder, and it did: the podium grew to five slots, one Roll filled all five,
+-- the script bought the four that beat its weakest gnome and left a 6.00/s
+-- Carrot Gnome standing. The preview was then never empty again, so it never
+-- rolled again - one worthless gnome froze the ladder while the garden held
+-- five Corn Gnomes at 11/s and a 195/s gnome was affordable.
+--
+-- The price is deliberately NOT part of this test. A gnome worth buying but not
+-- affordable yet must not be rolled away - that is exactly what gnomeReserve()
+-- is holding the money for.
+local function podiumWorthKeeping()
+    local _, worstRate = weakestPlaced()
+    local haveRoom = not gardenFull()
+    for _, model in ipairs(previewModels()) do
+        if haveRoom or gnomeRate(model.Name) > worstRate * CONFIG.buyMargin then
+            return true
+        end
+    end
+    return false
+end
+
 -- Buy the podium gnome when it earns more per second than the weakest one we
 -- already have standing, or when the garden still has room for anything at
 -- all.  Cheap gnomes are worth buying early exactly because the plot is empty.
@@ -1637,7 +1660,9 @@ task.spawn(function()
                 buyFromPodium()
             end
 
-            if CONFIG.autoRoll and #previewModels() == 0 then
+            -- Not "the podium is empty" but "the podium has nothing left worth
+            -- buying" - see podiumWorthKeeping().
+            if CONFIG.autoRoll and not podiumWorthKeeping() then
                 STATE.phase = "rolling"
                 rollOnce()
             end
@@ -1863,6 +1888,7 @@ _G.__ROLLGNOME_DBG = {
     gardenFull = gardenFull, heldGnomeTools = heldGnomeTools, seatTool = seatTool,
     placedCount = placedCount, placedFarmers = placedFarmers,
     previewModels = previewModels, census = census,
+    podiumWorthKeeping = podiumWorthKeeping,
     fire = fire, invoke = invoke,
 }
 
