@@ -11,6 +11,29 @@
 	},
 	"games": [
 		{
+			"alias": "findegg",
+			"name": "[EGG] Find the Egg for a Brainrot",
+			"file": "games/findegg.lua",
+			"places": [
+				114507117535918
+			],
+			"status": "ok",
+			"note": "first ZAP game: two binary remotes, the whole 98-event API comes out of Shared.Net.client. Pickup/hatch/place are ProximityPrompts, collecting is a firetouchinterest sweep over the SlotPads, and StopTreadmill has to be fired first or every pickup silently fails",
+			"detect": "local rs = game:GetService('ReplicatedStorage') local s = rs:FindFirstChild('Shared') if not s then return false end local n = s:FindFirstChild('Net') return n ~= nil and n:FindFirstChild('client') ~= nil and rs:FindFirstChild('ZAP') ~= nil and game.Workspace:FindFirstChild('HuntSlots') ~= nil"
+		},
+		{
+			"alias": "cleanworld",
+			"name": "Clean the WORLD!",
+			"file": "games/cleanworld.lua",
+			"places": [
+				105767799784652
+			],
+			"status": "ok",
+			"paid": true,
+			"note": "no anti-cheat at all. CollectTrashBag(money, gum): the MONEY half is a trusted count with no cap, the GUM half ignores its argument and trickles ~20/s - gum has to be farmed with CollectPaper('ThundergumNeonGoldPoop'), which pays 139/call on an empty tree and 20,270 with it full. Prestige pays one point per gum skill and the 9 Robux-priced skills survive it",
+			"detect": "local rs = game:GetService('ReplicatedStorage') local r = rs:FindFirstChild('Remotes') return r ~= nil and r:FindFirstChild('CollectTrashBag') ~= nil and r:FindFirstChild('PrestigeRebirth') ~= nil and r:FindFirstChild('PurchaseThundergum') ~= nil and rs:FindFirstChild('Trash') ~= nil"
+		},
+		{
 			"alias": "lootevo",
 			"name": "[+1] Loot Evo",
 			"file": "games/lootevo.lua",
