@@ -18,8 +18,7 @@
 				114507117535918
 			],
 			"status": "ok",
-			"paid": true,
-			"note": "PAID - withheld from the public repo. Marked paid on 2026-08-28 after it was published to GitHub by mistake; leave this flag on unless the script is deliberately being made free. first ZAP game: two binary remotes, the whole 98-event API comes out of Shared.Net.client. Pickup/hatch/place are ProximityPrompts, collecting is a firetouchinterest sweep over the SlotPads, and StopTreadmill has to be fired first or every pickup silently fails",
+			"note": "FREE and deliberately public (confirmed 2026-08-28). first ZAP game: two binary remotes, the whole 98-event API comes out of Shared.Net.client. Pickup/hatch/place are ProximityPrompts, collecting is a firetouchinterest sweep over the SlotPads, and StopTreadmill has to be fired first or every pickup silently fails",
 			"detect": "local rs = game:GetService('ReplicatedStorage') local s = rs:FindFirstChild('Shared') if not s then return false end local n = s:FindFirstChild('Net') return n ~= nil and n:FindFirstChild('client') ~= nil and rs:FindFirstChild('ZAP') ~= nil and game.Workspace:FindFirstChild('HuntSlots') ~= nil"
 		},
 		{
