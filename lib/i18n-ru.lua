@@ -8,7 +8,7 @@
 -- they are - they keep passing "Auto rebirth" and only this file decides what
 -- the player reads.
 --
--- 1564 entries.
+-- 1576 entries.
 
 return {
 	["$%s   %s/s   slots %d/%d   R%d   endurance %s"] = "%s$   %s/с   слоты %d/%d   R%d   выносливость %s",
@@ -410,6 +410,7 @@ return {
 	["FISH & SPENDING"] = "РЫБА И ТРАТЫ",
 	["FISHING"] = "РЫБАЛКА",
 	["FLOORS"] = "ЭТАЖИ",
+	["FOV (degrees)"] = "FOV (градусы)",
 	["FOV (pixels)"] = "FOV (пиксели)",
 	["FOV circle"] = "Круг FOV",
 	["FOV mode is the one most people mean by silent aim: the same pixel circle an aim assist uses, and whoever is inside it dies - it plays like an aimbot without the camera moving. Any target drops the circle, the angle and the wall check entirely."] = "FOV - это то, что большинство и называет silent aim: тот же круг в пикселях, что у помощи прицеливания, и кто внутри - умирает. Играется как аимбот, только камера не двигается. Any target убирает круг, угол и проверку стен полностью.",
@@ -583,6 +584,7 @@ return {
 	["Level brainrots"] = "Качать brainrots",
 	["Level stands"] = "Качать стенды",
 	["Levels per pass"] = "Уровней за проход",
+	["Line of sight only"] = "Только по линии видимости",
 	["Linear"] = "Линейно",
 	["Lock break %/s"] = "Срыв захвата %/с",
 	["Loot range"] = "Радиус лута",
@@ -789,6 +791,7 @@ return {
 	["SCHON GEMELDET  #%s"] = "УЖЕ ОТПРАВЛЕНО  #%s",
 	["SCRIPTS"] = "СКРИПТЫ",
 	["SHOP"] = "МАГАЗИН",
+	["SILENT KEY"] = "КЛАВИША SILENT",
 	["SILENT SHOT"] = "ТИХИЙ ВЫСТРЕЛ",
 	["SKILLS"] = "НАВЫКИ",
 	["SKINS"] = "СКИНЫ",
@@ -831,6 +834,7 @@ return {
 	["Shot interval (ms)"] = "Интервал выстрелов (мс)",
 	["Shots per hold"] = "Выстрелов за удержание",
 	["Shrink with distance"] = "Уменьшать с дистанцией",
+	["Silent aim enabled"] = "Silent Aim включён",
 	["Silent shot"] = "Тихий выстрел",
 	["Sitzung %d min  ·  %d Seiten  ·  Selux v%s"] = "Сессия %d мин  ·  %d страниц  ·  Selux v%s",
 	["Size (studs)"] = "Размер (стадов)",
@@ -901,6 +905,7 @@ return {
 	["Targets"] = "Цели",
 	["Team check"] = "Проверка команды",
 	["Team mates"] = "Союзники",
+	["Test mode (change nothing)"] = "Тестовый режим (ничего не меняет)",
 	["Text outline"] = "Контур текста",
 	["Text size"] = "Размер текста",
 	["The ESP stays - a drawing has never needed panicking away."] = "ESP остаётся - рисунок ещё никогда не приходилось убирать в панике.",
@@ -975,6 +980,7 @@ return {
 	["WEAPON"] = "ОРУЖИЕ",
 	["WEAPONS"] = "ОРУЖИЕ",
 	["WHAT IS HOLDING US BACK"] = "ЧТО НАС ТОРМОЗИТ",
+	["WHAT THE SERVER SEES"] = "ЧТО ВИДИТ СЕРВЕР",
 	["WHAT THIS IS"] = "ЧТО ЭТО",
 	["WHAT WAS MEASURED"] = "ЧТО БЫЛО ИЗМЕРЕНО",
 	["WHEN TO STOP"] = "КОГДА ОСТАНАВЛИВАТЬСЯ",
@@ -1003,6 +1009,7 @@ return {
 	["World2 at 8 rebirths, then 16 / 24 / 32"] = "Мир2 на 8 ребёрнах, затем 16 / 24 / 32",
 	["YOUR ACCOUNT"] = "ТВОЙ АККАУНТ",
 	["Yaw %"] = "Горизонталь %",
+	["You shoot as normal. The bullet goes to the head anyway."] = "Ты стреляешь как обычно. Пуля всё равно идёт в голову.",
 	["ZONE"] = "ЗОНА",
 	["ZONES"] = "ЗОНЫ",
 	["Zone choice"] = "Выбор зоны",
@@ -1017,6 +1024,7 @@ return {
 	["a fast flick goes past the target and comes back"] = "быстрый флик проскакивает цель и возвращается",
 	["a fast human flick is 400-900; smoothing alone cannot cap this"] = "быстрый человеческий флик это 400-900; одно сглаживание это не ограничит",
 	["a flick that stops dead on target is not a hand"] = "флик, который замирает точно на цели, - это не рука",
+	["a hit from 170 deg behind you is what a killcam is for - this is degrees, not pixels"] = "попадание в 170 градусах позади тебя - это ровно то, ради чего есть killcam; здесь градусы, не пиксели",
 	["a lane slower than this is claimed instead of ground out"] = "дорожка медленнее этого забирается, а не гриндится",
 	["a long hold gets slower, the way a hand does"] = "долгое удержание замедляется, как рука",
 	["a machine holds the gun for its whole timer - 12h at rarity 9"] = "машина держит оружие весь таймер - 12 ч при редкости 9",
@@ -1284,6 +1292,7 @@ return {
 	["nobody else can take the lock until the current target has been held this long"] = "никто другой не заберёт захват, пока текущая цель не удержана столько",
 	["nothing else spends the cash the next pickaxe needs"] = "ничто другое не тратит деньги на следующую кирку",
 	["nothing else spends the wins the next evolution needs"] = "ничто другое не тратит победы на следующую эволюцию",
+	["nothing fires by itself - your own shot is redirected on its way out"] = "ничего не стреляет само - твой собственный выстрел перенаправляется по пути",
 	["nothing moves for this long after a target is acquired"] = "столько ничего не двигается после захвата цели",
 	["nothing should assist while you are clicking in here"] = "ничто не должно помогать, пока ты кликаешь здесь",
 	["nothing ticks while it is off - this is the whole engine"] = "ничего не работает, пока выключено - это весь движок",
@@ -1297,6 +1306,7 @@ return {
 	["off for the knives - detected from Ammo/FireRate, not from the name"] = "выкл для ножей - определяется по Ammo/FireRate, а не по имени",
 	["off keeps every label the same size, which stays the most readable"] = "выкл оставляет одинаковый размер - так читаемее всего",
 	["off means every number below is ignored"] = "выключено значит все числа ниже игнорируются",
+	["off means shooting through walls, which the server can re-check whenever it wants"] = "выключено значит стрельба сквозь стены, а сервер может это перепроверить в любой момент",
 	["offline earnings and the forever pack"] = "офлайн-доход и forever-пак",
 	["offline earnings and the tank's pending cash"] = "офлайн-доход и деньги в баке",
 	["offline earnings, playtime reward, streak"] = "офлайн-доход, награда за время, серия",
@@ -1417,6 +1427,7 @@ return {
 	["share of the measured vertical kick that is taken back out"] = "доля измеренного подброса, которая снимается",
 	["share of the vertical kick that is taken back out"] = "доля вертикальной отдачи, которая гасится",
 	["short line showing where that player is actually looking"] = "короткая линия туда, куда игрок реально смотрит",
+	["shows in the readout what it WOULD hit and leaves your shot alone"] = "показывает в панели, во что бы попало, и не трогает твой выстрел",
 	["sits on HeadHB, the hitbox the game grades headshots against"] = "на HeadHB - хитбоксе, по которому считается хедшот",
 	["sits on HeadHB, the part a headshot is graded against"] = "находится на HeadHB - части, по которой засчитывается хедшот",
 	["skins multiply income 1.25x to 36x, about 4.3x expected, and cost only time"] = "скины умножают доход в 1.25x-36x, в среднем около 4.3x, и стоят лишь времени",

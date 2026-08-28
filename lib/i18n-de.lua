@@ -8,7 +8,7 @@
 -- they are - they keep passing "Auto rebirth" and only this file decides what
 -- the player reads.
 --
--- 1564 entries.
+-- 1576 entries.
 
 return {
 	["$%s   %s/s   slots %d/%d   R%d   endurance %s"] = "%s$   %s/s   Plaetze %d/%d   R%d   Ausdauer %s",
@@ -347,6 +347,7 @@ return {
 	["FISH & SPENDING"] = "FISCHE & AUSGABEN",
 	["FISHING"] = "ANGELN",
 	["FLOORS"] = "ETAGEN",
+	["FOV (degrees)"] = "FOV (Grad)",
 	["FOV (pixels)"] = "FOV (Pixel)",
 	["FOV circle"] = "FOV-Kreis",
 	["FOV mode is the one most people mean by silent aim: the same pixel circle an aim assist uses, and whoever is inside it dies - it plays like an aimbot without the camera moving. Any target drops the circle, the angle and the wall check entirely."] = "FOV ist das, was die meisten mit Silent Aim meinen: derselbe Pixelkreis, den eine Zielhilfe benutzt, und wer drin ist stirbt - es spielt sich wie ein Aimbot, nur ohne dass die Kamera sich bewegt. Any target lässt Kreis, Winkel und Wandprüfung komplett weg.",
@@ -495,6 +496,7 @@ return {
 	["Level brainrots"] = "Brainrots leveln",
 	["Level stands"] = "Stände leveln",
 	["Levels per pass"] = "Level pro Durchlauf",
+	["Line of sight only"] = "Nur mit Sichtlinie",
 	["Lock break %/s"] = "Lock-Abbruch %/s",
 	["Loot range"] = "Loot-Reichweite",
 	["Lowest HP"] = "Wenigste HP",
@@ -674,6 +676,7 @@ return {
 	["Run stages"] = "Stages laufen",
 	["Runs even with the master switch off, so nothing kills you while you wait"] = "Läuft auch bei ausgeschaltetem Hauptschalter, damit dich beim Warten nichts umbringt",
 	["SAFETY"] = "SICHERHEIT",
+	["SILENT KEY"] = "SILENT TASTE",
 	["SKINS + RUBY"] = "SKINS + RUBINE",
 	["SPEED"] = "TEMPO",
 	["SPEND"] = "AUSGEBEN",
@@ -708,6 +711,7 @@ return {
 	["Shot interval (ms)"] = "Schussabstand (ms)",
 	["Shots per hold"] = "Schüsse pro Halten",
 	["Shrink with distance"] = "Mit Entfernung kleiner",
+	["Silent aim enabled"] = "Silent Aim an",
 	["Silent shot"] = "Silent Shot",
 	["Size (studs)"] = "Größe (Studs)",
 	["Skeleton"] = "Skelett",
@@ -765,6 +769,7 @@ return {
 	["Targets"] = "Ziele",
 	["Team check"] = "Team-Prüfung",
 	["Team mates"] = "Team",
+	["Test mode (change nothing)"] = "Testmodus (ändert nichts)",
 	["Text outline"] = "Textumriss",
 	["Text size"] = "Textgröße",
 	["The ESP stays - a drawing has never needed panicking away."] = "Das ESP bleibt - eine Zeichnung musste noch nie in Panik weg.",
@@ -831,6 +836,7 @@ return {
 	["WEAPON"] = "WAFFE",
 	["WEAPONS"] = "WAFFEN",
 	["WHAT IS HOLDING US BACK"] = "WAS UNS AUFHÄLT",
+	["WHAT THE SERVER SEES"] = "WAS DER SERVER SIEHT",
 	["WHAT THIS IS"] = "WAS DAS IST",
 	["WHAT WAS MEASURED"] = "WAS GEMESSEN WURDE",
 	["WHEN TO STOP"] = "WANN AUFHÖREN",
@@ -854,6 +860,7 @@ return {
 	["World2 at 8 rebirths, then 16 / 24 / 32"] = "Welt2 bei 8 Rebirths, dann 16 / 24 / 32",
 	["YOUR ACCOUNT"] = "DEIN ACCOUNT",
 	["Yaw %"] = "Waagerecht %",
+	["You shoot as normal. The bullet goes to the head anyway."] = "Du schießt ganz normal. Die Kugel geht trotzdem auf den Kopf.",
 	["ZONES"] = "ZONEN",
 	["Zone choice"] = "Zonenwahl",
 	["Zone pick"] = "Zonenwahl",
@@ -866,6 +873,7 @@ return {
 	["a fast flick goes past the target and comes back"] = "ein schneller Flick schießt über das Ziel hinaus und kommt zurück",
 	["a fast human flick is 400-900; smoothing alone cannot cap this"] = "ein schneller menschlicher Flick liegt bei 400-900; Glättung allein deckelt das nicht",
 	["a flick that stops dead on target is not a hand"] = "ein Flick, der genau auf dem Ziel stehen bleibt, ist keine Hand",
+	["a hit from 170 deg behind you is what a killcam is for - this is degrees, not pixels"] = "ein Treffer 170 Grad hinter dir ist genau das, wofür es eine Killcam gibt - das hier sind Grad, keine Pixel",
 	["a lane slower than this is claimed instead of ground out"] = "eine langsamere Bahn wird abgeholt statt durchgegrindet",
 	["a long hold gets slower, the way a hand does"] = "ein langes Halten wird langsamer, so wie eine Hand",
 	["a machine holds the gun for its whole timer - 12h at rarity 9"] = "die Maschine haelt die Waffe den ganzen Timer - 12 Std bei Seltenheit 9",
@@ -1128,6 +1136,7 @@ return {
 	["nobody else can take the lock until the current target has been held this long"] = "niemand sonst bekommt den Lock bevor das aktuelle Ziel so lange gehalten wurde",
 	["nothing else spends the cash the next pickaxe needs"] = "nichts sonst gibt das Geld für die nächste Spitzhacke aus",
 	["nothing else spends the wins the next evolution needs"] = "nichts sonst gibt die Wins für die nächste Evolution aus",
+	["nothing fires by itself - your own shot is redirected on its way out"] = "nichts feuert von selbst - dein eigener Schuss wird auf dem Weg nach draußen umgelenkt",
 	["nothing moves for this long after a target is acquired"] = "so lange bewegt sich nichts nachdem ein Ziel erfasst wurde",
 	["nothing should assist while you are clicking in here"] = "nichts soll helfen während du hier drin klickst",
 	["nothing ticks while it is off - this is the whole engine"] = "nichts läuft wenn das aus ist - das ist der ganze Motor",
@@ -1140,6 +1149,7 @@ return {
 	["off for the knives - detected from Ammo/FireRate, not from the name"] = "aus für die Messer - erkannt an Ammo/FireRate, nicht am Namen",
 	["off keeps every label the same size, which stays the most readable"] = "aus lässt alle Beschriftungen gleich groß, das bleibt am lesbarsten",
 	["off means every number below is ignored"] = "aus heißt, jede Zahl darunter wird ignoriert",
+	["off means shooting through walls, which the server can re-check whenever it wants"] = "aus heißt durch Wände schießen, und das kann der Server jederzeit nachprüfen",
 	["offline earnings and the forever pack"] = "Offline-Einnahmen und das Forever-Pack",
 	["offline earnings and the tank's pending cash"] = "Offline-Einnahmen und das Geld im Tank",
 	["offline earnings, playtime reward, streak"] = "Offline-Einnahmen, Spielzeit-Belohnung, Streak",
@@ -1259,6 +1269,7 @@ return {
 	["share of the measured vertical kick that is taken back out"] = "Anteil des gemessenen Hochziehens der zurückgenommen wird",
 	["share of the vertical kick that is taken back out"] = "Anteil des vertikalen Rückstoßes der wieder herausgenommen wird",
 	["short line showing where that player is actually looking"] = "kurze Linie, die zeigt wohin dieser Spieler wirklich schaut",
+	["shows in the readout what it WOULD hit and leaves your shot alone"] = "zeigt in der Anzeige, was es treffen WÜRDE, und lässt deinen Schuss in Ruhe",
 	["sits on HeadHB, the hitbox the game grades headshots against"] = "sitzt auf HeadHB, der Hitbox für Kopftreffer",
 	["sits on HeadHB, the part a headshot is graded against"] = "sitzt auf HeadHB, dem Teil, gegen das ein Kopfschuss gewertet wird",
 	["skins multiply income 1.25x to 36x, about 4.3x expected, and cost only time"] = "Skins vervielfachen das Einkommen 1.25x bis 36x, erwartet etwa 4.3x, und kosten nur Zeit",
