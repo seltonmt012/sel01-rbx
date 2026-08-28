@@ -49,6 +49,28 @@ local HttpService = game:GetService("HttpService")
 
 local plr = Players.LocalPlayer
 
+-- Where a ScreenGui is PARENTED decides whether the game can find it, and the
+-- three containers are not equally safe. Measured in BloxStrike from a thread set
+-- to identity 2 (what a normal LocalScript runs as): `game:GetService("CoreGui")`
+-- comes back NIL, so a panel in there cannot be walked onto - while
+-- `PlayerGui:GetChildren()` answers normally and lists every child by name. The
+-- old order was CoreGui first and PlayerGui as the fallback, which is right up
+-- until the executor refuses CoreGui: the panel then lands in the one container
+-- every client script can read, under a name that says exactly what it is.
+--
+-- So: gethui() first (not in the DataModel at all), CoreGui second, and if it
+-- really has to be PlayerGui the name is randomised - a panel that is visible is
+-- one thing, a panel that is visible AND identifies the script is another.
+local function hostGui(gui)
+	pcall(function() gui.Parent = gethui and gethui() end)
+	if gui.Parent then return gui end
+	pcall(function() gui.Parent = game:GetService("CoreGui") end)
+	if gui.Parent then return gui end
+	gui.Name = "_" .. tostring(math.random(100000, 999999))
+	gui.Parent = plr:WaitForChild("PlayerGui")
+	return gui
+end
+
 local UI = {}
 
 UI.VERSION = "3.6"
@@ -1462,8 +1484,7 @@ function UI.askDevice(onDone)
 	gui.IgnoreGuiInset = true
 	gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 	gui.DisplayOrder = 1000
-	pcall(function() gui.Parent = game:GetService("CoreGui") end)
-	if not gui.Parent then gui.Parent = plr:WaitForChild("PlayerGui") end
+	hostGui(gui)
 	UI.deviceGui = gui
 
 	local card = frame(gui, UDim2.fromOffset(W, H), nil, UI.theme.window)
@@ -1619,8 +1640,7 @@ function UI.Window(options)
 	gui.IgnoreGuiInset = true
 	gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 	gui.DisplayOrder = 999
-	pcall(function() gui.Parent = game:GetService("CoreGui") end)
-	if not gui.Parent then gui.Parent = plr:WaitForChild("PlayerGui") end
+	hostGui(gui)
 	window.gui = gui
 
 	local root = Instance.new("Frame")

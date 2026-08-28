@@ -354,6 +354,7 @@
 				114234929420007
 			],
 			"status": "ok",
+			"paid": true,
 			"note": "5v5 bomb defusal; no Humanoid anywhere - characters live in workspace.Characters and carry Health/Dead/CameraCFrame as attributes, and the team is a Player attribute rather than Player.Team",
 			"detect": "local rs = game:GetService('ReplicatedStorage') local db = rs:FindFirstChild('Database') local cu = db and db:FindFirstChild('Custom') local w = cu and cu:FindFirstChild('Weapons') return w ~= nil and w:FindFirstChild('SprayPatterns') ~= nil and workspace:GetAttribute('sv_maxspeed') ~= nil"
 		},
