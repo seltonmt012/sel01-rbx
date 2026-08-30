@@ -11,6 +11,17 @@
 	},
 	"games": [
 		{
+			"alias": "islandescape",
+			"name": "Mrbeast Island Escape",
+			"file": "games/islandescape.lua",
+			"places": [
+				108645230905176
+			],
+			"status": "ok",
+			"note": "FREE and deliberately public. Round-based co-op survival: harvest, craft the tool ladder, build the boat, fetch the four artifacts, escape. Lobby and round share one PlaceId; detect keys on Workspace.Lobby / Workspace.Game. meleeHitRemote takes arrays and the server does not cap AOE",
+			"detect": "local rs = game:GetService('ReplicatedStorage') local e = rs:FindFirstChild('Engine') local ev = rs:FindFirstChild('Events') return e ~= nil and e:FindFirstChild('Service') ~= nil and ev ~= nil and ev:FindFirstChild('meleeHitRemote') ~= nil and (game.Workspace:FindFirstChild('Lobby') ~= nil or game.Workspace:FindFirstChild('Game') ~= nil)"
+		},
+		{
 			"alias": "findegg",
 			"name": "[EGG] Find the Egg for a Brainrot",
 			"file": "games/findegg.lua",
