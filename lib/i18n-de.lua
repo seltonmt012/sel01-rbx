@@ -8,7 +8,7 @@
 -- they are - they keep passing "Auto rebirth" and only this file decides what
 -- the player reads.
 --
--- 1576 entries.
+-- 1585 entries.
 
 return {
 	["$%s   %s/s   slots %d/%d   R%d   endurance %s"] = "%s$   %s/s   Plaetze %d/%d   R%d   Ausdauer %s",
@@ -156,6 +156,7 @@ return {
 	["Block Robux popups"] = "Robux-Popups blockieren",
 	["Blue x2 @1M up to Super Saiyan x400 @1Qa, stacks with the trail"] = "Blue x2 @1M bis Super Saiyan x400 @1Qa, stapelt mit dem Trail",
 	["Blue x2 @25K up to Sun x400 @25T"] = "Blue x2 @25K bis Sun x400 @25T",
+	["Body"] = "Körper",
 	["BodyHitbox 4.8x4.6x2.2 and HeadHitbox 3.2 cubed - both far bigger than the model"] = "BodyHitbox 4,8x4,6x2,2 und HeadHitbox 3,2 im Würfel - beide viel größer als das Modell",
 	["Bomb countdown"] = "Bomben-Countdown",
 	["Boost (x game speed)"] = "Boost (x Spieltempo)",
@@ -231,6 +232,7 @@ return {
 	["Claim free rewards"] = "Gratis-Belohnungen holen",
 	["Claim group reward"] = "Gruppenbelohnung holen",
 	["Claim now"] = "Jetzt abholen",
+	["Claim on"] = "Claim auf",
 	["Claim rewards"] = "Belohnungen holen",
 	["Claim rewards now"] = "Belohnungen jetzt holen",
 	["Claim win pads"] = "Win-Pads abholen",
@@ -560,6 +562,7 @@ return {
 	["Noise speed (1/10 Hz)"] = "Rauschtempo (1/10 Hz)",
 	["Not scoped"] = "Ohne Zoom",
 	["OBJECTIVES"] = "ZIELE",
+	["OFF = through walls, which is the whole point; ON is far less obvious"] = "AUS = durch Wände, genau darum geht es; AN ist deutlich unauffälliger",
 	["ONE-OFF MONEY"] = "EINMALIGES GELD",
 	["ORCHARD"] = "OBSTGARTEN",
 	["ORE%-LEVEL"] = "ERZ%-LEVEL",
@@ -575,7 +578,7 @@ return {
 	["One press turns aim, trigger, auto fire and recoil control off. "] = "Ein Druck schaltet Aim, Trigger, Autofeuer und Rückstoßkontrolle aus. ",
 	["Only airborne"] = "Nur in der Luft",
 	["Only grounded"] = "Nur am Boden",
-	["Only while the gun can fire"] = "Nur solange die Waffe schießen kann",
+	["Only while the gun can fire"] = "Nur wenn die Waffe feuern kann",
 	["Open blocks now"] = "Blöcke jetzt öffnen",
 	["Open eggs"] = "Eier öffnen",
 	["Open loot boxes"] = "Kisten öffnen",
@@ -676,7 +679,9 @@ return {
 	["Run stages"] = "Stages laufen",
 	["Runs even with the master switch off, so nothing kills you while you wait"] = "Läuft auch bei ausgeschaltetem Hauptschalter, damit dich beim Warten nichts umbringt",
 	["SAFETY"] = "SICHERHEIT",
-	["SILENT KEY"] = "SILENT TASTE",
+	["SERVER-TRUSTED and blatant. Measured 2026-08-31: this game's MercHitClaim is applied with no line-of-sight or direction check, so a claim on an enemy's head registers as a headshot wherever you are looking - through walls, across the map - and credits the kill. This is the single most detectable thing in this script: a body dropping from 100 to 0 while you face the other way is obvious to everyone in the lobby and trivially reportable. Off by default and in no preset for exactly that reason."] = "SERVERSEITIG VERTRAUT und offensichtlich. Gemessen am 31.08.2026: MercHitClaim wird ohne Sichtlinien- oder Richtungsprüfung angewandt, ein Claim auf den Kopf eines Gegners zählt als Kopftreffer, egal wohin du schaust - durch Wände, über die ganze Map - und schreibt den Kill gut. Das ist mit Abstand das auffälligste in diesem Script: ein Körper, der von 100 auf 0 fällt während du wegschaust, ist für jeden in der Lobby offensichtlich und trivial zu melden. Darum standardmäßig aus und in keinem Preset.",
+	["SILENT AIM ON - this is blatant"] = "SILENT AIM AN - das ist offensichtlich",
+	["SILENT KEY"] = "SILENT-TASTE",
 	["SKINS + RUBY"] = "SKINS + RUBINE",
 	["SPEED"] = "TEMPO",
 	["SPEND"] = "AUSGEBEN",
@@ -711,7 +716,7 @@ return {
 	["Shot interval (ms)"] = "Schussabstand (ms)",
 	["Shots per hold"] = "Schüsse pro Halten",
 	["Shrink with distance"] = "Mit Entfernung kleiner",
-	["Silent aim enabled"] = "Silent Aim an",
+	["Silent aim enabled"] = "Silent Aim aktiv",
 	["Silent shot"] = "Silent Shot",
 	["Size (studs)"] = "Größe (Studs)",
 	["Skeleton"] = "Skelett",
@@ -916,6 +921,7 @@ return {
 	["behind a wall is drawn at 55% brightness instead of full"] = "hinter einer Wand wird mit 55% Helligkeit statt voll gezeichnet",
 	["behind a wall the same colour is drawn at 55% brightness"] = "hinter einer Wand wird dieselbe Farbe mit 55% Helligkeit gezeichnet",
 	["below 100 deliberately lets a cooldown pass without firing"] = "unter 100 lässt absichtlich einen Cooldown verstreichen, ohne zu feuern",
+	["below 100 deliberately skips claims"] = "unter 100 lässt absichtlich Claims aus",
 	["below 100 deliberately skips shots"] = "unter 100 lässt absichtlich Schüsse aus",
 	["below 100 draws the box - useful to see what is actually being changed"] = "unter 100 wird die Box gezeichnet - nützlich, um zu sehen, was wirklich verändert wird",
 	["best Strength the cash allows, paid in cash only"] = "beste Kraft die das Geld erlaubt, nur mit Geld bezahlt",
@@ -953,6 +959,7 @@ return {
 	["cheapest earner first, always with the allowed stack size"] = "günstigster Verdiener zuerst, immer mit der erlaubten Stapelgröße",
 	["cheapest useful first; Punch Speed stops at level 10, the cooldown caps it"] = "billigstes Nützliches zuerst; Punch Speed endet bei Level 10",
 	["chests"] = "Kisten",
+	["claims a headshot on the best target through the game's own hit remote"] = "claimt einen Kopftreffer auf das beste Ziel über das spieleigene Hit-Remote",
 	["claims the deepest finished stage; a claim resets the run"] = "holt die tiefste fertige Stage; ein Claim setzt den Lauf zurück",
 	["claims the free gnome as soon as its timer is up"] = "holt den Gratis-Gnom, sobald sein Timer abgelaufen ist",
 	["claims tokens (free) and buys Rebirth +1: flat 500, unlimited, compounding"] = "holt Tokens (gratis) und kauft Rebirth +1: pauschal 500, unbegrenzt",
@@ -1164,6 +1171,7 @@ return {
 	["one Heartbeat drives both engines at once"] = "ein Heartbeat treibt beide Motoren zugleich",
 	["one Matteo, once per account"] = "ein Matteo, einmal pro Account",
 	["one call per frame; the server caps it at ~13 str/s"] = "ein Aufruf pro Frame; der Server deckelt bei ~13 Kraft/s",
+	["one claim per real shot - ammo, reload and fire rate all move as normal"] = "ein Claim pro echtem Schuss - Munition, Nachladen und Feuerrate laufen normal",
 	["one guarded cycle: clean, display, sell, dig"] = "ein gesicherter Zyklus: putzen, ausstellen, verkaufen, graben",
 	["one pattern unit in camera radians, measured while you spray"] = "eine Mustereinheit in Kamera-Radiant, gemessen während du sprayst",
 	["one per call, no cooldown - the worlds are priced in these"] = "einer pro Call, kein Cooldown - die Welten kosten genau diese",
@@ -1270,6 +1278,7 @@ return {
 	["share of the vertical kick that is taken back out"] = "Anteil des vertikalen Rückstoßes der wieder herausgenommen wird",
 	["short line showing where that player is actually looking"] = "kurze Linie, die zeigt wohin dieser Spieler wirklich schaut",
 	["shows in the readout what it WOULD hit and leaves your shot alone"] = "zeigt in der Anzeige, was es treffen WÜRDE, und lässt deinen Schuss in Ruhe",
+	["silent aim off"] = "Silent Aim aus",
 	["sits on HeadHB, the hitbox the game grades headshots against"] = "sitzt auf HeadHB, der Hitbox für Kopftreffer",
 	["sits on HeadHB, the part a headshot is graded against"] = "sitzt auf HeadHB, dem Teil, gegen das ein Kopfschuss gewertet wird",
 	["skins multiply income 1.25x to 36x, about 4.3x expected, and cost only time"] = "Skins vervielfachen das Einkommen 1.25x bis 36x, erwartet etwa 4.3x, und kosten nur Zeit",

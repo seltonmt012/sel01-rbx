@@ -162,21 +162,30 @@
     the recon above could be done at all.
 
   ============================================================================
-  WHAT THIS FILE DOES NOT DO
+  SILENT AIM - MEASURED, AND NOW SHIPPED (off by default)
   ============================================================================
 
-  Nothing here fabricates a hit, fires a combat remote, or writes a damage value.
-  The aim moves the VIEW and the trigger presses the REAL mouse button, so
-  whatever the server validates, it validates an ordinary shot.
+  The aim assist and the trigger still touch NOTHING they should not: the aim
+  moves the VIEW, the trigger presses the REAL mouse button, and neither fabricates
+  a hit. But the two shots that used to be left unfired have now been fired.
 
-  There is deliberately NO silent-aim page. `BulletController._ClaimMercHit` fires
-  `Remotes.Combat.MercHitClaim:FireServer(weapon, userId, partName, ...)` - the
-  client names the part it hit, which is the shape where silent aim is normally
-  possible - but whether the server re-checks the direction or the line of sight
-  was NOT MEASURED, and this project does not ship an exploit on the strength of
-  the shape alone. The RECOIL page says so in as many words. If the two shots that
-  would settle it are ever fired against the `Kills` attribute, the page can be
-  added then, off by default and in no preset, the way the genre file requires.
+  MEASURED 2026-08-31, against the `Kills` attribute and the replicated decoy
+  health that is the oracle here: `BulletController._ClaimMercHit` fires
+  `Remotes.Combat.MercHitClaim:FireServer(weapon, userId, partName, hitPos, origin,
+  normal, fireId)`, and the server applies it with NO line-of-sight and NO
+  direction re-check. One claim built on a head part 160 studs away and out of
+  view took the target 100 -> 0 in a single frame and credited the kill. A second
+  measurement through the shipped target-picker landed 87 damage at range (falloff,
+  not a one-shot) - same conclusion: the server trusts the part the client names.
+
+  So the SILENT page exists, and it is the one genuinely dangerous thing in this
+  file. It reuses the game's own `_ClaimMercHit` (so the payload is byte-for-byte a
+  real hit's), is gated to the real gun by default so ammo and fire rate move as
+  normal, and is - as the genre file requires - off by default, in no preset, with
+  its own written warning on the page. It is far more detectable than the aim
+  assist: a body dropping to zero while you face away is obvious to the whole lobby.
+  The IntegrityController does not watch it (its reasons are all hook / BodyMover
+  checks), but a server-side hit-RATE check was not tested - only single claims were.
 ]]
 
 local Players           = game:GetService("Players")
@@ -307,6 +316,24 @@ local CONFIG = {
 	trigHold   = false,    -- hold the button down on an automatic
 	trigHoldMs = 120,
 
+	-- silent aim (SERVER-TRUSTED) ----------------------------------------------
+	--
+	-- MEASURED 2026-08-31: MercHitClaim:FireServer(weapon, userId, part, ...) is
+	-- applied by the server with NO line-of-sight or direction re-check. One claim
+	-- against a head part 160 studs away and out of view took the target 100 -> 0
+	-- and credited the kill. So silent aim is real here - and it is the single most
+	-- detectable thing in this file, because a body dropping to zero while you face
+	-- away is obvious to everyone in the lobby. Off by default, in no preset.
+	silent        = false,
+	silentActive  = "While firing",  -- While firing | Always | Hotkey
+	silentKey     = "MouseButton1",
+	silentPart    = "Head",          -- the head one-shots every gun in the registry
+	silentFov     = 300,             -- px around the crosshair a target must fall in
+	silentMaxDist = 500,
+	silentVisible = false,           -- false = through walls, which is the whole point
+	silentReady   = true,            -- one claim per real shot: ammo/reload/rate move as normal
+	silentHitPct  = 100,             -- below 100 deliberately skips claims
+
 	-- recoil control -----------------------------------------------------------
 	--
 	-- Camera side ONLY. This never touches RecoilSpring, which is the field the
@@ -397,6 +424,7 @@ local STATE = {
 	targets    = 0, enemies = 0, friends = 0,
 	target     = "-", targetPart = "-",
 	trigHits   = 0, trigOn = false,
+	silentTgt  = "-", silentHits = 0,
 	underCross = "-",
 	aimDps     = 0, aimDpsPeak = 0, gunOffset = -1, aimError = 0, aimPending = 0,
 	lastKey    = "-",
@@ -454,6 +482,7 @@ end
 local Controllers = ClientMods and ClientMods:FindFirstChild("Controllers")
 
 local GunCtl    = tryRequire(Controllers and Controllers:FindFirstChild("GunController"))
+local BulletCtl = tryRequire(Controllers and Controllers:FindFirstChild("BulletController"))
 local CameraPOV = tryRequire(ClientMods and ClientMods:FindFirstChild("CameraPOV"))
 local Hostility = tryRequire(Shared and Shared:FindFirstChild("Combat")
 	and Shared.Combat:FindFirstChild("Hostility"))
@@ -1663,8 +1692,9 @@ UserInputService.InputBegan:Connect(function(input, processed)
 	local spec = resolveKey(CONFIG.panicKey)
 	if not spec or not spec.key or input.KeyCode ~= spec.key then return end
 	CONFIG.aim, CONFIG.trig, CONFIG.aimFire, CONFIG.rcs = false, false, false, false
+	CONFIG.silent = false
 	for _, fn in ipairs(panicHandlers) do pcall(fn) end
-	note("PANIC - aim, trigger, auto fire and recoil control off")
+	note("PANIC - aim, trigger, auto fire, silent aim and recoil control off")
 end)
 
 --------------------------------------------------------------------------------
@@ -2744,6 +2774,119 @@ task.spawn(function()
 	end
 end)
 
+--------------------------------------------------------------------------------
+-- silent aim
+--------------------------------------------------------------------------------
+--
+-- The server applies MercHitClaim with no line-of-sight or direction check
+-- (measured 2026-08-31: one claim on a head part 160 studs away and out of view
+-- took the target 100 -> 0 and credited the kill). So a claim built on an enemy's
+-- head part registers as a headshot wherever the view is actually pointing.
+--
+-- It reuses the game's OWN BulletController:_ClaimMercHit, which re-derives the
+-- userId and the part name from the part it is handed and fires the exact payload
+-- a real hit would - nothing here is a hand-built remote call. It is gated to the
+-- real gun by default (`silentReady`), so ammo, reload and fire rate all move as
+-- if the shots were ordinary rather than a claim stream with no gun behind it.
+
+local function silentPartOf(model)
+	local want = CONFIG.silentPart
+	if want == "Body" then return bodyPart(model) end
+	if want == "Nearest" then return targetPart(model) end
+	return headPart(model)
+end
+
+-- The best target for a claim: nearest to the crosshair, on screen, within the
+-- silent FOV and range. Line of sight is NOT required unless `silentVisible` -
+-- through walls is the whole point of this over the aim assist.
+local function silentTarget()
+	local mid = centreOf()
+	local camPos = camera.CFrame.Position
+	local best, bestPx
+	for _, entry in ipairs(combatants()) do
+		if entry.foe then
+			local hp, _, root = aliveOf(entry)
+			if hp then
+				local part = silentPartOf(entry.model)
+				local dist = root and (camPos - root.Position).Magnitude or math.huge
+				if part and dist <= CONFIG.silentMaxDist then
+					local sp = camera:WorldToViewportPoint(part.Position)
+					if sp.Z > 0 then
+						local px = (Vector2.new(sp.X, sp.Y) - mid).Magnitude
+						if px <= CONFIG.silentFov then
+							if (not CONFIG.silentVisible) or visibleTo(entry.model, part) then
+								if not bestPx or px < bestPx then
+									best, bestPx = { entry = entry, part = part }, px
+								end
+							end
+						end
+					end
+				end
+			end
+		end
+	end
+	return best
+end
+
+-- One claim, through the game's own method so the payload is byte-for-byte what a
+-- real hit sends. `_ClaimMercHit(weapon, part, hitPos, normal, origin, fireId)`
+-- reads the owner and the part name off `part` itself.
+local function fireSilentClaim(entry, part)
+	if not (BulletCtl and BulletCtl._mercHitClaimRemote and part) then return false end
+	local weaponId = weaponName()
+	if weaponId == "-" then return false end
+	local origin = camera.CFrame.Position
+	if CameraPOV and CameraPOV.GetEyePosition then
+		local ok, eye = pcall(CameraPOV.GetEyePosition)
+		if ok and typeof(eye) == "Vector3" then origin = eye end
+	end
+	local hitPos = part.Position
+	local n = origin - hitPos
+	local normal = (n.Magnitude > 0.001) and n.Unit or Vector3.yAxis
+	return pcall(function()
+		BulletCtl:_ClaimMercHit(weaponId, part, hitPos, normal, origin, nil)
+	end)
+end
+
+local function silentGate()
+	if CONFIG.silentActive == "Always" then return true end
+	if CONFIG.silentActive == "Hotkey" then return keyHeld(CONFIG.silentKey) end
+	return firing()
+end
+
+task.spawn(function()
+	claimIdentity()
+	local nextAt = 0
+	while _G.__TTK == GEN do
+		local ok, err = pcall(function()
+			if not CONFIG.silent then STATE.silentTgt = "-" return end
+			if not silentGate() then STATE.silentTgt = "-" return end
+			if not deployed() then return end
+			if CONFIG.silentReady and not shotReady() then return end
+			local now = os.clock() * 1000
+			if now < nextAt then return end
+
+			local best = silentTarget()
+			if not best then STATE.silentTgt = "-" return end
+
+			local def = myDef()
+			local rate = math.max(((def and def.FireRate) or 0.12) * 1000, 40)
+
+			if math.random(100) > CONFIG.silentHitPct then
+				nextAt = now + rate
+				return
+			end
+			if fireSilentClaim(best.entry, best.part) then
+				STATE.silentTgt = tostring(best.entry.name)
+				STATE.silentHits = STATE.silentHits + 1
+			end
+			nextAt = os.clock() * 1000 + rate
+		end)
+		if not ok then note("silent: " .. tostring(err)) end
+		task.wait(0.01)
+	end
+end)
+
 -- A kill pauses the aim: staying glued to a corpse and then flicking off it is
 -- the most obvious thing an assist can do. A rig going Ragdolled, losing its
 -- health or being reparented as a corpse all count.
@@ -3146,6 +3289,46 @@ end)
 trigOut = trigPage:Card("STATUS", 1):Readout(7)
 end
 
+-- SILENT AIM -------------------------------------------------------------------
+
+local silentOut
+
+do
+local silentPage = win:Page("SILENT", UI.icon.flame)
+
+local sCard = silentPage:Card("SILENT AIM", 1):Accent()
+sCard:Label("SERVER-TRUSTED and blatant. Measured 2026-08-31: this game's MercHitClaim is applied with no line-of-sight or direction check, so a claim on an enemy's head registers as a headshot wherever you are looking - through walls, across the map - and credits the kill. This is the single most detectable thing in this script: a body dropping from 100 to 0 while you face the other way is obvious to everyone in the lobby and trivially reportable. Off by default and in no preset for exactly that reason.")
+reg("silent", sCard:Toggle("Silent aim enabled", CONFIG.silent, function(v)
+	CONFIG.silent = v
+	note(v and "SILENT AIM ON - this is blatant" or "silent aim off")
+end, "claims a headshot on the best target through the game's own hit remote", UI.theme.bad))
+sCard:Dropdown("Trigger", { "While firing", "Always", "Hotkey" }, CONFIG.silentActive,
+	function(v) CONFIG.silentActive = v end)
+bindButton(sCard, "SILENT KEY", function() return CONFIG.silentKey end,
+	function(v) CONFIG.silentKey = v end)
+reg("silentReady", sCard:Toggle("Only while the gun can fire", CONFIG.silentReady,
+	function(v) CONFIG.silentReady = v end,
+	"one claim per real shot - ammo, reload and fire rate all move as normal",
+	UI.theme.good))
+
+local sTune = silentPage:Card("TARGET", 2)
+reg("silentPart", sTune:Dropdown("Claim on", { "Head", "Body", "Nearest" },
+	CONFIG.silentPart, function(v) CONFIG.silentPart = v end))
+reg("silentFov", sTune:Slider("FOV (pixels)", 5, 600, CONFIG.silentFov,
+	function(v) CONFIG.silentFov = v end,
+	"only enemies inside this circle around the crosshair"))
+sTune:Slider("Max distance", 50, 800, CONFIG.silentMaxDist,
+	function(v) CONFIG.silentMaxDist = v end)
+reg("silentVisible", sTune:Toggle("Visible only", CONFIG.silentVisible,
+	function(v) CONFIG.silentVisible = v end,
+	"OFF = through walls, which is the whole point; ON is far less obvious",
+	UI.theme.warn))
+reg("silentHitPct", sTune:Slider("Hit chance %", 1, 100, CONFIG.silentHitPct,
+	function(v) CONFIG.silentHitPct = v end, "below 100 deliberately skips claims"))
+
+silentOut = silentPage:Card("STATUS", 0):Readout(6)
+end
+
 -- RECOIL -----------------------------------------------------------------------
 
 local recOut, acOut
@@ -3546,6 +3729,37 @@ task.spawn(function()
 	end
 end)
 
+-- Silent-aim status readout, refreshed on its own so it does not have to be
+-- threaded into the main panel loop's deeply nested block.
+task.spawn(function()
+	claimIdentity()
+	while _G.__TTK == GEN do
+		if silentOut then
+			pcall(function()
+				silentOut:set({
+					"  state    " .. (CONFIG.silent
+						and (CONFIG.silentActive == "Hotkey"
+							and ("waiting for " .. keyDisplay(CONFIG.silentKey))
+							or CONFIG.silentActive:lower())
+						or "off"),
+					"  target   " .. tostring(STATE.silentTgt),
+					string.format("  claims   %d   part %s   %s",
+						STATE.silentHits, CONFIG.silentPart,
+						CONFIG.silentVisible and "visible only" or "through walls"),
+					string.format("  gun      %s   %d/%d",
+						shotReady() and "ready" or "not ready",
+						STATE.mag, STATE.magMax),
+					(BulletCtl and BulletCtl._mercHitClaimRemote)
+						and "  remote   MercHitClaim - server applies it with no LOS check"
+						or "  remote   MercHitClaim NOT FOUND - silent aim cannot fire",
+					"  the most detectable feature here - a kill while facing away",
+				})
+			end)
+		end
+		task.wait(0.2)
+	end
+end)
+
 pcall(function() win:Home() end)
 win:Refresh()
 
@@ -3559,6 +3773,8 @@ _G.__TTK_DBG = {
 	bulletRay = bulletRay, rigFromHit = rigFromHit, visibleTo = visibleTo,
 	excludeList = excludeList,
 	underCrosshair = underCrosshair, pickTarget = pickTarget,
+	silentTarget = silentTarget, fireSilentClaim = fireSilentClaim,
+	silentPartOf = silentPartOf, BulletCtl = BulletCtl,
 	aimPass = aimPass, renderPass = renderPass, recoilPass = recoilPass,
 	shotWatch = shotWatch, shotReady = shotReady, adsOn = adsOn,
 	myWeapon = myWeapon, myDef = myDef, weaponName = weaponName,
