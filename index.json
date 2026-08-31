@@ -447,6 +447,18 @@
 			"detect": "local rs = game:GetService('ReplicatedStorage') local m = rs:FindFirstChild('Modules') local s = m and m:FindFirstChild('Shared') return s ~= nil and s:FindFirstChild('DeagleShared') ~= nil and s:FindFirstChild('Config') ~= nil"
 		},
 		{
+			"alias": "mvsd",
+			"name": "Murderers VS Sheriffs DUELS",
+			"file": "games/mvsd.lua",
+			"places": [
+				12355337193
+			],
+			"status": "ok",
+			"paid": true,
+			"note": "shooter/duel - Sheriff (revolver) vs Murderer (knife). ESP, round panel, aim, trigger, silent (all sheriff-side), movement. One shot is one kill; ShootGun is client-authoritative and silent aim was measured to ignore angle AND line of sight. Free cursor in lobby, LockCenter in duel - aim ref keys off GetMouseLocation. Targets are enemy-team Models in workspace; everyone else is in ReplicatedStorage.HiddenCharacters. Lobby and duel share the place",
+			"detect": "local rs = game:GetService('ReplicatedStorage') local rem = rs:FindFirstChild('Remotes') local m = rs:FindFirstChild('Modules') return rem ~= nil and rem:FindFirstChild('ShootGun') ~= nil and rem:FindFirstChild('ThrowStart') ~= nil and m ~= nil and m:FindFirstChild('WeaponRaycast') ~= nil and m:FindFirstChild('CharacterRayOrigin') ~= nil"
+		},
+		{
 			"alias": "heroevo",
 			"name": "🦸 +1 Superhero Evolution",
 			"file": "games/heroevo.lua",
