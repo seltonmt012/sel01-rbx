@@ -599,21 +599,49 @@ local function healthOf(entry)
 	return nil, nil
 end
 
+-- The `RigState` attribute is gone as of the [NEW WEAPONS] update; this now
+-- derives the same Alive/Dead word from the decoy Humanoid (and the InWorld flag)
+-- so the status panel and the debug handle keep reading sensibly.
 local function rigState(model)
-	return tostring(model:GetAttribute("RigState") or "?")
+	local uid = model:GetAttribute("OwnerUserId")
+	local p
+	if type(uid) == "number" then
+		local ok, found = pcall(Players.GetPlayerByUserId, Players, uid)
+		if ok then p = found end
+	end
+	local char = p and p.Character
+	local hum = char and char:FindFirstChildOfClass("Humanoid")
+	if hum then
+		if hum.Health <= 0 or hum:GetState() == Enum.HumanoidStateType.Dead then
+			return "Dead"
+		end
+		return "Alive"
+	end
+	if p and p:GetAttribute("InWorld") == false then return "Dead" end
+	return "?"
 end
 
--- Alive means BOTH signals agree. RigState alone lets a body that has just been
--- reparented through, and health alone is nil for anybody whose decoy has not
--- replicated yet.
+-- Alive means the decoy agrees it is alive. The [NEW WEAPONS] update (2026-08-31)
+-- REMOVED the `RigState` attribute this used to gate on - it now reads nil on
+-- every rig, so the old `rigState(model) ~= "Alive"` check treated the whole
+-- lobby as dead and killed aim, trigger and the ESP alive-filter in one go. The
+-- live signal is now the R6 decoy's Humanoid (health + state) plus the owner's
+-- `InWorld` flag, and on every body measured the three move together: a downed
+-- merc reads HP 0 / state Dead / InWorld false, a live one HP>0 / Running / true.
+-- Only an EXPLICIT dead signal hides a rig; a missing one still draws, which is
+-- the safe way round (too much rather than hiding somebody who can kill you).
 local function aliveOf(entry)
 	local model = entry.model
 	if not model or not model.Parent then return nil end
-	if rigState(model) ~= "Alive" then return nil end
 	local root = rootOf(model)
 	if not root then return nil end
+	local p = entry.player
+	if p and p:GetAttribute("InWorld") == false then return nil end
 	local hp, maxHp = healthOf(entry)
 	if hp and hp <= 0 then return nil end
+	local char = p and p.Character
+	local hum = char and char:FindFirstChildOfClass("Humanoid")
+	if hum and hum:GetState() == Enum.HumanoidStateType.Dead then return nil end
 	return hp or 100, maxHp or 100, root
 end
 
@@ -2573,7 +2601,7 @@ local function underCrosshair()
 			local rig = rigFromHit(hit.Instance)
 			if rig and rig.Name:sub(1, 13) == "MercHitboxes_"
 				and rig.Name:sub(-7) ~= "_Corpse"
-				and rig:GetAttribute("RigOwner") ~= plr.Name then
+				and rig:GetAttribute("OwnerUserId") ~= plr.UserId then
 				local entry
 				for _, e in ipairs(combatants()) do
 					if e.model == rig then entry = e break end
