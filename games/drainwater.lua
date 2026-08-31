@@ -33,6 +33,18 @@
 
   Never spends Robux: every pump, aura and egg without a `cashPrice` is skipped
   by its own flag, and no Robux product or gamepass prompt is ever touched.
+
+  ---- Cthulhu update (2026-08) ----
+  The game grew from 15 stages to 18, and the fish worth millions live in the new
+  deep pools, so clearedStages() now walks the whole 18 (a hardcoded 1..15 left
+  16-18 permanently unclaimable). Upgrade prices moved out of the data row and
+  into UpgradeHelper.GetCashPrice(name, level), which the reserve fence now reads
+  again instead of treating a missing price as free. Pet.MergeAll fuses every
+  eligible group in one call (the old CraftPet loop is the fallback). And three
+  free, no-cost, server-gated claims were added - the daily spin (verified live),
+  the daily sign-in and the Cthulhu event quests, which fill up on their own while
+  the farm runs. The server-side AutoClick is a group reward (group 183340924); it
+  is left alone rather than joined silently.
 ]]
 
 local Players = game:GetService("Players")
@@ -64,6 +76,7 @@ local CONFIG = {
 	merge = true,          -- "Merge for Better": three of a kind into one better
 	rebirth = true,
 	offline = true,        -- offline earnings and the tank's pending cash
+	freebies = true,       -- daily spin, daily sign-in, Cthulhu event quest claims
 	rebirthUntil = 0,      -- 0 = no limit
 	spendEvery = 15,       -- seconds between spending passes
 	diveSeconds = 45,      -- how long one dive may run before the loop breathes
@@ -88,6 +101,11 @@ local STATE = {
 	deepest = 1, lastProgress = 0, reserve = 0,
 	busy = false,
 }
+
+-- The number of stages in the run. The Cthulhu update raised it from 15 to 18;
+-- stageRows() bumps it if the game ever grows again, so nothing here is pinned to
+-- a version.
+local STAGE_MAX = 18
 
 --------------------------------------------------------------------------------
 -- helpers (every one above its first caller - a local is invisible above its own
@@ -223,7 +241,14 @@ end
 
 local function stageRows()
 	local out = invoke(fn("Stage", "[C-S]GetStageState"))
-	return type(out) == "table" and out or {}
+	if type(out) ~= "table" then return {} end
+	-- keep STAGE_MAX honest if a future update grows the ladder again
+	for _, row in ipairs(out) do
+		if type(row) == "table" and type(row.stageId) == "number" and row.stageId > STAGE_MAX then
+			STAGE_MAX = row.stageId
+		end
+	end
+	return out
 end
 
 local function remainingOf(stageId)
@@ -292,7 +317,10 @@ local function clearedStages()
 	for _, row in ipairs(stageRows()) do
 		if row.completed then done[tostring(row.stageId)] = true end
 	end
-	for id = 1, 15 do
+	-- The Cthulhu update grew the ladder from 15 stages to 18, and the deep pools
+	-- are exactly where the fish worth millions live. A hardcoded 1..15 quietly
+	-- left stages 16-18 out of the cleared set, so their fish were never claimed.
+	for id = 1, STAGE_MAX do
 		if plr:GetAttribute("StageCompleted_" .. id) then done[tostring(id)] = true end
 	end
 	return done
@@ -662,6 +690,21 @@ end
 -- dive can carry out is the real limit. FishDisplay second, Speed last.
 local UPGRADE_ORDER = { "Backpack", "FishDisplay", "Speed" }
 
+-- The Cthulhu update moved the upgrade prices OUT of the data row - it now carries
+-- only level / maxLevel / currentValue / isMax - and into
+-- UpgradeHelper.GetCashPrice(name, level), which returns the cost of the NEXT
+-- level. Without a price the old reserve fence read nil, which is falsy, so it
+-- treated every upgrade as affordable and fired all three every pass - eating the
+-- cash the next pump rung was being saved for. The price is read from the helper
+-- again, and anything it cannot answer is treated as unaffordable, never as free.
+local upgradeHelper
+local function upgradePrice(name, level)
+	if upgradeHelper == nil then upgradeHelper = configModule("UpgradeHelper") or false end
+	if not upgradeHelper or not upgradeHelper.GetCashPrice then return nil end
+	local ok, p = pcall(upgradeHelper.GetCashPrice, name, level)
+	return ok and num(p) or nil
+end
+
 local function buyUpgrades()
 	local data = invoke(fn("Upgrade", "[C-S]GetUpgradeData"))
 	if type(data) ~= "table" then return false end
@@ -670,17 +713,20 @@ local function buyUpgrades()
 	local bought = false
 	for _, name in ipairs(UPGRADE_ORDER) do
 		local row = data[name]
-		local price = num(row and (row.price or row.cost))
-		local blocked = price and price > spendable()
-		if type(row) == "table" and not blocked
+		if type(row) == "table" and not row.isMax
 			and (num(row.level) or 0) < (num(row.maxLevel) or 0) then
-			local before = STATE.cash
-			pcall(function() remote:FireServer(name) end)
-			task.wait(0.5)
-			refresh()
-			if STATE.cash < before then
-				note("upgrade " .. name .. " -> " .. tostring((num(row.level) or 0) + 1))
-				bought = true
+			local level = num(row.level) or 0
+			local price = upgradePrice(name, level)
+			if price and price <= spendable() then
+				local before = STATE.cash
+				pcall(function() remote:FireServer(name) end)
+				task.wait(0.5)
+				refresh()
+				if STATE.cash < before then
+					note("upgrade " .. name .. " -> " .. tostring(level + 1) ..
+						" for " .. short(price))
+					bought = true
+				end
 			end
 		end
 	end
@@ -722,10 +768,41 @@ end
 -- pet ID alone. Verified: firing it on a group of nine identical pets took the
 -- total from 44 to 42 and that group from 9 to 6 - three are consumed, one better
 -- one comes back. Only the count moving proves it, the event answers nothing.
+-- helper: how many pets exist right now, so a merge can be judged by the count
+-- actually falling rather than by a return value the events do not give.
+local function petCount(getData)
+	local data = invoke(getData)
+	if type(data) ~= "table" then return nil end
+	local n = 0
+	for _, list in ipairs({ data.UnEquipPet or {}, data.EquipPet or {} }) do
+		for _ in pairs(list) do n = n + 1 end
+	end
+	return n
+end
+
 local function mergePets()
 	local getData = fn("Pet", "GetPlayerPetData")
 	local craft = ev("Pet", "CraftPet")
 	if not (getData and craft) then return false end
+
+	-- The Cthulhu update added Pet.MergeAll - the "Merge All" button - which fuses
+	-- every eligible group in one server call instead of the group-at-a-time
+	-- CraftPet loop. It respects the same lock flag the loop did (it is the game's
+	-- own button), and the only proof is the pet count falling, so it is confirmed
+	-- against a before/after count. The CraftPet loop stays as the fallback.
+	local mergeAll = ev("Pet", "MergeAll")
+	if mergeAll then
+		local before = petCount(getData)
+		pcall(function() mergeAll:FireServer() end)
+		task.wait(0.9)
+		local after = petCount(getData)
+		if before and after and after < before then
+			local equip = ev("Pet", "EquipBest")
+			if equip then pcall(function() equip:FireServer() end) end
+			note("merged " .. tostring(before - after) .. " pets (Merge All)")
+			return true
+		end
+	end
 
 	local merged = 0
 	for _ = 1, 8 do                        -- bounded: each pass consumes three pets
@@ -781,6 +858,70 @@ local function claimFree()
 	return false
 end
 
+-- Free, no-cost progress the Cthulhu update added. Every one is gated on the
+-- server saying it is actually claimable and confirmed by the state moving, so an
+-- already-claimed or not-yet-due reward is a silent no-op, never a wasted call and
+-- never Robux.
+local function dailySpin()
+	local getData = fn("Spin", "[C-S]GetSpinData")
+	local claim = fn("Spin", "[C-S]ClaimDailySpin")
+	if not (getData and claim) then return false end
+	local before = invoke(getData)
+	local lastBefore = (type(before) == "table" and tonumber(before.lastClaimTime)) or 0
+	-- lastClaimTime only moves when the spin is actually granted (measured live:
+	-- 0 -> a real timestamp, total 0 -> 1)
+	local res = invoke(claim)
+	local lastAfter = (type(res) == "table" and tonumber(res.lastClaimTime)) or lastBefore
+	if lastAfter > lastBefore then note("daily spin claimed") return true end
+	return false
+end
+
+local function dailySign()
+	local canFn = fn("DailySign", "canClaim")
+	local tryEv = ev("DailySign", "[C-S]PlayerTryDailySign")
+	if not (canFn and tryEv) then return false end
+	if invoke(canFn) ~= true then return false end
+	pcall(function() tryEv:FireServer() end)
+	task.wait(0.5)
+	if invoke(canFn) ~= true then note("daily sign-in claimed") return true end
+	return false
+end
+
+-- The Cthulhu event quests ("Sell 500 Fish", "Fuse 3 Three-Star Pets", ...) fill
+-- up by themselves while the farm runs; this only presses claim on the ones the
+-- server has already marked claimable. Reward is event currency, not cash, so it
+-- does not show on the cash line - the claimable flag flipping is the proof.
+local function cthulhuQuests()
+	local getState = fn("CthulhuQuest", "[C-S]GetState")
+	local tryClaim = fn("CthulhuQuest", "[C-S]TryClaim")
+	if not (getState and tryClaim) then return false end
+	local state = invoke(getState)
+	if type(state) ~= "table" then return false end
+	local claimed = 0
+	for _, group in pairs({ state.event, state.rotating, state.daily }) do
+		if type(group) == "table" then
+			for _, q in pairs(group) do
+				if type(q) == "table" and q.claimable == true and q.claimed ~= true and q.id then
+					invoke(tryClaim, q.id)
+					task.wait(0.2)
+					claimed = claimed + 1
+				end
+			end
+		end
+	end
+	if claimed > 0 then note("claimed " .. claimed .. " Cthulhu quest(s)") return true end
+	return false
+end
+
+local function freeRewards()
+	if CONFIG.offline then claimFree() end
+	if CONFIG.freebies then
+		dailySpin()
+		dailySign()
+		cthulhuQuests()
+	end
+end
+
 local function doRebirth()
 	local remote = ev("Rebirth", "[C - S]TryRebirth")   -- the spaces are literal
 		or ev("Rebirth", "[C-S]TryRebirth")
@@ -801,7 +942,7 @@ end
 local function spendPass()
 	withLock("spend", function()
 		refresh()
-		if CONFIG.offline then claimFree() end
+		freeRewards()
 		if CONFIG.pumps then buyPump() end
 		if CONFIG.upgrades then buyUpgrades() end
 		if CONFIG.auras then buyAura() end
@@ -822,12 +963,6 @@ end
 --------------------------------------------------------------------------------
 -- the cycle
 --------------------------------------------------------------------------------
-
-do
-	local cfg = configModule("PumpHelper")
-	local all = cfg and cfg.GetAllPumpConfig and select(2, pcall(cfg.GetAllPumpConfig))
-	if type(all) == "table" then _G.__DRAINWATER_PUMPCFG = all end
-end
 
 -- the pump table is keyed by string and is needed by refresh(), so load it once
 do
@@ -968,6 +1103,8 @@ money:Toggle("Merge pets", CONFIG.merge, function(v) CONFIG.merge = v end,
 	"three of a kind into one better one, locked pets are left alone")
 money:Toggle("Free rewards", CONFIG.offline, function(v) CONFIG.offline = v end,
 	"offline earnings and the tank's pending cash", UI.theme.good)
+money:Toggle("Daily bonuses", CONFIG.freebies, function(v) CONFIG.freebies = v end,
+	"free daily spin, sign-in and Cthulhu event quest claims", UI.theme.good)
 money:Button("Unstuck", function()
 	CONFIG.auto = false
 	STATE.busy = false
@@ -1028,6 +1165,9 @@ _G.__DRAINWATER_DBG = {
 	openEggs = openEggs, claimFree = claimFree, doRebirth = doRebirth, mergePets = mergePets,
 	configModule = configModule, num = num,
 	pumpReserve = pumpReserve, spendable = spendable,
+	upgradePrice = upgradePrice, petCount = petCount,
+	dailySpin = dailySpin, dailySign = dailySign, cthulhuQuests = cthulhuQuests,
+	freeRewards = freeRewards,
 }
 
 print("[drainwater] gen " .. GEN .. " ready - RightShift for the panel")
