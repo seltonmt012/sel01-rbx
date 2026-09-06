@@ -341,6 +341,8 @@ local STATE = {
 	underCross = "-",
 	aimDps     = 0, aimDpsPeak = 0,
 	lastKey    = "-",
+	clickHow   = "-",   -- which executor call actually delivers a shot, see pullTrigger
+	touch      = false, -- this client has no mouse and no keyboard
 	paused     = "",
 	inRound    = false,
 	inGame     = false,
@@ -1458,8 +1460,103 @@ UserInputService.InputEnded:Connect(function(input)
 	capture(name)
 end)
 
+--------------------------------------------------------------------------------
+-- a client with no mouse and no keyboard
+--------------------------------------------------------------------------------
+--
+-- Everything above this point is a mouse or a keyboard, and a phone has neither.
+-- The same four breaks measured in counterblox.lua are all present here, and each
+-- is fatal on its own:
+--
+--   * `keyHeld` ends in IsMouseButtonPressed / IsKeyDown, which are false forever
+--     on a client with MouseEnabled and KeyboardEnabled both off - so "Hotkey",
+--     the DEFAULT for the aim assist, the trigger AND the silent aim, could never
+--     become true.
+--   * `firing()` read MouseButton1, so "While firing" and the shot counter were
+--     dead too.
+--   * the key recorder takes Keyboard on InputBegan and MouseButton on InputEnded
+--     and nothing else, so a phone could not bind its way out of it.
+--   * Roblox does NOT synthesise MouseMovement on a touch client - a camera drag
+--     arrives as UserInputType.Touch - so the sensitivity measurement never got a
+--     sample.
+--
+-- Everything below is ADDITIVE: every mouse path is untouched, so a desktop
+-- behaves exactly as before.
+local TOUCH = false
+pcall(function()
+	TOUCH = UserInputService.TouchEnabled
+		and not UserInputService.MouseEnabled
+		and not UserInputService.KeyboardEnabled
+end)
+-- Test hook, like _G.__SEL_VIEWPORT in the panel template: a desktop cannot be
+-- given a phone's input, and a branch that cannot be run on the machine it was
+-- written on is a branch that ships unverified. Never set in normal use.
+if _G.__DEAGLE_FORCE_TOUCH then TOUCH = true end
+STATE.touch = TOUCH
+
+-- Counting fingers with +1/-1 drifts the moment one InputEnded is missed (a finger
+-- leaving over the Roblox top bar does that) and a count stuck at 1 would leave
+-- "Screen held" permanently on. The set is keyed by the InputObject and re-checked
+-- on read, so a stale entry removes itself.
+local touches = setmetatable({}, { __mode = "k" })
+
+local function screenHeld()
+	local n = 0
+	for input in pairs(touches) do
+		local ok, state = pcall(function() return input.UserInputState end)
+		if ok and state ~= Enum.UserInputState.End
+			and state ~= Enum.UserInputState.Cancel then
+			n = n + 1
+		else
+			touches[input] = nil
+		end
+	end
+	return n > 0
+end
+
+UserInputService.InputBegan:Connect(function(input)
+	if _G.__DEAGLE ~= GEN then return end
+	if input.UserInputType == Enum.UserInputType.Touch then touches[input] = true end
+end)
+
+UserInputService.InputEnded:Connect(function(input)
+	if _G.__DEAGLE ~= GEN then return end
+	if input.UserInputType == Enum.UserInputType.Touch then touches[input] = nil end
+end)
+
+-- Set by pullTrigger. It is the only thing a touch client can know for certain
+-- about shooting, and the shot counter needs exactly that.
+local lastShotAt = -1e9
+
 local function firing()
-	return UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton1)
+	if UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton1) then
+		return true
+	end
+	-- A raw screen touch is deliberately NOT firing: on a touch client the camera
+	-- is dragged with a finger, so "a finger is down" is true almost continuously
+	-- and would mis-count every burst.
+	if TOUCH and os.clock() - lastShotAt < 0.35 then return true end
+	return false
+end
+
+-- Can this device produce that binding at all? A key it cannot press leaves the
+-- feature off forever with nothing on screen to say why, which is what a phone
+-- got. An unreachable hotkey therefore falls back to holding the screen, so an old
+-- saved config comes back working instead of dead.
+local function reachable(name)
+	if not name or name == "" then return false end
+	local spec = resolveKey(name)
+	if not spec then return false end
+	local ok, enabled = pcall(function()
+		if spec.mouse then return UserInputService.MouseEnabled end
+		return UserInputService.KeyboardEnabled
+	end)
+	return ok and enabled and true or false
+end
+
+local function hotkeyHeld(name)
+	if TOUCH and not reachable(name) then return screenHeld() end
+	return keyHeld(name)
 end
 
 local panicHandlers = {}
@@ -1600,8 +1697,14 @@ end
 local function aimActive()
 	if not CONFIG.aim then return false end
 	if CONFIG.aimActive == "Always" then return true end
-	if CONFIG.aimActive == "While firing" then return firing() end
-	return keyHeld(CONFIG.aimKey)
+	if CONFIG.aimActive == "Screen held" then return screenHeld() end
+	if CONFIG.aimActive == "While firing" then
+		-- On a touch client firing() only knows about shots the SCRIPT pulled, and
+		-- the aim has to be running before it can pull one - so on a phone the mode
+		-- means "while a finger is on the screen", which is when you are playing.
+		return firing() or (TOUCH and screenHeld())
+	end
+	return hotkeyHeld(CONFIG.aimKey)
 end
 
 local function adsGate(mode)
@@ -1966,7 +2069,11 @@ end
 local mouseDX, mouseDY = 0, 0
 UserInputService.InputChanged:Connect(function(input)
 	if _G.__DEAGLE ~= GEN then return end
-	if input.UserInputType == Enum.UserInputType.MouseMovement then
+	local kind = input.UserInputType
+	-- A touch client never sends MouseMovement; the camera drag arrives as Touch.
+	-- Without this branch the sensitivity measurement never got a single sample.
+	if kind == Enum.UserInputType.MouseMovement
+		or (TOUCH and kind == Enum.UserInputType.Touch) then
 		mouseDX = mouseDX + input.Delta.X
 		mouseDY = mouseDY + input.Delta.Y
 	end
@@ -2136,11 +2243,14 @@ task.spawn(function()
 				STATE.silentNote = "not deployed"
 				return
 			end
-			local armed = (CONFIG.silentActive == "Always") or keyHeld(CONFIG.silentKey)
+			local armed = (CONFIG.silentActive == "Always")
+				or (CONFIG.silentActive == "Screen held" and screenHeld())
+				or hotkeyHeld(CONFIG.silentKey)
 			if not armed then
 				STATE.silentOn = false
 				STATE.silentTarget = "-"
-				STATE.silentNote = "waiting for " .. keyDisplay(CONFIG.silentKey)
+				STATE.silentNote = "waiting for " .. (reachable(CONFIG.silentKey)
+					and keyDisplay(CONFIG.silentKey) or "a finger on the screen")
 				return
 			end
 			STATE.silentOn = true
@@ -2229,12 +2339,50 @@ end
 -- CanShoot is false does nothing at all, and clicking at a spawn-protected player
 -- costs the full 1.1s miss cooldown for no possible reward.
 
+-- HOW a click is delivered differs per executor, and the mobile ones usually ship
+-- none of the mouse1* helpers at all. That was silent: `click`, `press` and
+-- `release` were all nil, pullTrigger did nothing, and the trigger card counted
+-- "shots" that were never fired. VirtualInputManager is the fallback that exists
+-- almost everywhere, phones included, and whichever one is in use is NAMED in the
+-- panel so a report says which executor could not fire.
+local VIM = nil
+pcall(function() VIM = game:GetService("VirtualInputManager") end)
+if VIM then
+	local ok = pcall(function() return VIM.SendMouseButtonEvent end)
+	if not ok then VIM = nil end
+end
+
 local click = mouse1click or (Input and Input.LeftClick)
 local press, release = mouse1press, mouse1release
 
+local function vimButton(down)
+	if not VIM then return false end
+	local vp = camera.ViewportSize
+	return (pcall(function()
+		VIM:SendMouseButtonEvent(math.floor(vp.X / 2), math.floor(vp.Y / 2),
+			0, down, game, 0)
+	end))
+end
+
+STATE.clickHow = (click and "mouse1click")
+	or ((press and release) and "mouse1press")
+	or (VIM and "VirtualInputManager")
+	or "none"
+
 local function pullTrigger()
 	if click then click()
-	elseif press and release then press() task.wait(0.02) release() end
+	elseif press and release then press() task.wait(0.02) release()
+	elseif VIM then
+		vimButton(true)
+		task.wait(0.02)
+		vimButton(false)
+	else
+		return false
+	end
+	-- The only moment a touch client can be sure a shot went out, so this is what
+	-- firing() runs off there.
+	lastShotAt = os.clock()
+	return true
 end
 
 -- What the shot would hit, asked the way the shot asks it: the game's own ray,
@@ -2290,7 +2438,8 @@ local trigWasHeld = false
 local function trigActive()
 	if not CONFIG.trig then return false end
 	if CONFIG.trigActive == "Always" then return true end
-	return keyHeld(CONFIG.trigKey)
+	if CONFIG.trigActive == "Screen held" then return screenHeld() end
+	return hotkeyHeld(CONFIG.trigKey)
 end
 
 task.spawn(function()
@@ -2363,8 +2512,9 @@ task.spawn(function()
 			if not shotReady() then return end
 			if assistBlocked() then return end
 
-			pullTrigger()
-			STATE.trigHits = STATE.trigHits + 1
+			-- Counted only when a click was actually delivered, so the number in the
+			-- panel is shots FIRED and not shots attempted.
+			if pullTrigger() then STATE.trigHits = STATE.trigHits + 1 end
 			local refire = CONFIG.trigRefireMs
 			if CONFIG.hum then refire = refire * (0.85 + math.random() * 0.35) end
 			nextAt = os.clock() * 1000 + refire
@@ -2585,6 +2735,14 @@ local function bindButton(card, caption, get, set)
 	end
 	button = card:Button(caption .. ": " .. keyDisplay(get()), function()
 		if capturing then return end
+		-- Arming the recorder on a phone is a one-way door: it accepts Keyboard on
+		-- InputBegan and MouseButton on InputEnded, and Escape is the only way out -
+		-- none of which a touch client has. So it is not armed at all there.
+		if TOUCH then
+			setButton(button, caption .. ": no keyboard on this device")
+			task.delay(2.5, paint)
+			return
+		end
 		setButton(button, "PRESS A KEY OR MOUSE BUTTON  -  ESC CANCELS")
 		arm(function(name)
 			if name then set(name) end
@@ -2694,10 +2852,15 @@ reg("aim", aimCard:Toggle("Aim enabled", CONFIG.aim, function(v)
 	CONFIG.aim = v
 	note(v and "aim on" or "aim off")
 end, "moves the VIEW only - fires no remote and fakes no hit", UI.theme.warn))
-aimCard:Dropdown("Trigger", { "Hotkey", "Always", "While firing" }, CONFIG.aimActive,
-	function(v) CONFIG.aimActive = v end)
+aimCard:Dropdown("Trigger", { "Hotkey", "Always", "While firing", "Screen held" },
+	CONFIG.aimActive, function(v) CONFIG.aimActive = v end)
 bindButton(aimCard, "AIM KEY", function() return CONFIG.aimKey end,
 	function(v) CONFIG.aimKey = v end)
+if TOUCH then
+	aimCard:Label("This device has no keyboard and no mouse - a hotkey it cannot "
+		.. "press falls back to holding the screen, and Screen held does the same "
+		.. "on purpose.")
+end
 aimCard:Label("Damage is a flat 100 and every character has 100 HP, so the head pays nothing extra. BodyHitbox is 4.8x4.6x2.2 against the head's 3.2 cube - the body is simply the bigger target for the same kill.")
 reg("aimPart", aimCard:Dropdown("Aim at", { "Body", "Head", "Nearest" },
 	CONFIG.aimPart, function(v) CONFIG.aimPart = v end))
@@ -2773,10 +2936,14 @@ reg("trig", trigCard:Toggle("Trigger enabled", CONFIG.trig, function(v)
 	note(v and "trigger on" or "trigger off")
 end, "fires when a target is under the crosshair - a real mouse click",
 	UI.theme.warn))
-trigCard:Dropdown("Trigger", { "Hotkey", "Always" }, CONFIG.trigActive,
+trigCard:Dropdown("Trigger", { "Hotkey", "Always", "Screen held" }, CONFIG.trigActive,
 	function(v) CONFIG.trigActive = v end)
 bindButton(trigCard, "TRIGGER KEY", function() return CONFIG.trigKey end,
 	function(v) CONFIG.trigKey = v end)
+if STATE.clickHow == "none" then
+	trigCard:Label("This executor offers no way to click - neither mouse1click nor "
+		.. "VirtualInputManager. Trigger and auto fire cannot fire here.")
+end
 trigCard:Toggle("Head only", CONFIG.trigHeadOnly, function(v) CONFIG.trigHeadOnly = v end,
 	"fires only on HeadHitbox or Head - costs kills, pays nothing extra here")
 trigCard:Toggle("Skip spawn protected", CONFIG.trigSkipProt, function(v)
@@ -2803,7 +2970,7 @@ trigTime:Slider("Max distance", 50, 600, CONFIG.trigMaxDist, function(v)
 	CONFIG.trigMaxDist = v
 end)
 
-trigOut = trigPage:Card("STATUS", 1):Readout(6)
+trigOut = trigPage:Card("STATUS", 1):Readout(7)
 end
 
 -- SILENT -----------------------------------------------------------------------
@@ -2831,7 +2998,7 @@ sCard:Toggle("Draw the circle", CONFIG.silentCircle, function(v)
 end, "the circle IS the feature in FOV mode - it is the only thing that shows its reach",
 	UI.theme.good)
 sCard:Colour("Circle colour", CONFIG.colSilent, function(c) CONFIG.colSilent = c end)
-sCard:Dropdown("Trigger", { "Hotkey", "Always" }, CONFIG.silentActive,
+sCard:Dropdown("Trigger", { "Hotkey", "Always", "Screen held" }, CONFIG.silentActive,
 	function(v) CONFIG.silentActive = v end)
 bindButton(sCard, "SILENT KEY", function() return CONFIG.silentKey end,
 	function(v) CONFIG.silentKey = v end)
@@ -3110,7 +3277,8 @@ task.spawn(function()
 						.. "  (" .. tostring(STATE.targetKind) .. ")",
 					"  active   " .. (CONFIG.aim and CONFIG.aimActive or "off")
 						.. (CONFIG.aimActive == "Hotkey"
-							and ("  " .. keyDisplay(CONFIG.aimKey)) or ""),
+							and ("  " .. (reachable(CONFIG.aimKey)
+								and keyDisplay(CONFIG.aimKey) or "screen")) or ""),
 					string.format("  now      FOV %dpx   H %d   V %d   at %s",
 						CONFIG.aimFov, CONFIG.aimSmoothH, CONFIG.aimSmoothV,
 						CONFIG.aimPart),
@@ -3128,9 +3296,13 @@ task.spawn(function()
 				trigOut:set({
 					"  state    " .. (CONFIG.trig
 						and (STATE.trigOn and "armed"
-							or ("waiting for " .. keyDisplay(CONFIG.trigKey)))
+							or ("waiting for " .. (reachable(CONFIG.trigKey)
+								and keyDisplay(CONFIG.trigKey) or "a finger on the screen")))
 						or "off"),
 					"  crosshair " .. tostring(STATE.underCross),
+					-- Named because a trigger that never fires looks identical to one
+					-- that is never armed, and on a phone it was always the former.
+					"  click    " .. tostring(STATE.clickHow),
 					string.format("  clicks   %d   reaction %d-%dms",
 						STATE.trigHits, CONFIG.trigDelayMin, CONFIG.trigDelayMax),
 					"  window   " .. (CONFIG.trigFov > 0
@@ -3280,6 +3452,15 @@ _G.__DEAGLE_DBG = {
 	note = note, panelOpen = panelOpen, readTimer = readTimer,
 	DS = DS, Config = Config, DeagleCtl = DeagleCtl, ClientData = ClientData,
 	DEAGLE = DEAGLE, MATCH = MATCH, RANGE = RANGE,
+	TOUCH = TOUCH, screenHeld = screenHeld, reachable = reachable,
+	hotkeyHeld = hotkeyHeld,
 }
 
-print("[deaglearena] gen " .. GEN .. " ready - RightShift for the panel")
+if TOUCH then
+	note("phone: hotkeys hold the screen instead")
+elseif STATE.clickHow == "none" then
+	note("this executor cannot click - trigger and auto fire are off")
+end
+
+print("[deaglearena] gen " .. GEN .. " ready - RightShift for the panel"
+	.. (TOUCH and "  (touch client, click: " .. STATE.clickHow .. ")" or ""))
