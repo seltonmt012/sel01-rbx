@@ -1846,6 +1846,14 @@ local function bindButton(card, caption, get, set)
 	end
 	button = card:Button(caption .. ": " .. keyDisplay(get()), function()
 		if capturing then return end
+		-- Arming the recorder on a phone is a one-way door: it accepts Keyboard on
+		-- InputBegan and MouseButton on InputEnded, and Escape is the only way out -
+		-- none of which a touch client has. So it is not armed at all there.
+		if TOUCH then
+			setButton(button, caption .. ": no keyboard on this device")
+			task.delay(2.5, paint)
+			return
+		end
 		setButton(button, "PRESS A KEY OR MOUSE BUTTON  -  ESC CANCELS")
 		arm(function(name)
 			if name then set(name) end
@@ -1860,10 +1868,15 @@ aimCard:Toggle("Aim enabled", CONFIG.aim, function(v)
 	CONFIG.aim = v
 	note(v and "aim on" or "aim off")
 end, "moves the CAMERA only - fires no remote and fakes no hit", UI.theme.warn)
-aimCard:Dropdown("Trigger", { "Hotkey", "Always", "While firing" }, CONFIG.aimActive,
-	function(v) CONFIG.aimActive = v end)
+aimCard:Dropdown("Trigger", { "Hotkey", "Always", "While firing", "Screen held" },
+	CONFIG.aimActive, function(v) CONFIG.aimActive = v end)
 bindButton(aimCard, "AIM KEY", function() return CONFIG.aimKey end,
 	function(v) CONFIG.aimKey = v end)
+if TOUCH then
+	aimCard:Label("This device has no keyboard and no mouse - a hotkey it cannot "
+		.. "press falls back to holding the screen, and Screen held does the same "
+		.. "on purpose.")
+end
 aimCard:Dropdown("Aim at", { "Head", "Torso", "Nearest" }, CONFIG.aimPart,
 	function(v) CONFIG.aimPart = v end)
 aimCard:Dropdown("Pick target by", { "Crosshair", "Closest", "Lowest HP" },
@@ -1933,10 +1946,14 @@ trigCard:Toggle("Trigger enabled", CONFIG.trig, function(v)
 	note(v and "trigger on" or "trigger off")
 end, "fires when an enemy is under the crosshair - a real mouse click",
 	UI.theme.warn)
-trigCard:Dropdown("Trigger", { "Hotkey", "Always" }, CONFIG.trigActive,
+trigCard:Dropdown("Trigger", { "Hotkey", "Always", "Screen held" }, CONFIG.trigActive,
 	function(v) CONFIG.trigActive = v end)
 bindButton(trigCard, "TRIGGER KEY", function() return CONFIG.trigKey end,
 	function(v) CONFIG.trigKey = v end)
+if STATE.clickHow == "none" then
+	trigCard:Label("This executor offers no way to click - neither mouse1click nor "
+		.. "VirtualInputManager. Trigger and auto fire cannot fire here.")
+end
 trigCard:Dropdown("Fire mode", { "Click", "Hold" }, CONFIG.trigMode,
 	function(v) CONFIG.trigMode = v end)
 trigCard:Slider("Hold time (ms)", 20, 600, CONFIG.trigHoldMs, function(v)
@@ -1975,7 +1992,7 @@ trigAim:Slider("Max distance", 50, 3000, CONFIG.trigMaxDist, function(v)
 	CONFIG.trigMaxDist = v
 end)
 
-local trigOut = trigPage:Card("STATUS", 1):Readout(4)
+local trigOut = trigPage:Card("STATUS", 1):Readout(5)
 
 -- RECOIL ------------------------------------------------------------------------
 
@@ -2095,7 +2112,8 @@ task.spawn(function()
 						.. "   shot " .. tostring(STATE.shots),
 					"  active   " .. (CONFIG.aim and CONFIG.aimActive or "off")
 						.. (CONFIG.aimActive == "Hotkey"
-							and ("  " .. keyDisplay(CONFIG.aimKey)) or ""),
+							and ("  " .. (reachable(CONFIG.aimKey)
+								and keyDisplay(CONFIG.aimKey) or "screen")) or ""),
 					string.format("  now      FOV %dpx   H %d   V %d", fov, sh, sv),
 					"  weapon   " .. STATE.weapon
 						.. (info and (info.gun and "  (firearm)" or "  (no shots)") or ""),
@@ -2106,9 +2124,13 @@ task.spawn(function()
 				trigOut:set({
 					"  state    " .. (CONFIG.trig
 						and (STATE.trigOn and "armed"
-							or ("waiting for " .. keyDisplay(CONFIG.trigKey)))
+							or ("waiting for " .. (reachable(CONFIG.trigKey)
+								and keyDisplay(CONFIG.trigKey) or "a finger on the screen")))
 						or "off"),
 					"  crosshair " .. tostring(STATE.underCross),
+					-- Named because a trigger that never fires looks identical to one
+					-- that is never armed, and on a phone it was always the former.
+					"  click    " .. tostring(STATE.clickHow),
 					string.format("  shots    %d   reaction %d-%dms",
 						STATE.trigHits, CONFIG.trigDelayMin, CONFIG.trigDelayMax),
 					"  window   " .. (CONFIG.trigFov > 0
@@ -2125,7 +2147,9 @@ task.spawn(function()
 					string.format("  kick H   %.2f deg", STATE.kickY),
 					string.format("  kick V   %.2f deg", STATE.kickP),
 					"  " .. (CONFIG.rcs
-						and ((STATE.calibN > 0) and "active" or "waiting for mouse movement")
+						and ((STATE.calibN > 0) and "active"
+							or (TOUCH and "waiting for camera movement"
+								or "waiting for mouse movement"))
 						or "off"),
 				})
 			end)
@@ -2185,6 +2209,15 @@ _G.__CBLOX_DBG = {
 	approach = approach, angleDelta = angleDelta, firing = firing,
 	statusValue = statusValue, drawn = drawn, highlights = highlights,
 	hideAll = hideAll, clearChams = clearChams, note = note,
+	TOUCH = TOUCH, screenHeld = screenHeld, reachable = reachable,
+	hotkeyHeld = hotkeyHeld, aimActive = aimActive, trigActive = trigActive,
 }
 
-print("[counterblox] gen " .. GEN .. " ready - RightShift for the panel")
+if TOUCH then
+	note("phone: hotkeys hold the screen instead")
+elseif STATE.clickHow == "none" then
+	note("this executor cannot click - trigger and auto fire are off")
+end
+
+print("[counterblox] gen " .. GEN .. " ready - RightShift for the panel"
+	.. (TOUCH and "  (touch client, click: " .. STATE.clickHow .. ")" or ""))
