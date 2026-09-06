@@ -70,7 +70,18 @@ local CONFIG = {
 	autoTunnels = false,     -- buy every affordable drill tunnel
 	autoFloors = false,      -- unlock the next floor when it is affordable
 	autoFurnace = false,     -- buy and upgrade the +50% furnace
-	autoBoost = false,       -- unlock the money-boost showcase pedestals
+	-- Unlock the showcase pedestals, put an ore on them AND start the free hour.
+	-- All three steps, because only the first one was ever done and the
+	-- multiplier therefore sat at 1.00 forever - see the section further down.
+	autoBoost = false,
+	boostPlaceOre = true,    -- put the best SPARE ore on an empty pedestal
+	-- Ores sitting in a tunnel are earning money there. Only ores lying spare in
+	-- the backpack are used for the showcase, so this never cannibalises a drill.
+	boostMinMultiplier = 1.0, -- ignore an ore whose showcase bonus is below this
+	-- A swap takes the boost down for a second, so it has to be worth doing. The
+	-- ladder runs 1.02 -> 4.0 over 81 ores, so 5% still catches every real step
+	-- up (Stone 1.02 -> Iron 1.09 is 7%) while ignoring 1.02 -> 1.03 churn.
+	boostSwapFactor = 1.05,
 	-- Growth gems boost ore regeneration, which is what every drone is waiting
 	-- on, and they apply themselves on purchase. At the measured income the small
 	-- one returns 24x its price, so this is now part of the master switch.
@@ -118,6 +129,9 @@ local STATE = {
 	rollerUpgrades = 0, tunnels = 0, floors = 0, spins = 0, gear = 0,
 	equips = 0, inventory = 0, drops = 0, furnaceLevel = 0, furnaceSkip = nil,
 	oreLevels = 0,
+	-- Showcase money boost: how many hours have been started, what the two
+	-- pedestals multiply by right now, and when the running one runs out.
+	boosts = 0, boostMult = 1, boostUntil = 0,
 	earned = 0, phase = "idle", note = "-", base = "-",
 	crateCount = 0, carrying = "-",
 }
@@ -1820,33 +1834,215 @@ local function buyGear()
 	end
 end
 
--- Showcase pedestals -------------------------------------------------------------------
+-- Showcase pedestals: the free one-hour money boost --------------------------------------
 --
--- Two pedestals in the base grant a money multiplier while you are online. The
--- board button fires ShowcasePedestalAction(action, pedestalNumber, baseName) -
--- note the order, the base name comes LAST here while every other remote in this
--- game takes it first. "Purchase" is the only action it accepts; the boost is
--- then activated by placing an ore on the pedestal itself.
+-- Two pedestals in the base grant a money multiplier, and getting one running is
+-- THREE separate steps. The script only ever did the first, which is why the
+-- multiplier sat at 1.00 for entire sessions and the pedestals looked broken:
 --
--- Its reply carries the full state even when it fails, so the price is known
--- without ever having to risk a blind purchase.
-local function buyShowcasePedestals()
-	local base = findBase()
-	if not base then return end
+--   1. UNLOCK    ShowcasePedestalAction("Purchase", n, baseName)
+--   2. PLACE     hold the ore as a Tool, then fire the pedestal's
+--                ShowcaseOrePrompt - the server takes whatever is EQUIPPED
+--   3. ACTIVATE  ShowcasePedestalAction("ActivateBoost", n, baseName)
+--
+-- Note the argument order: the base name comes LAST on this remote while every
+-- other remote in this game takes it first.
+--
+-- All of this was measured on Base3, 2026-09-06:
+--
+--   * placing a Stone Ore moved ShowcasePedestal1Multiplier from 1 to 1.02 and
+--     left BoostExpiresAt at 0. The pedestal's own label says "Activate for
+--     Money Boost!" - placing is not activating, and that is the step that was
+--     missing.
+--   * ActivateBoost answered success and set BoostExpiresAt to os.time() + 3598,
+--     so the boost runs for ONE HOUR.
+--   * the balance did not move by a single dollar: it is FREE. The only reason
+--     to not call it is that it is already running.
+--   * calling it again while it runs is a harmless no-op - success, same expiry,
+--     no extension - so a missed pass costs nothing.
+--   * a pedestal that has not been bought answers "Locked", which is a clean
+--     gate and means the state never has to be guessed.
+--
+-- WHICH ore is on the pedestal decides the size of the multiplier, and the
+-- spread is the whole point: ORES.ShowcaseMultipliersByOreName runs from Stone
+-- Ore 1.02 to Adminite Ore 4.0 over 81 ores. Only ores lying SPARE in the
+-- backpack are used - an ore in a tunnel is earning money there and is never
+-- pulled out for this.
+--
+-- Everything below reads its state from the player's own attributes
+-- (ShowcasePedestal<n>Unlocked / OreName / Multiplier / BoostExpiresAt), so a
+-- pedestal that is unlocked and still inside its hour costs ZERO remote calls
+-- per pass, however often the spend loop comes round.
+local function showcaseState(index)
+	local prefix = "ShowcasePedestal" .. index
+	return {
+		unlocked = plr:GetAttribute(prefix .. "Unlocked") == true,
+		oreName = tostring(plr:GetAttribute(prefix .. "OreName") or ""),
+		multiplier = tonumber(plr:GetAttribute(prefix .. "Multiplier")) or 1,
+		expiresAt = tonumber(plr:GetAttribute(prefix .. "BoostExpiresAt")) or 0,
+	}
+end
 
-	for index = 1, 2 do
-		local response = invoke("ShowcasePedestalAction", "Purchase", index, base.Name)
-		local state = type(response) == "table" and response.state or nil
-		if state and not state.Unlocked and state.Price then
-			if canPay(state.Price) then
-				local retry = invoke("ShowcasePedestalAction", "Purchase", index, base.Name)
-				if type(retry) == "table" and retry.success then
-					STATE.note = "boost pedestal " .. index
-					task.wait(0.3)
-				end
+-- nil, not 1, for anything that is not an ore. The backpack also holds items
+-- like "30 min Time Skip", and a default of 1 made the first version rank one of
+-- those as the best thing to put on the pedestal - it was picked over the ore
+-- the moment the ore was the only other candidate. Caught in the live client
+-- before it ever fired.
+local function showcaseMultiplier(oreName)
+	local byName = ORES.ShowcaseMultipliersByOreName
+	local value = byName and tonumber(byName[oreName])
+	if not value then return nil end
+	return value
+end
+
+-- The best ore lying spare in the backpack, ranked by showcase multiplier rather
+-- than by income - this pedestal pays for the ore's bonus, not for its yield.
+-- Anything the showcase table does not know is not an ore and is skipped.
+local function bestShowcaseTool()
+	local backpack = plr:FindFirstChildOfClass("Backpack")
+	if not backpack then return nil, nil end
+	local best, bestMultiplier = nil, nil
+	for _, tool in ipairs(backpack:GetChildren()) do
+		if tool:IsA("Tool") then
+			local multiplier = showcaseMultiplier(tool.Name)
+			if multiplier and (not bestMultiplier or multiplier > bestMultiplier) then
+				best, bestMultiplier = tool, multiplier
 			end
 		end
 	end
+	return best, bestMultiplier
+end
+
+local function showcasePrompt(base, index)
+	local pedestal = base:FindFirstChild("OreShowcasePedestal" .. index)
+	return pedestal and pedestal:FindFirstChild("ShowcaseOrePrompt", true) or nil
+end
+
+-- The prompt TOGGLES: it removes while something is on the pedestal and places
+-- what is EQUIPPED while it is empty. Both directions are the same fire, and
+-- which one it will be is decided by the SERVER's state.
+--
+-- So the gate below is the player attribute, never `prompt.ActionText`. The
+-- caption lags: right after an ore is taken off, ShowcasePedestal<n>OreName is
+-- already back to "" while the prompt still reads "Remove Ore" for seconds.
+-- The first version gated on the caption, so the place half of a swap bailed out
+-- and left the pedestal EMPTY with the boost off - measured in the live client,
+-- and the reason this now reads an attribute instead.
+local function removeShowcaseOre(base, index)
+	local prompt = showcasePrompt(base, index)
+	if not prompt then return false end
+	if showcaseState(index).oreName == "" then return true end
+	return usePrompt(prompt)
+end
+
+local function placeShowcaseOre(base, index, tool)
+	local prompt = showcasePrompt(base, index)
+	if not prompt then return false end
+	if showcaseState(index).oreName ~= "" then return false end
+
+	local humanoid = plr.Character and plr.Character:FindFirstChildOfClass("Humanoid")
+	if not (humanoid and tool) then return false end
+	if not pcall(function() humanoid:EquipTool(tool) end) then return false end
+	task.wait(0.3)
+
+	local fired = usePrompt(prompt)
+	-- Put the hands back down: a held ore is in the way of picking up a crate,
+	-- which is the loop's normal job.
+	pcall(function() humanoid:UnequipTools() end)
+	return fired
+end
+
+local function showcasePedestals()
+	local base = findBase()
+	if not base then return end
+	local now = os.time()
+	local combined = 1
+
+	for index = 1, 2 do
+		local state = showcaseState(index)
+
+		-- 1. Unlock. Only asked for while it is still locked, and the reply
+		--    carries the price even when it refuses, so nothing is bought blind.
+		if not state.unlocked then
+			local response = invoke("ShowcasePedestalAction", "Purchase", index, base.Name)
+			local info = type(response) == "table" and response.state or nil
+			if info and not info.Unlocked and info.Price and canPay(info.Price) then
+				local retry = invoke("ShowcasePedestalAction", "Purchase", index, base.Name)
+				if type(retry) == "table" and retry.success then
+					STATE.note = "boost pedestal " .. index
+					logLine("BOOST", "unlocked showcase pedestal " .. index)
+					task.wait(0.3)
+					state = showcaseState(index)
+				end
+			end
+		end
+
+		if state.unlocked then
+			-- 2. Put the best spare ore on it - and SWAP a better one in later.
+			--
+			-- Only placing onto an empty pedestal is not enough over a long run:
+			-- whatever was spare in the first minutes stays there forever, which
+			-- on a 24h session means the pedestal keeps a Stone Ore (x1.02)
+			-- while far better ore is being rolled all night. The ore that comes
+			-- off is returned to the ore inventory, not destroyed (measured), and
+			-- re-activating costs nothing, so a swap is only ever worth doing.
+			if CONFIG.boostPlaceOre then
+				local tool, multiplier = bestShowcaseTool()
+				local current = state.oreName ~= "" and state.multiplier or 0
+				-- Empty pedestal: take anything. Occupied: only a real step up,
+				-- so the boost is not taken down for a rounding difference.
+				local needed = current > 0 and current * CONFIG.boostSwapFactor or 0
+				if tool and multiplier and multiplier >= CONFIG.boostMinMultiplier
+				   and multiplier > needed then
+					local name = tool.Name
+					local swapped = state.oreName ~= ""
+					local swappedFrom, swappedMultiplier = state.oreName, current
+					local free = true
+					if swapped then
+						free = removeShowcaseOre(base, index)
+						if free then task.wait(0.5) end
+					end
+					if free and placeShowcaseOre(base, index, tool) then
+						task.wait(0.5)
+						state = showcaseState(index)
+						if state.oreName ~= "" then
+							if swapped then
+								logLine("BOOST", string.format("pedestal %d %s x%.2f -> %s x%.2f",
+									index, swappedFrom, swappedMultiplier, state.oreName, state.multiplier))
+							else
+								logLine("BOOST", string.format("placed %s on pedestal %d (x%.2f)",
+									state.oreName, index, state.multiplier))
+							end
+						else
+							logLine("BOOST", "placing " .. name .. " on pedestal " .. index .. " did not take")
+						end
+					end
+				end
+			end
+
+			-- 3. Start the free hour. It costs nothing, so the clock is the only
+			--    gate there is.
+			if state.oreName ~= "" and state.expiresAt <= now then
+				local response = invoke("ShowcasePedestalAction", "ActivateBoost", index, base.Name)
+				if type(response) == "table" and response.success then
+					task.wait(0.3)
+					state = showcaseState(index)
+					if state.expiresAt > now then
+						STATE.boosts = STATE.boosts + 1
+						logLine("BOOST", string.format("activated pedestal %d x%.2f for %dm",
+							index, state.multiplier, math.floor((state.expiresAt - now) / 60)))
+					end
+				end
+			end
+
+			if state.expiresAt > now then
+				combined = combined * state.multiplier
+				STATE.boostUntil = math.max(STATE.boostUntil, state.expiresAt)
+			end
+		end
+	end
+
+	STATE.boostMult = combined
 end
 
 -- Rewards -----------------------------------------------------------------------------
@@ -1961,7 +2157,7 @@ local function spendMoney()
 		if CONFIG.auto or CONFIG.autoEquip then pcall(equipBest) end
 	end
 	if CONFIG.auto or CONFIG.autoRoller then pcall(buyRollerUpgrades) end
-	if CONFIG.auto or CONFIG.autoBoost then pcall(buyShowcasePedestals) end
+	if CONFIG.auto or CONFIG.autoBoost then pcall(showcasePedestals) end
 	if CONFIG.auto or CONFIG.autoGear then pcall(buyGear) end
 end
 
@@ -2267,7 +2463,10 @@ toggle(rollerCard, "Buy roller upgrades", "autoRoller",
 
 local extraCard = spendPage:Card("EXTRAS", 2)
 toggle(extraCard, "Boost pedestals", "autoBoost",
-	"a permanent while-online money multiplier")
+	"unlock, place an ore, then re-start the free 1h money boost", UI.theme.good)
+toggle(extraCard, "Place ore on pedestals", "boostPlaceOre",
+	"uses only spare backpack ore, never one out of a drill")
+local boostOut = extraCard:Readout(3)
 toggle(extraCard, "Buy growth gems", "autoGear",
 	"ranked by income x (mult-1) x duration / price", UI.theme.warn)
 
@@ -2386,6 +2585,29 @@ task.spawn(function()
 			})
 		end
 
+		do
+			-- Read straight off the player's attributes rather than off anything
+			-- the script remembers, so this line is the server's own answer.
+			local lines = { "MONEY BOOST" }
+			local now = os.time()
+			for index = 1, 2 do
+				local state = showcaseState(index)
+				local text
+				if not state.unlocked then
+					text = "locked"
+				elseif state.oreName == "" then
+					text = "empty"
+				elseif state.expiresAt > now then
+					text = string.format("x%.2f  %s  %dm left", state.multiplier,
+						state.oreName, math.floor((state.expiresAt - now) / 60))
+				else
+					text = string.format("x%.2f  %s  expired", state.multiplier, state.oreName)
+				end
+				lines[#lines + 1] = string.format("  pedestal %d  %s", index, text)
+			end
+			boostOut:set(lines)
+		end
+
 		logOut:set(recentActions(26))
 
 		task.wait(0.5)
@@ -2401,7 +2623,9 @@ _G.__SELLORES_DBG = {
 	buyRollerUpgrades = buyRollerUpgrades, buyTunnels = buyTunnels,
 	unlockFloor = unlockFloor, furnaceStep = furnaceStep, spendMoney = spendMoney,
 	unlockedFloors = unlockedFloors, priceNextTo = priceNextTo, FURNACE = FURNACE,
-	buyShowcasePedestals = buyShowcasePedestals, ROLLED = ROLLED, cycle = cycle,
+	showcasePedestals = showcasePedestals, showcaseState = showcaseState,
+	bestShowcaseTool = bestShowcaseTool, placeShowcaseOre = placeShowcaseOre,
+	ROLLED = ROLLED, cycle = cycle,
 	equipBest = equipBest, oreWanted = oreWanted, orePayback = orePayback,
 	pendingWorthKeeping = pendingWorthKeeping, EVENT = EVENT, ORES = ORES,
 	buyGear = buyGear,
