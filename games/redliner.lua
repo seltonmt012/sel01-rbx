@@ -55,8 +55,8 @@
 -- third-person ones replicate to everybody. Recorded live, with counts over
 -- ~5 minutes on an 8-player server:
 --
---     Redliner.3P_RAerial  135285345042099   225x
---     Redliner.3P_LAerial  117251245513909   218x
+--     Redliner.3P_RAerial  135285345042099   225x   <- NOT an attack, see below
+--     Redliner.3P_LAerial  117251245513909   218x   <- NOT an attack
 --     Redliner.3P_LAttack  105441036119013    89x
 --     Redliner.3P_RAttack   87457990259233    47x
 --     Redliner.3P_CAttack   71188211641772    27x
@@ -68,6 +68,12 @@
 -- what an auto-parry needs. Redliner.ParrySuccess (88427023415444) plays on your
 -- own character when a parry lands, and that is what the hit counter reads - the
 -- feature grades itself instead of being believed.
+--
+-- ...but the two BIGGEST numbers in that table are not attacks at all, and
+-- taking them at face value is what made the first build of the auto-parry
+-- useless. The aerials are the jump and fall animations of a movement game where
+-- everybody is airborne half the time - logged against our own character they
+-- fire nowhere near the clicks that swing the sword. Details at ATTACK_MELEE.
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -193,10 +199,17 @@ local CONFIG = {
     aura = false,
     auraActivation = "Hotkey",
     auraKey = "V",
-    auraRange = 18,
-    auraFacing = false,
+    -- 25, not 18, and not a guess any more: a swing while CLOSING from ~29
+    -- studs produced impact effects on the target, one at 40 studs did not.
+    auraRange = 25,
+    -- The gate that makes this an aura rather than an aimbot: swing only when
+    -- the target is ALREADY inside the arc you are looking at. Nothing moves
+    -- your camera.
+    auraAngle = 45,
+    auraFaceTarget = false,         -- opt-in, and it DOES move your camera
     auraInterval = 660,
     auraNeedSword = true,
+    auraVisibleOnly = true,
 
     -- MOVEMENT
     moveBhop = false,
@@ -234,6 +247,10 @@ local STATE = {
     healthSamples = 0,
     auraClicks = 0,
     auraSwings = 0,
+    auraHits = 0,
+    lastSwingAt = 0,
+    auraModel = nil,
+    lastSwingSeen = 0,
     auraTarget = nil,
     bhops = 0,
     slides = 0,
@@ -981,12 +998,23 @@ end
 -- Redliner.ParrySuccess actually playing on our own character. The third number
 -- is the only one that means anything.
 
+-- THE AERIALS ARE NOT ATTACKS, and getting that wrong made the parry useless.
+--
+-- 3P_LAerial (117251245513909) and 3P_RAerial (135285345042099) were the two
+-- most common animations in the whole first sweep - 218 and 225 against 89 for
+-- LAttack - which read like "everybody spams aerial attacks". They are not.
+-- Logged against our own character while clicking five times 740ms apart, the
+-- aerials fired at 270, 285, 634, 1100, 1896, 2764, 3417, 3596, 3948, 4117 and
+-- 4167 ms, i.e. nowhere near the clicks, while the three real swings landed at
+-- 335, 1512 and 4279 as LAttack. They are the JUMP and FALL animations of a
+-- movement game where everybody is airborne half the time.
+--
+-- Left in, an auto-parry fires at anybody who jumps - which is everybody, all
+-- the time - and burns its cooldown before a real attack ever arrives.
 local ATTACK_MELEE = {
     ["rbxassetid://105441036119013"] = "LAttack",
     ["rbxassetid://87457990259233"]  = "RAttack",
     ["rbxassetid://71188211641772"]  = "CAttack",
-    ["rbxassetid://117251245513909"] = "LAerial",
-    ["rbxassetid://135285345042099"] = "RAerial",
 }
 
 local ATTACK_GUN = {
@@ -1048,12 +1076,12 @@ end
 -- the other way round - their replicated tracks do fire AnimationPlayed, which
 -- is why watching only the Humanoid looked like it worked. Both are connected
 -- now, and the handler is shared, so neither side can go quiet unnoticed.
+-- Only the third-person ids: those are the ones that measurably fire on our own
+-- character, and the aerials are movement rather than attacks (see above).
 local MY_SWING = {
     ["rbxassetid://105441036119013"] = true,   -- 3P_LAttack
     ["rbxassetid://87457990259233"]  = true,   -- 3P_RAttack
     ["rbxassetid://71188211641772"]  = true,   -- 3P_CAttack
-    ["rbxassetid://76985852878035"]  = true,   -- 1P_Attack1
-    ["rbxassetid://78660674654522"]  = true,   -- 1P_Attack2
 }
 
 -- BOTH the Humanoid and its Animator are connected, because each one is the only
@@ -1070,7 +1098,17 @@ local function onAnimation(model, id)
     lastAnim[key] = now
     if model == myChar() then
         if id == PARRY_SUCCESS then STATE.parrySuccess = STATE.parrySuccess + 1 end
-        if MY_SWING[id] then STATE.auraSwings = STATE.auraSwings + 1 end
+        if MY_SWING[id] then
+            -- One swing plays a first-person AND a third-person track, and they
+            -- are different ids, so the per-id debounce above does not merge
+            -- them: the first live run read 9 clicks as 21 swings. The game
+            -- paces melee at ~640ms, so anything inside 300ms is the same swing
+            -- being reported twice.
+            if now - (STATE.lastSwingSeen or 0) > 0.3 then
+                STATE.lastSwingSeen = now
+                STATE.auraSwings = STATE.auraSwings + 1
+            end
+        end
         return
     end
     local melee = ATTACK_MELEE[id]
@@ -1154,27 +1192,75 @@ local function auraActive()
     return hotkeyHeld(CONFIG.auraKey)
 end
 
-local function auraPick()
+-- "Is this one actually hittable right now?" - the whole feature, and the reason
+-- it is not an aimbot. It never moves the camera; it only asks whether the
+-- target already stands inside the arc the player is looking at, and swings if
+-- it does. Three gates, each measured or configurable:
+--
+--   range  - a swing while closing from ~29 studs produced impact effects, one
+--            at 40 studs produced none, so 25 is the default
+--   angle  - measured A/B: 4 swings facing AWAY produced 0 impacts, 4 swings
+--            facing the target produced 9 (HitParticles, SlashParticlesShards
+--            and the game's own DamageNumber). So the arc is real and it is the
+--            gate that decides whether a swing is worth anything at all.
+--   sight  - a wall between you and them is a swing into the wall
+local function hittable(model)
     local root = myRoot()
-    if not root then return nil end
+    local body = bodyPart(model)
+    if not root or not body then return false, nil end
+    local d = (root.Position - body.Position).Magnitude
+    if d > CONFIG.auraRange then return false, d end
+    local to = body.Position - cam.CFrame.Position
+    if to.Magnitude > 0.1 then
+        local dot = math.clamp(cam.CFrame.LookVector:Dot(to.Unit), -1, 1)
+        if math.deg(math.acos(dot)) > CONFIG.auraAngle then return false, d end
+    end
+    if CONFIG.auraVisibleOnly and not visibleTo(body) then return false, d end
+    return true, d
+end
+
+local function auraPick()
     local best, bestD
     for _, model in ipairs(combatants()) do
-        local body = bodyPart(model)
-        if body then
-            local d = (root.Position - body.Position).Magnitude
-            if d <= CONFIG.auraRange then
-                if (not CONFIG.auraFacing) or facingTarget(model) then
-                    if not bestD or d < bestD then best, bestD = model, d end
-                end
-            end
-        end
+        local ok, d = hittable(model)
+        if ok and (not bestD or d < bestD) then best, bestD = model, d end
     end
     return best, bestD
 end
 
+-- THE HIT COUNTER, and why it exists.
+--
+-- Enemy health does not replicate here (470 attack animations, zero changes), so
+-- "did that swing do anything" cannot be read off the victim. What CAN be read is
+-- the game's own damage popup: a part called DamageNumber spawns in
+-- workspace.Effects right next to whoever was hit. One appearing near an ENEMY
+-- shortly after we swung is the game confirming our swing landed; one appearing
+-- near US is damage we took, and is not counted.
+--
+-- That makes the range and angle sliders tunable against something real instead
+-- of against a feeling, which is the whole point of putting them on the panel.
+local function watchHits()
+    local fx = Workspace:FindFirstChild("Effects")
+    if not fx then return end
+    fx.DescendantAdded:Connect(function(o)
+        if not live() or not o:IsA("BasePart") then return end
+        if o.Name ~= "DamageNumber" then return end
+        -- ours only: within a swing's echo, and nearer to an enemy than to us
+        if os.clock() * 1000 - STATE.lastSwingAt > 1200 then return end
+        local mine = myRoot()
+        if mine and (o.Position - mine.Position).Magnitude < 12 then return end
+        for _, m in ipairs(combatants()) do
+            local b = bodyPart(m)
+            if b and (o.Position - b.Position).Magnitude < 14 then
+                STATE.auraHits = STATE.auraHits + 1
+                return
+            end
+        end
+    end)
+end
+
 local function auraLoop()
     task.wait()
-    local lastSwing = 0
     while live() do
         local ok = pcall(function()
             if not auraActive() then STATE.auraTarget = nil return end
@@ -1182,12 +1268,43 @@ local function auraLoop()
                 STATE.auraTarget = "no sword equipped"
                 return
             end
+            -- nearest in RANGE, arc ignored: this is what the optional turn
+            -- aims at, and what the readout names when the arc is the only
+            -- thing standing in the way
+            local near, nd
+            for _, m in ipairs(combatants()) do
+                local b = bodyPart(m)
+                local r = myRoot()
+                if b and r then
+                    local d = (r.Position - b.Position).Magnitude
+                    if d <= CONFIG.auraRange and (not nd or d < nd) then near, nd = m, d end
+                end
+            end
+            STATE.auraModel = near
+
             local target, dist = auraPick()
-            STATE.auraTarget = target and (target.Name .. "  " .. math.floor(dist) .. "m") or nil
-            if not target then return end
+            if not target then
+                -- say WHY nothing is happening rather than going quiet: a gate
+                -- that blocks silently reads exactly like a broken feature
+                if not near then
+                    for _, m in ipairs(combatants()) do
+                        local b = bodyPart(m)
+                        local r = myRoot()
+                        if b and r then
+                            local d = (r.Position - b.Position).Magnitude
+                            if not nd or d < nd then near, nd = m, d end
+                        end
+                    end
+                end
+                STATE.auraTarget = near
+                    and UI.tf("nearest %s at %sm - out of reach or arc", near.Name, math.floor(nd))
+                    or nil
+                return
+            end
+            STATE.auraTarget = target.Name .. "  " .. math.floor(dist) .. "m"
             local now = os.clock() * 1000
-            if now - lastSwing < CONFIG.auraInterval then return end
-            lastSwing = now
+            if now - STATE.lastSwingAt < CONFIG.auraInterval then return end
+            STATE.lastSwingAt = now
             if pullTrigger() then STATE.auraClicks = STATE.auraClicks + 1 end
         end)
         if not ok then task.wait(0.2) end
@@ -1488,10 +1605,35 @@ RunService:BindToRenderStep("__REDLINER_AIM", Enum.RenderPriority.Camera.Value +
     end
     STATE.fps = math.floor(1 / math.max(dt, 1e-4))
     pcall(aimPass, dt)
+    -- The aura's optional turn. It is opt-in and separate from the aim assist on
+    -- purpose: the aura's whole point is that it does NOT move the camera, and
+    -- somebody who wants that behaviour anyway should be switching on something
+    -- that says so. Capped by the same deg/s knob, so it cannot snap.
+    if CONFIG.aura and CONFIG.auraFaceTarget and STATE.auraModel then
+        pcall(function()
+            local model = STATE.auraModel
+            if not model.Parent then STATE.auraModel = nil return end
+            local body = bodyPart(model)
+            if not body then return end
+            local pos = cam.CFrame.Position
+            local curPitch, curYaw = cam.CFrame:ToOrientation()
+            local wantPitch, wantYaw = CFrame.lookAt(pos, body.Position):ToOrientation()
+            local dYaw = angleDelta(curYaw, wantYaw) * approach(CONFIG.aimSmoothH, dt)
+            local dPitch = angleDelta(curPitch, wantPitch) * approach(CONFIG.aimSmoothV, dt)
+            local step = math.sqrt(dYaw * dYaw + dPitch * dPitch)
+            local cap = math.rad(CONFIG.humanTurnCap) * dt
+            if cap > 0 and step > cap then
+                local scale = cap / step
+                dYaw, dPitch = dYaw * scale, dPitch * scale
+            end
+            cam.CFrame = CFrame.new(pos) * CFrame.fromOrientation(curPitch + dPitch, curYaw + dYaw, 0)
+        end)
+    end
 end)
 
 task.spawn(triggerLoop)
 task.spawn(auraLoop)
+task.spawn(function() task.wait() pcall(watchHits) end)
 task.spawn(bhopLoop)
 task.spawn(slideLoop)
 task.spawn(function()
@@ -1766,17 +1908,20 @@ end
 local auraPage = win:Page("AURA", UI.icon.sword)
 do
     local c = auraPage:Card("MELEE AURA", 1):Accent()
-    c:Label("This game is a swordfight first, so this is the page that matters. "
-        .. "It presses the real left mouse button when somebody is inside your "
-        .. "sword range - it fires no remote and fabricates no hit. Measured on "
-        .. "a live round: the game paces melee at about 640ms and anything "
-        .. "faster is thrown away, so the interval defaults to 660.")
+    c:Label("This is not an aimbot and it does not move your camera. It watches "
+        .. "for somebody who is ALREADY hittable - inside your reach and inside "
+        .. "the arc you are looking at - and swings then, on a real mouse click. "
+        .. "Measured: 4 swings facing away from a target landed nothing, 4 swings "
+        .. "facing it landed 9 impacts. So the arc is what decides whether a "
+        .. "swing is worth anything, and that is the gate this uses.")
     c:Toggle("Kill aura", CONFIG.aura, function(v) CONFIG.aura = v end, nil, UI.theme.warn)
     c:Dropdown("Activation", { "Hotkey", "Always", "Screen held" }, CONFIG.auraActivation,
         function(v) CONFIG.auraActivation = v end)
     keyButton(c, "Key", "auraKey")
-    c:Slider("Range (studs)", 5, 60, CONFIG.auraRange, function(v) CONFIG.auraRange = v end,
-        "NOT measured - nobody stayed in reach long enough to find where a swing connects")
+    c:Slider("Reach (studs)", 5, 60, CONFIG.auraRange, function(v) CONFIG.auraRange = v end,
+        "a swing while closing from ~29 studs landed, one at 40 did not")
+    c:Slider("Arc (degrees)", 5, 120, CONFIG.auraAngle, function(v) CONFIG.auraAngle = v end,
+        "how far off centre a target may stand and still be swung at")
     c:Slider("Interval (ms)", 200, 1500, CONFIG.auraInterval, function(v) CONFIG.auraInterval = v end,
         "measured swing gaps were 632, 651 and 650 ms")
 
@@ -1784,7 +1929,15 @@ do
     c2:Toggle("Only with the sword out", CONFIG.auraNeedSword,
         function(v) CONFIG.auraNeedSword = v end,
         "read from CharacterMotor6D.Equipped, which replicates for every player")
-    c2:Toggle("Only when facing them", CONFIG.auraFacing, function(v) CONFIG.auraFacing = v end)
+    c2:Toggle("Only when in sight", CONFIG.auraVisibleOnly,
+        function(v) CONFIG.auraVisibleOnly = v end,
+        "a wall between you is a swing into the wall")
+    c2:Toggle("Turn towards them", CONFIG.auraFaceTarget,
+        function(v) CONFIG.auraFaceTarget = v end,
+        "OFF by default - this one DOES move your camera and is the part that "
+        .. "looks like an aimbot", UI.theme.warn)
+    c2:Label("Tune Reach and Arc against the HITS counter below, not by feel. "
+        .. "It reads the game's own damage popup, so it cannot flatter itself.")
 
     local out = auraPage:Card("LIVE", 0):Readout(4)
     task.spawn(function()
@@ -1792,13 +1945,10 @@ do
         while live() do
             pcall(function()
                 out:set({
-                    UI.tf("  target        %s", STATE.auraTarget or "-"),
-                    UI.tf("  clicks sent   %s   (%s)", STATE.auraClicks, clickMethod()),
-                    UI.tf("  SWINGS SEEN   %s", STATE.auraSwings),
-                    UI.tf("  holding       %s", (function()
-                        local ch = myChar()
-                        return (ch and equippedWeapon(ch)) or "-"
-                    end)()),
+                    UI.tf("  %s", STATE.auraTarget or "nobody in reach"),
+                    UI.tf("  swings sent   %s   (%s)", STATE.auraClicks, clickMethod()),
+                    UI.tf("  confirmed     %s", STATE.auraSwings),
+                    UI.tf("  HITS          %s", STATE.auraHits),
                 })
             end)
             task.wait(0.3)
@@ -1942,6 +2092,7 @@ _G.__REDLINER_DBG = {
     aimTargetPart = aimTargetPart, placeKind = placeKind,
     roValue = roValue, tapKey = tapKey, pullTrigger = pullTrigger, holdKey = holdKey,
     equippedWeapon = equippedWeapon, swordOut = swordOut, auraPick = auraPick,
+    hittable = hittable, auraActive = auraActive,
     probeInput = probeInput, INPUT = INPUT, clickMethod = clickMethod, keyMethod = keyMethod,
     ATTACK_MELEE = ATTACK_MELEE, ATTACK_GUN = ATTACK_GUN,
     POOL = POOL, CHAMS = CHAMS,
