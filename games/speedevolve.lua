@@ -533,10 +533,44 @@ local function tryWorld()
 	-- The next world is a different PlaceId, so nothing in this VM survives the
 	-- jump. Arm the hub loader first - it is what brings this script back up on
 	-- the other side, and it re-arms itself for the world after that.
-	pcall(function()
-		queue_on_teleport('loadstring(game:HttpGet("https://raw.githubusercontent.com/' ..
-			'seltonmt012/sel01-rbx/main/loader.lua"))()')
-	end)
+	--
+	-- The old line here queued a BARE loader call, and that is one of the ways
+	-- the panel ended up in games nobody asked for: the executor does not consume
+	-- its queue on a teleport alone, so leaving to the app and joining anything
+	-- at all ran the loader there, with no marker on it - which the loader reads
+	-- as "a human typed this" and starts whatever matches. Two changes:
+	--
+	--   * the hub already arms the queue with this alias and all four world place
+	--     ids before it starts this script, so when it did there is nothing to do
+	--     here. Arming anyway loaded two copies on the other side.
+	--   * started by hand, the payload gates itself on THIS game's modules and
+	--     carries the alias marker, so an unrelated game gets nothing.
+	if not (_G.__SEL and _G.__SEL.game and _G.__SEL.game.alias == "speedevolve") then
+		pcall(function()
+			queue_on_teleport([[
+				task.spawn(function()
+					local rs = game:GetService("ReplicatedStorage")
+					local here = false
+					for _ = 1, 20 do
+						local sh = rs:FindFirstChild("Modules")
+						sh = sh and sh:FindFirstChild("Shared")
+						local svc = sh and sh:FindFirstChild("RemoteEventService")
+						if svc and svc:FindFirstChild("AddSpeedRemoteEvent")
+							and sh:FindFirstChild("EvolutionData") then
+							here = true
+							break
+						end
+						task.wait(1)
+					end
+					if not here then return end
+					_G.__SEL_TP = "speedevolve"
+					pcall(function() getgenv().__SEL_TP = "speedevolve" end)
+					pcall(function() writefile("selux-queue.txt", "speedevolve") end)
+					loadstring(game:HttpGet("https://raw.githubusercontent.com/seltonmt012/sel01-rbx/main/loader.lua"))()
+				end)
+			]])
+		end)
+	end
 	STATE.note = "teleporting to " .. want
 	WorldsRE:FireServer(want)
 end

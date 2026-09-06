@@ -17,7 +17,8 @@
 --   4. runs the matching game script
 --   5. re-arms itself with queue_on_teleport, so a lobby -> map teleport does
 --      not drop the automation - but ONLY for the script that is already
---      running, unless auto-start is switched on. See AUTO-START below.
+--      running, and only in a place that BELONGS to that script. See AUTO-START
+--      below.
 --
 -- Everything it downloads is cached under the executor workspace in sel01/, and
 -- a failed HttpGet falls back to that cache instead of leaving you with nothing.
@@ -72,7 +73,22 @@ local CACHE = "sel01/"
 -- OFF does not mean the queue is gone. A script that is already running still
 -- follows its own game across a place change (leaves lobby -> map, speedevolve
 -- world 1 -> world 2); what stops is starting a DIFFERENT game's script by
--- itself. The two are told apart by the alias the queue carries in _G.__SEL_TP.
+-- itself.
+--
+-- That is decided TWICE, in two independent places, because the first one alone
+-- kept failing in the wild:
+--
+--   1. THE QUEUED PAYLOAD GATES ITSELF, in the new place, before it fetches
+--      anything. arm() bakes the entry's own PlaceId list and its `detect`
+--      snippet into the queued string, so the payload's first act is to ask "am
+--      I in a place that belongs to the script that armed me?". In any other
+--      game it returns and NOTHING happens - the loader is not even downloaded,
+--      so no marker has to survive the join for the refusal to work. This is the
+--      part that had been missing: every fix before it depended on a marker
+--      arriving intact, and when the marker did not arrive the loader read the
+--      run as hand-typed and started whatever matched.
+--   2. the alias the queue carries in _G.__SEL_TP, checked by mayStart() at the
+--      bottom, which stays as the second line of defence.
 --
 -- NOTHING here needs the filesystem to work. The default is the hardcoded false
 -- below and only an explicit 1/on/true moves it, so an executor with no file
@@ -264,24 +280,82 @@ end
 -- loadGame is the only caller and passes the real one.
 local armed = false
 
-local function arm(alias)
+-- The destination gate, as Lua source to be pasted into the queued string.
+--
+-- Everything it needs is already in the registry entry: the PlaceIds the game is
+-- known to live in, and `detect`, the snippet that recognises a place we have
+-- never seen (a map place, a private server, a renamed sister place). Baked into
+-- the payload they travel WITH the queue, so the decision is made in the new
+-- place by code that already knows which game it belongs to - nothing has to
+-- survive the join, no file has to be readable, no global has to be shared.
+--
+-- Returns nil when the entry says nothing useful; the caller then queues the
+-- ungated payload, which is the old behaviour and is what auto-start wants.
+local function gateFor(entry)
+    if type(entry) ~= "table" then return nil end
+    local ids = {}
+    if type(entry.places) == "table" then
+        for _, id in ipairs(entry.places) do
+            local n = tonumber(id)
+            -- %d, never tostring: a PlaceId has 15 digits and Luau's tostring
+            -- renders that as 1.0864523090518e+14, which compares against
+            -- nothing.
+            if n then ids[#ids + 1] = string.format("%d", n) end
+        end
+    end
+    local detect = type(entry.detect) == "string" and entry.detect or ""
+    if #ids == 0 and detect == "" then return nil end
+    -- detect goes in as CODE on its own lines, not as a quoted string: it may
+    -- carry quotes and it is our own registry, the loader already runs it the
+    -- same way. Its own line matters - a trailing `--` comment would otherwise
+    -- swallow the rest of the payload.
+    return "local P = {" .. table.concat(ids, ",") .. "}\n"
+        .. "local function belongs()\n"
+        .. "for _, id in ipairs(P) do if id == game.PlaceId then return true end end\n"
+        .. "local ok, r = pcall(function()\n" .. detect .. "\nend)\n"
+        .. "return ok and r == true\n"
+        .. "end\n"
+end
+
+local function arm(entry)
     if armed or not queueTp then return end
     armed = true
     -- "*" rather than "" for "the queue armed this, but no script was running
     -- yet" (auto-start on, armed before the registry is even fetched). An empty
     -- string is indistinguishable from a marker that failed to arrive, and it
     -- would make the run read as hand-started.
-    local tag = type(alias) == "string" and alias ~= "" and alias or "*"
+    local tag = "*"
+    if type(entry) == "table" and type(entry.alias) == "string" and entry.alias ~= "" then
+        tag = entry.alias
+    elseif type(entry) == "string" and entry ~= "" then
+        tag = entry
+    end
     -- Three markers, one payload. Each line is wrapped so a missing function
     -- (getgenv, writefile) cannot stop the loader from running on the other side -
     -- the point of the redundancy is that ANY of them getting through is enough,
     -- not that all of them do.
-    local payload = string.format(
+    local body = string.format(
         '_G.__SEL_TP = %q; ' ..
         'pcall(function() getgenv().__SEL_TP = %q end); ' ..
         'pcall(function() writefile(%q, %q) end); ' ..
         'loadstring(game:HttpGet(%q))()',
         tag, tag, QUEUE_FILE, tag, BASE .. "loader.lua")
+
+    -- Auto-start ON means "I want this in every game", so it is the one case
+    -- that is queued ungated.
+    local gate = (not AUTOLOAD) and gateFor(entry) or nil
+    local payload = body
+    if gate then
+        -- Up to 20 seconds of retries, one per second, because a place is joined
+        -- before its modules exist and `detect` reads them - the PlaceId branch
+        -- hits on the first pass and never waits at all. Landing in a different
+        -- game costs 20 quiet seconds in a spawned thread and nothing else.
+        payload = "task.spawn(function()\n" .. gate
+            .. "local hit = false\n"
+            .. "for _ = 1, 20 do if belongs() then hit = true break end task.wait(1) end\n"
+            .. "if not hit then return end\n"
+            .. body .. "\nend)"
+    end
     pcall(queueTp, payload)
 end
 
@@ -585,8 +659,11 @@ local function loadGame(entry, why)
     -- place it teleports itself into would refuse to carry it.
     --
     -- A script is running now, so where it teleports itself is worth following -
-    -- with auto-start off this is the only place the queue is armed at all.
-    arm(entry.alias)
+    -- with auto-start off this is the only place the queue is armed at all. The
+    -- whole ENTRY goes in, not just the alias: arm() bakes its places and its
+    -- detect snippet into the queued string so the payload can refuse a place
+    -- that does not belong to this game.
+    arm(entry)
 
     local chunk, err = run(body, entry.file)
     if not chunk then
@@ -706,8 +783,11 @@ _G.__SEL = {
         notify("Auto-Start in neuen Spielen: " .. (on and "AN" or "AUS"), 4)
         -- Carry whatever is loaded right now, so switching it on mid-session
         -- behaves like it had been on from the start rather than needing a
-        -- second game join to take effect.
-        if on then arm(_G.__SEL.game and _G.__SEL.game.alias) end
+        -- second game join to take effect. AUTOLOAD is moved first because arm()
+        -- reads it: auto-start ON is the one case that must NOT gate itself on
+        -- the current game's places.
+        AUTOLOAD = on
+        if on then arm(_G.__SEL.game) end
         return on
     end,
     reload = function()

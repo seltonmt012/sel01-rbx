@@ -736,13 +736,11 @@ loop(30, "worlds", worldPass)
 local UI = (_G.__SEL and _G.__SEL.ui) or loadstring(readfile("ui-template.lua"))()
 
 if _G.__TRAINCLIMB_WIN then pcall(function() _G.__TRAINCLIMB_WIN:Destroy() end) end
-for _, root in ipairs({ (gethui and gethui()) or nil, game:GetService("CoreGui") }) do
-	if root then
-		for _, g in ipairs(root:GetChildren()) do
-			if g.Name == "TrainClimbPanel" then pcall(function() g:Destroy() end) end
-		end
-	end
-end
+-- CoreGui THROWS on Volt ("lacking capability Plugin") instead of coming back
+-- nil, and inside a table literal that error killed the whole script here.
+-- UI.sweep() pcalls every container and skips the ones the executor refuses; the
+-- `if` only guards against an older cached copy of the template.
+if UI.sweep then UI.sweep("TrainClimbPanel") end
 
 -- Every switch on this panel survives a rejoin. UI.config merges the saved file
 -- into CONFIG HERE, before the panel is built - the controls read their initial

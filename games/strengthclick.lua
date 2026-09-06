@@ -1124,13 +1124,11 @@ local UI = (_G.__SEL and _G.__SEL.ui) or loadstring(readfile("ui-template.lua"))
 -- Re-executing stacks panels: destroy the stored handle AND sweep the named
 -- ScreenGui, since a run that errored before storing the handle left one behind.
 if _G.__STRCLICK_WIN then pcall(function() _G.__STRCLICK_WIN:Destroy() end) end
-for _, root in ipairs({ (gethui and gethui()) or nil, game:GetService("CoreGui") }) do
-	if root then
-		for _, g in ipairs(root:GetChildren()) do
-			if g.Name == "StrengthClickPanel" then pcall(function() g:Destroy() end) end
-		end
-	end
-end
+-- CoreGui THROWS on Volt ("lacking capability Plugin") instead of coming back
+-- nil, and inside a table literal that error killed the whole script here.
+-- UI.sweep() pcalls every container and skips the ones the executor refuses; the
+-- `if` only guards against an older cached copy of the template.
+if UI.sweep then UI.sweep("StrengthClickPanel") end
 
 -- Every switch on this panel survives a rejoin. UI.config merges the saved file
 -- into CONFIG HERE, before the panel is built - the controls read their initial

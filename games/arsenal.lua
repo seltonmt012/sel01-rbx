@@ -62,7 +62,15 @@ local Players           = game:GetService("Players")
 local RunService        = game:GetService("RunService")
 local UserInputService  = game:GetService("UserInputService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local CoreGui           = game:GetService("CoreGui")
+-- NOT `game:GetService("CoreGui")`. On Volt the script runs on a thread without
+-- the Plugin capability and that call THROWS ("The current thread cannot access
+-- 'CoreGui'") instead of returning nil - at the top of the file it took the whole
+-- script down before a single line of it ran.
+local CoreGui
+do
+	local ok, svc = pcall(game.GetService, game, "CoreGui")
+	CoreGui = ok and svc or nil
+end
 
 local plr    = Players.LocalPlayer
 local camera = workspace.CurrentCamera
@@ -603,7 +611,12 @@ end
 -- chams
 --------------------------------------------------------------------------------
 
-local hlRoot = (gethui and gethui()) or CoreGui
+-- gethui() can throw rather than return nil, and CoreGui is nil on an executor
+-- that refuses it (Volt) - so PlayerGui is the last resort, where a Highlight
+-- renders exactly the same.
+local hlRoot
+pcall(function() hlRoot = gethui and gethui() end)
+hlRoot = hlRoot or CoreGui or plr:WaitForChild("PlayerGui", 10)
 local chamsFolder = hlRoot:FindFirstChild("SeluxArsenalChams")
 if chamsFolder then pcall(function() chamsFolder:Destroy() end) end
 chamsFolder = Instance.new("Folder")
@@ -1912,13 +1925,10 @@ RunService:BindToRenderStep("SeluxArsenalESP", Enum.RenderPriority.Camera.Value 
 
 local UI = (_G.__SEL and _G.__SEL.ui) or loadstring(readfile("ui-template.lua"))()
 if _G.__ARSENAL_WIN then pcall(function() _G.__ARSENAL_WIN:Destroy() end) end
-for _, root in ipairs({ (gethui and gethui()) or CoreGui, CoreGui }) do
-	if root then
-		for _, g in ipairs(root:GetChildren()) do
-			if g.Name == "ArsenalPanel" then pcall(function() g:Destroy() end) end
-		end
-	end
-end
+-- UI.sweep() instead of a literal: it pcalls every container, skips the ones the
+-- executor refuses, and leaves no nil hole for ipairs to stop at. The `if` only
+-- guards against an older cached copy of the template.
+if UI.sweep then UI.sweep("ArsenalPanel") end
 
 -- Every switch on this panel survives a rejoin. UI.config merges the saved file
 -- into CONFIG HERE, before the panel is built - the controls read their initial

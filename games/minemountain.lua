@@ -781,9 +781,12 @@ end)
 local UI = (_G.__SEL and _G.__SEL.ui) or loadstring(readfile("ui-template.lua"))()
 
 if _G.__MINEMTN_WIN then pcall(function() _G.__MINEMTN_WIN:Destroy() end) end
-for _, gui in ipairs(game:GetService("CoreGui"):GetChildren()) do
-    if gui.Name == "MINEMOUNTAIN" then pcall(function() gui:Destroy() end) end
-end
+-- CoreGui THROWS on Volt ("lacking capability Plugin") instead of coming back
+-- nil, and called bare like this it killed the whole script here. UI.sweep()
+-- pcalls every container and skips the ones the executor refuses - it also looks
+-- in gethui() and PlayerGui, which is where the panel lands when CoreGui is
+-- refused. The `if` only guards against an older cached copy of the template.
+if UI.sweep then UI.sweep("MINEMOUNTAIN") end
 
 -- Every switch on this panel survives a rejoin. UI.config merges the saved file
 -- into CONFIG HERE, before the panel is built - the controls read their initial

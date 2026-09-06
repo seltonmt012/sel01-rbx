@@ -978,12 +978,11 @@ local UI = (_G.__SEL and _G.__SEL.ui) or loadstring(readfile("ui-template.lua"))
 
 -- A run that errored early stores no handle, so sweep the named ScreenGui too.
 if _G.__FINDEGG_WIN then pcall(function() _G.__FINDEGG_WIN:Destroy() end) end
-pcall(function()
-    local cg = game:GetService("CoreGui")
-    for _, g in ipairs(cg:GetChildren()) do
-        if g.Name == "FINDEGG_PANEL" then g:Destroy() end
-    end
-end)
+-- The pcall this used to be caught the CoreGui throw on Volt ("lacking
+-- capability Plugin") but then swept nothing at all. UI.sweep() looks in
+-- gethui() and PlayerGui too, which is where the panel lands when CoreGui is
+-- refused. The `if` only guards against an older cached copy of the template.
+if UI.sweep then UI.sweep("FINDEGG_PANEL") end
 
 -- Merges the saved file into CONFIG BEFORE the panel is built, so every
 -- control comes up on its saved state by itself.

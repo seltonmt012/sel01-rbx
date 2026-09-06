@@ -73,10 +73,65 @@ end
 
 local UI = {}
 
-UI.VERSION = "3.6"
+UI.VERSION = "3.7"
 UI.BRAND = "SELUX"
 UI.DISCORD = "discord.gg/ARdpzFuKMm"
 UI.REPO = "seltonmt012/sel01-rbx"
+
+-- Every script sweeps its own leftover panel before rebuilding, and every one of
+-- them used to spell the container list out as a literal:
+--
+--     for _, root in ipairs({ (gethui and gethui()) or nil,
+--                             game:GetService("CoreGui"),
+--                             plr:FindFirstChild("PlayerGui") }) do
+--
+-- Two separate things are wrong with that line and both were measured.
+--
+-- 1. `game:GetService("CoreGui")` does not always come back nil when the
+--    executor will not hand it over - on VOLT it THROWS: "The current thread
+--    cannot access 'CoreGui' (lacking capability Plugin)". Inside a table
+--    constructor that error is not caught by anything, so the script dies right
+--    there, before the panel exists. Reported from the wild 2026-09-06 on
+--    +1 Cut Grass Adventure; it was never a cutgrass bug, every script had it.
+-- 2. A nil first element leaves a HOLE and `ipairs` stops at it, so on an
+--    executor without gethui the sweep silently did nothing at all.
+--
+-- UI.roots() has neither failure mode: everything is pcall'd and the list is
+-- built by APPENDING, so it is always a dense array of real containers - and it
+-- is the same order hostGui() parents into, which is what makes the sweep find
+-- what the last run left behind.
+function UI.roots()
+	local out = {}
+	local ok, r = pcall(function() return gethui and gethui() end)
+	if ok and typeof(r) == "Instance" then out[#out + 1] = r end
+	ok, r = pcall(game.GetService, game, "CoreGui")
+	if ok and typeof(r) == "Instance" then out[#out + 1] = r end
+	ok, r = pcall(function() return plr and plr:FindFirstChildOfClass("PlayerGui") end)
+	if ok and typeof(r) == "Instance" then out[#out + 1] = r end
+	return out
+end
+
+-- Destroy every ScreenGui called `name` in all three containers. `name` may also
+-- be a list of names - a script that has been renamed still cleans up after its
+-- older self. Returns how many were removed.
+function UI.sweep(name)
+	local names = type(name) == "table" and name or { name }
+	local n = 0
+	for _, root in ipairs(UI.roots()) do
+		local ok, kids = pcall(root.GetChildren, root)
+		if ok then
+			for _, g in ipairs(kids) do
+				for _, want in ipairs(names) do
+					if g.Name == want then
+						if pcall(function() g:Destroy() end) then n = n + 1 end
+						break
+					end
+				end
+			end
+		end
+	end
+	return n
+end
 
 -- Where a "this is broken" report goes. EMPTY means the panel falls back to the
 -- clipboard, which needs no infrastructure at all - so the button works from day

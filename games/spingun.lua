@@ -1769,13 +1769,11 @@ end)
 local UI = (_G.__SEL and _G.__SEL.ui) or loadstring(readfile("ui-template.lua"))()
 
 if _G.__SPINGUN_WIN then pcall(function() _G.__SPINGUN_WIN:Destroy() end) end
-for _, parent in ipairs({ (gethui and gethui()) or nil, game:GetService("CoreGui"), plr:FindFirstChild("PlayerGui") }) do
-    pcall(function()
-        for _, g in ipairs(parent:GetChildren()) do
-            if g.Name == "SPINGUN_PANEL" then g:Destroy() end
-        end
-    end)
-end
+-- CoreGui THROWS on Volt ("lacking capability Plugin") instead of coming back
+-- nil, and inside a table literal that error killed the whole script here.
+-- UI.sweep() pcalls every container and skips the ones the executor refuses; the
+-- `if` only guards against an older cached copy of the template.
+if UI.sweep then UI.sweep("SPINGUN_PANEL") end
 
 -- Merges the saved file into CONFIG before the panel is built, so every control
 -- comes up on its saved state by itself.

@@ -632,9 +632,11 @@ local UI = (_G.__SEL and _G.__SEL.ui) or loadstring(readfile("ui-template.lua"))
 if _G.__AMMOCLICK_WIN then pcall(function() _G.__AMMOCLICK_WIN:Destroy() end) end
 local existing = LocalPlayer:FindFirstChild("PlayerGui")
 if existing then
-    for _, gui in ipairs(game:GetService("CoreGui"):GetChildren()) do
-        if gui.Name == "AMMOCLICK" then pcall(function() gui:Destroy() end) end
-    end
+    -- CoreGui THROWS on Volt ("lacking capability Plugin") instead of coming
+    -- back nil, and called bare like this it killed the whole script here.
+    -- UI.sweep() pcalls every container and skips the ones the executor refuses;
+    -- the `if` only guards against an older cached copy of the template.
+    if UI.sweep then UI.sweep("AMMOCLICK") end
 end
 
 -- Every switch on this panel survives a rejoin. UI.config merges the saved file

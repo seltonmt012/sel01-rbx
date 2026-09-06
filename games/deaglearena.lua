@@ -76,7 +76,16 @@
 local Players           = game:GetService("Players")
 local RunService        = game:GetService("RunService")
 local UserInputService  = game:GetService("UserInputService")
-local CoreGui           = game:GetService("CoreGui")
+-- NOT `game:GetService("CoreGui")`. On Volt the script runs on a thread without
+-- the Plugin capability and that call THROWS ("The current thread cannot access
+-- 'CoreGui'") instead of returning nil - at the top of the file it took the whole
+-- script down before a single line of it ran. Everything below already treats a
+-- nil CoreGui as "try the next container".
+local CoreGui
+do
+	local ok, svc = pcall(game.GetService, game, "CoreGui")
+	CoreGui = ok and svc or nil
+end
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local plr    = Players.LocalPlayer
@@ -862,7 +871,11 @@ local function chamsRoot()
 	local roots = {}
 	local ok, hidden = pcall(function() return gethui and gethui() or nil end)
 	if ok and hidden then roots[#roots + 1] = hidden end
-	roots[#roots + 1] = CoreGui
+	if CoreGui then roots[#roots + 1] = CoreGui end
+	-- PlayerGui last: on an executor that refuses CoreGui outright (Volt) the two
+	-- above are both nil, and a Highlight in PlayerGui renders exactly the same.
+	local pg = plr and plr:FindFirstChildOfClass("PlayerGui")
+	if pg then roots[#roots + 1] = pg end
 
 	for _, root in ipairs(roots) do
 		local made = nil
@@ -2519,13 +2532,10 @@ end)
 
 local UI = (_G.__SEL and _G.__SEL.ui) or loadstring(readfile("ui-template.lua"))()
 if _G.__DEAGLE_WIN then pcall(function() _G.__DEAGLE_WIN:Destroy() end) end
-for _, root in ipairs({ (gethui and gethui()) or nil, CoreGui }) do
-	if root then
-		for _, g in ipairs(root:GetChildren()) do
-			if g.Name == "DeagleArenaPanel" then pcall(function() g:Destroy() end) end
-		end
-	end
-end
+-- UI.sweep() instead of a literal: it pcalls every container, skips the ones the
+-- executor refuses, and leaves no nil hole for ipairs to stop at. The `if` only
+-- guards against an older cached copy of the template.
+if UI.sweep then UI.sweep("DeagleArenaPanel") end
 
 -- Merges the saved file into CONFIG BEFORE the panel is built - the controls read
 -- their initial value out of CONFIG when they are created, so they come up on the

@@ -147,9 +147,21 @@ if _G.__WINGSBR_WIN then
 	_G.__WINGSBR_WIN = nil
 end
 pcall(function()
-	local host = (gethui and gethui()) or game:GetService("CoreGui")
-	for _, child in ipairs(host:GetChildren()) do
-		if child.Name == PANEL_NAME then child:Destroy() end
+	-- Each container is fetched on its own: gethui() can throw, and on Volt
+	-- `game:GetService("CoreGui")` THROWS ("lacking capability Plugin") rather
+	-- than returning nil, which aborted this whole sweep and left the old panel
+	-- behind. PlayerGui is where the template lands when CoreGui is refused.
+	local hosts = {}
+	local ok, h = pcall(function() return gethui and gethui() end)
+	if ok and h then hosts[#hosts + 1] = h end
+	ok, h = pcall(game.GetService, game, "CoreGui")
+	if ok and h then hosts[#hosts + 1] = h end
+	h = plr:FindFirstChildOfClass("PlayerGui")
+	if h then hosts[#hosts + 1] = h end
+	for _, host in ipairs(hosts) do
+		for _, child in ipairs(host:GetChildren()) do
+			if child.Name == PANEL_NAME then child:Destroy() end
+		end
 	end
 end)
 

@@ -2857,17 +2857,43 @@ end)
 --
 -- Armed once per run: queue_on_teleport APPENDS, so arming twice would load two
 -- copies and build two panels.
+--
+-- TWO THINGS THIS USED TO GET WRONG, and both of them put the script into games
+-- nobody asked for:
+--
+--   * the queue is not consumed by a teleport alone. To the executor a round
+--     start, leaving to the app and joining a COMPLETELY DIFFERENT game are the
+--     same event, so the old payload ran `loadstring(readfile("islandescape.lua"))()`
+--     in whatever place was joined next. It now waits for this game's own
+--     signature and returns without doing anything anywhere else.
+--   * the hub already arms the queue with this game's alias before it runs the
+--     script, so arming here as well loaded two copies and built two panels.
+--     Started from the hub there is nothing left to do here.
 if not _G.__ISLAND_QUEUED then
 	_G.__ISLAND_QUEUED = true
+	local viaHub = _G.__SEL and _G.__SEL.game and _G.__SEL.game.alias == "islandescape"
 	local q = queue_on_teleport or (syn and syn.queue_on_teleport)
-	if q then
+	if viaHub then
+		log("hub armed the queue for this game - not arming a second copy")
+	elseif q then
 		pcall(function()
 			q([[
 				task.spawn(function()
-					for _ = 1, 60 do
-						if game:GetService("ReplicatedStorage"):FindFirstChild("Engine") then break end
+					-- The gate: this game and nothing else. A round start lands
+					-- on a reserved server of the same place, so the modules are
+					-- the same; a different game never grows them and the payload
+					-- simply ends.
+					local rs = game:GetService("ReplicatedStorage")
+					local here = false
+					for _ = 1, 30 do
+						local e, ev = rs:FindFirstChild("Engine"), rs:FindFirstChild("Events")
+						if e and e:FindFirstChild("Service") and ev and ev:FindFirstChild("meleeHitRemote") then
+							here = true
+							break
+						end
 						task.wait(1)
 					end
+					if not here then return end
 					pcall(function() loadstring(readfile("islandescape.lua"))() end)
 				end)
 			]])
@@ -2927,7 +2953,11 @@ _G.__ISLAND_STEP = "template loaded"
 -- an unnamed one can only come from a script that passed no name, which in this
 -- game is an older copy of this script.
 local GUI_NAME = "Selux_islandescape"
-for _, parent in ipairs({ game:GetService("CoreGui"), plr:FindFirstChild("PlayerGui") }) do
+-- UI.roots() rather than a literal: CoreGui THROWS on Volt ("lacking capability
+-- Plugin") instead of coming back nil, and inside a table constructor that error
+-- killed the whole script here. It also adds gethui(), which the template
+-- parents into first.
+for _, parent in ipairs(UI.roots and UI.roots() or {}) do
 	if parent then
 		for _, g in ipairs(parent:GetChildren()) do
 			if g:IsA("ScreenGui")

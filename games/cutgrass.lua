@@ -1367,26 +1367,12 @@ local UI = (_G.__SEL and _G.__SEL.ui) or loadstring(readfile("ui-template.lua"))
 
 if _G.__CUTGRASS_WIN then pcall(function() _G.__CUTGRASS_WIN:Destroy() end) end
 
--- gethui() can THROW rather than return nil (heroevo), and the usual
--- `(gethui and gethui()) or CoreGui` guard only checks that the function exists.
-local hiddenRoot
-pcall(function() hiddenRoot = gethui and gethui() end)
-
--- The list is built by APPENDING, never as a literal: `{ gethui() or nil, CoreGui }`
--- leaves a hole and ipairs stops at it, so on an executor without gethui the
--- fallback would never be tried. And PlayerGui is in here because that is where the
--- template actually landed in this game - a sweep of CoreGui alone reported "no
--- panel" while the window was on screen, and a re-execute would have stacked a
--- second one on top of it.
-local roots = {}
-if hiddenRoot then roots[#roots + 1] = hiddenRoot end
-roots[#roots + 1] = game:GetService("CoreGui")
-roots[#roots + 1] = plr:FindFirstChildOfClass("PlayerGui")
-for _, root in ipairs(roots) do
-	for _, g in ipairs(root:GetChildren()) do
-		if g.Name == "CutGrassPanel" then pcall(function() g:Destroy() end) end
-	end
-end
+-- gethui() can THROW rather than return nil (heroevo), CoreGui can throw too
+-- ("lacking capability Plugin" on Volt, which killed this script here before the
+-- panel was ever built), and a root list written as a literal leaves a nil hole
+-- that ipairs stops at. UI.sweep() is the one place that gets all three right;
+-- the `if` only guards against an older cached copy of the template.
+if UI.sweep then UI.sweep("CutGrassPanel") end
 
 UI.config("cutgrass", CONFIG)
 

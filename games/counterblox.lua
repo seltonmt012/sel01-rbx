@@ -45,7 +45,15 @@
 local Players           = game:GetService("Players")
 local RunService        = game:GetService("RunService")
 local UserInputService  = game:GetService("UserInputService")
-local CoreGui           = game:GetService("CoreGui")
+-- NOT `game:GetService("CoreGui")`. On Volt the script runs on a thread without
+-- the Plugin capability and that call THROWS ("The current thread cannot access
+-- 'CoreGui'") instead of returning nil - at the top of the file it took the whole
+-- script down before a single line of it ran.
+local CoreGui
+do
+	local ok, svc = pcall(game.GetService, game, "CoreGui")
+	CoreGui = ok and svc or nil
+end
 
 local plr    = Players.LocalPlayer
 local camera = workspace.CurrentCamera
@@ -189,6 +197,8 @@ local STATE = {
 	kickY     = 0, kickP = 0, kickPeak = 0,
 	underCross = "-",
 	lastKey   = "-",
+	clickHow  = "-",   -- which executor call actually delivers a shot, see pullTrigger
+	touch     = false, -- this client has no mouse and no keyboard
 	map       = "-",
 	timer     = 0,
 	ctWins    = 0, tWins = 0,
@@ -437,7 +447,12 @@ end
 -- client script can walk onto it; parented to gethui()/CoreGui with an Adornee it
 -- renders identically and is not in the game's tree at all.
 
-local hlRoot = (gethui and gethui()) or CoreGui
+-- gethui() can throw rather than return nil, and CoreGui is nil on an executor
+-- that refuses it (Volt) - so PlayerGui is the last resort, where a Highlight
+-- renders exactly the same.
+local hlRoot
+pcall(function() hlRoot = gethui and gethui() end)
+hlRoot = hlRoot or CoreGui or plr:WaitForChild("PlayerGui", 10)
 local chamsFolder = hlRoot:FindFirstChild("SeluxCBloxChams")
 if chamsFolder then pcall(function() chamsFolder:Destroy() end) end
 chamsFolder = Instance.new("Folder")
@@ -905,8 +920,103 @@ UserInputService.InputEnded:Connect(function(input)
 	capture(name)
 end)
 
+--------------------------------------------------------------------------------
+-- a client with no mouse and no keyboard
+--------------------------------------------------------------------------------
+--
+-- Everything above this point is a mouse or a keyboard, and a phone has neither.
+-- Read out of the code rather than guessed, and every one of the four is fatal on
+-- its own:
+--
+--   * `keyHeld` ends in IsMouseButtonPressed / IsKeyDown. On a client with
+--     MouseEnabled and KeyboardEnabled both false those return false forever, so
+--     "Hotkey" - the DEFAULT for both the aim assist and the trigger - could never
+--     become true. MouseButton2 and "C" are simply not reachable there.
+--   * `firing()` read MouseButton1, so "While firing", the shot counter and the
+--     whole recoil pass were dead as well.
+--   * the recorder that rebinds a key takes Keyboard on InputBegan and
+--     MouseButton on InputEnded and nothing else, so a phone could not even bind
+--     its way out of it.
+--   * Roblox does NOT synthesise MouseMovement on a touch client - a camera drag
+--     arrives as UserInputType.Touch - so the sensitivity calibration never got a
+--     single sample and the recoil correction bailed out at `sensYaw == 0`.
+--
+-- So on a phone the ESP drew and NOTHING else in this script could ever run, with
+-- no error and no note to say why. Everything below is ADDITIVE: every mouse path
+-- is left exactly as it was, so a desktop behaves identically.
+local TOUCH = false
+pcall(function()
+	TOUCH = UserInputService.TouchEnabled
+		and not UserInputService.MouseEnabled
+		and not UserInputService.KeyboardEnabled
+end)
+STATE.touch = TOUCH
+
+-- Counting fingers with a plain +1/-1 drifts the moment one InputEnded is missed
+-- (a finger that leaves over the Roblox top bar does that), and a count stuck at 1
+-- would leave "Screen held" permanently on. The set is keyed by the InputObject
+-- and re-checked on every read, so a stale entry removes itself.
+local touches = setmetatable({}, { __mode = "k" })
+
+local function screenHeld()
+	local n = 0
+	for input in pairs(touches) do
+		local ok, state = pcall(function() return input.UserInputState end)
+		if ok and state ~= Enum.UserInputState.End
+			and state ~= Enum.UserInputState.Cancel then
+			n = n + 1
+		else
+			touches[input] = nil
+		end
+	end
+	return n > 0
+end
+
+UserInputService.InputBegan:Connect(function(input)
+	if _G.__CBLOX ~= GEN then return end
+	if input.UserInputType == Enum.UserInputType.Touch then touches[input] = true end
+end)
+
+UserInputService.InputEnded:Connect(function(input)
+	if _G.__CBLOX ~= GEN then return end
+	if input.UserInputType == Enum.UserInputType.Touch then touches[input] = nil end
+end)
+
+-- Set by pullTrigger. It is the only thing a touch client can know for certain
+-- about shooting, and both the shot counter and the recoil pass need exactly that.
+local lastShotAt = -1e9
+
 local function firing()
-	return UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton1)
+	if UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton1) then
+		return true
+	end
+	-- A raw screen touch is deliberately NOT counted as firing. On a touch client
+	-- the camera is dragged with a finger, so "a finger is down" is true almost
+	-- continuously: it would mis-count every spray AND starve the sensitivity
+	-- calibration, which only samples while NOT firing. The script's own shots are
+	-- the honest signal.
+	if TOUCH and os.clock() - lastShotAt < 0.35 then return true end
+	return false
+end
+
+-- Can this device produce that binding at all? A key it cannot press would leave
+-- the feature off forever with nothing on screen to say why - which is exactly
+-- what a phone got. An unreachable hotkey therefore falls back to holding the
+-- screen, so an old saved config comes back working instead of dead.
+local function reachable(name)
+	if not name or name == "" then return false end
+	local spec = resolveKey(name)
+	if not spec then return false end
+	local ok, enabled = pcall(function()
+		if spec.mouse then return UserInputService.MouseEnabled end
+		return UserInputService.KeyboardEnabled
+	end)
+	return ok and enabled and true or false
+end
+
+local function hotkeyHeld(name)
+	if TOUCH and not reachable(name) then return screenHeld() end
+	return keyHeld(name)
 end
 
 --------------------------------------------------------------------------------
@@ -987,8 +1097,14 @@ local stickyTarget = nil
 local function aimActive()
 	if not CONFIG.aim then return false end
 	if CONFIG.aimActive == "Always" then return true end
-	if CONFIG.aimActive == "While firing" then return firing() end
-	return keyHeld(CONFIG.aimKey)
+	if CONFIG.aimActive == "Screen held" then return screenHeld() end
+	if CONFIG.aimActive == "While firing" then
+		-- On a touch client firing() only knows about shots the SCRIPT pulled, and
+		-- the aim has to be running before it can pull one - so on a phone the mode
+		-- means "while a finger is on the screen", which is when you are playing.
+		return firing() or (TOUCH and screenHeld())
+	end
+	return hotkeyHeld(CONFIG.aimKey)
 end
 
 -- Which numbers apply right now. The first bullet of a burst uses the wide,
@@ -1165,7 +1281,12 @@ end
 local mouseDX, mouseDY = 0, 0
 UserInputService.InputChanged:Connect(function(input)
 	if _G.__CBLOX ~= GEN then return end
-	if input.UserInputType == Enum.UserInputType.MouseMovement then
+	local kind = input.UserInputType
+	-- A touch client never sends MouseMovement; the camera drag arrives as Touch.
+	-- Without this branch sensYaw stayed 0 on a phone and rcsPass returned at its
+	-- `sensYaw == 0 and sp == 0` guard on every single frame.
+	if kind == Enum.UserInputType.MouseMovement
+		or (TOUCH and kind == Enum.UserInputType.Touch) then
 		mouseDX = mouseDX + input.Delta.X
 		mouseDY = mouseDY + input.Delta.Y
 	end
@@ -1259,6 +1380,13 @@ local nextShotAt = 0
 
 local function shotClock()
 	local now = os.clock()
+	-- On a touch client there is no held button to run the clock off, so the count
+	-- is incremented by pullTrigger itself - the one place that knows a shot really
+	-- happened. Here only the spray reset is left.
+	if TOUCH then
+		if now - sprayAt > 0.35 then STATE.shots = 0 end
+		return
+	end
 	if not firing() then
 		if now - sprayAt > 0.35 then STATE.shots = 0 end
 		return
@@ -1295,11 +1423,40 @@ local function refreshTrigFilter()
 	trigParams.FilterDescendantsInstances = list
 end
 
+-- HOW a click is delivered differs per executor, and the mobile ones usually ship
+-- none of the mouse1* helpers at all. That was silent: `click`, `press` and
+-- `release` were all nil, pullTrigger fell out of the bottom of its if-chain
+-- doing nothing, and the trigger card cheerfully counted "shots" that were never
+-- fired. VirtualInputManager is the fallback that exists almost everywhere,
+-- including on phones, and whichever one is in use is now NAMED in the panel so a
+-- report says which executor could not fire rather than "it does nothing".
+local VIM = nil
+pcall(function() VIM = game:GetService("VirtualInputManager") end)
+if VIM then
+	local ok = pcall(function() return VIM.SendMouseButtonEvent end)
+	if not ok then VIM = nil end
+end
+
 local click = mouse1click or (Input and Input.LeftClick)
 local press, release = mouse1press, mouse1release
 
+local function vimButton(down)
+	if not VIM then return false end
+	local vp = camera.ViewportSize
+	return (pcall(function()
+		VIM:SendMouseButtonEvent(math.floor(vp.X / 2), math.floor(vp.Y / 2),
+			0, down, game, 0)
+	end))
+end
+
+STATE.clickHow = (click and "mouse1click")
+	or ((press and release) and "mouse1press")
+	or (VIM and "VirtualInputManager")
+	or "none"
+
 local function pullTrigger()
-	if CONFIG.trigMode == "Hold" and press and release then
+	local hold = CONFIG.trigMode == "Hold"
+	if hold and press and release then
 		press()
 		task.wait(CONFIG.trigHoldMs / 1000)
 		release()
@@ -1307,7 +1464,21 @@ local function pullTrigger()
 		click()
 	elseif press and release then
 		press() task.wait(0.02) release()
+	elseif VIM then
+		vimButton(true)
+		task.wait(hold and (CONFIG.trigHoldMs / 1000) or 0.02)
+		vimButton(false)
+	else
+		return false
 	end
+	-- The only moment a touch client can be sure a shot went out, so this is what
+	-- firing() and the spray counter run off there.
+	lastShotAt = os.clock()
+	if TOUCH then
+		STATE.shots = STATE.shots + 1
+		sprayAt = lastShotAt
+	end
+	return true
 end
 
 -- What is under the crosshair right now, as a player. A pixel FOV above zero
@@ -1350,7 +1521,8 @@ local trigWasHeld = false
 local function trigActive()
 	if not CONFIG.trig then return false end
 	if CONFIG.trigActive == "Always" then return true end
-	return keyHeld(CONFIG.trigKey)
+	if CONFIG.trigActive == "Screen held" then return screenHeld() end
+	return hotkeyHeld(CONFIG.trigKey)
 end
 
 task.spawn(function()
@@ -1406,9 +1578,12 @@ task.spawn(function()
 			-- and a give-away in equal measure.
 			if not underCrosshair() then return end
 
-			pullTrigger()
-			trigShots = trigShots + 1
-			STATE.trigHits = STATE.trigHits + 1
+			-- Counted only when a click was actually delivered, so the number in the
+			-- panel is shots FIRED and not shots attempted.
+			if pullTrigger() then
+				trigShots = trigShots + 1
+				STATE.trigHits = STATE.trigHits + 1
+			end
 			nextAt = os.clock() * 1000 + CONFIG.trigRefireMs
 		end)
 		if not ok then note("trigger: " .. tostring(err)) end
@@ -1524,13 +1699,10 @@ end)
 
 local UI = (_G.__SEL and _G.__SEL.ui) or loadstring(readfile("ui-template.lua"))()
 if _G.__CBLOX_WIN then pcall(function() _G.__CBLOX_WIN:Destroy() end) end
-for _, root in ipairs({ (gethui and gethui()) or nil, CoreGui }) do
-	if root then
-		for _, g in ipairs(root:GetChildren()) do
-			if g.Name == "CounterBloxPanel" then pcall(function() g:Destroy() end) end
-		end
-	end
-end
+-- UI.sweep() instead of a literal: it pcalls every container, skips the ones the
+-- executor refuses, and leaves no nil hole for ipairs to stop at. The `if` only
+-- guards against an older cached copy of the template.
+if UI.sweep then UI.sweep("CounterBloxPanel") end
 
 -- Every switch on this panel survives a rejoin. UI.config merges the saved file
 -- into CONFIG HERE, before the panel is built - the controls read their initial
