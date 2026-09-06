@@ -139,7 +139,12 @@ local CONFIG = {
     espBox = true,
     espName = true,
     espDist = true,
-    espHealth = true,
+    -- OFF by default, and that is a measurement: across two live sessions,
+    -- 470 attack animations produced ZERO changes in any entity's
+    -- Humanoid.Health. The game replicates real health through its own chrono
+    -- snapshots and leaves the Humanoid pinned at 100, so the bar would be a
+    -- flat green line pretending to be information.
+    espHealth = false,
     espHeadDot = false,
     espSkeleton = false,
     espTracer = false,
@@ -184,6 +189,23 @@ local CONFIG = {
     parryFacing = true,             -- only when the attacker is looking at us
     parryCooldown = 350,
 
+    -- KILL AURA  (melee, and this game is a swordfight before it is a shooter)
+    aura = false,
+    auraActivation = "Hotkey",
+    auraKey = "V",
+    auraRange = 18,
+    auraFacing = false,
+    auraInterval = 660,
+    auraNeedSword = true,
+
+    -- MOVEMENT
+    moveBhop = false,
+    moveBhopKey = "Space",
+    moveBhopRate = 60,
+    moveSlide = false,
+    moveSlideKey = "LeftControl",
+    moveSlideEvery = 1200,
+
     -- HUMAN
     humanTurnCap = 420,             -- deg/s
     humanWindup = 60,               -- ms
@@ -210,6 +232,11 @@ local STATE = {
     aimPeak = 0,
     healthMoves = 0,
     healthSamples = 0,
+    auraClicks = 0,
+    auraSwings = 0,
+    auraTarget = nil,
+    bhops = 0,
+    slides = 0,
 }
 
 local function note(text) STATE.note = tostring(text) end
@@ -295,6 +322,24 @@ end
 
 local function bodyPart(model)
     return model:FindFirstChild("Torso") or model:FindFirstChild("HumanoidRootPart")
+end
+
+-- The equipped weapon is readable AND it replicates: every weapon model under a
+-- character carries CharacterMotor6D.Equipped, whose Part0 is the limb holding
+-- it. Measured: sword in hand -> Redliner.Equipped.Part0 = "Right Arm", gun
+-- holstered -> Castigate.Unequipped.Part0 = "Left Leg". It works for every
+-- player, which is why the ESP can say who is carrying what - and defined up
+-- here, with the other accessors, because a Lua local is invisible above its own
+-- definition and the render pass below needs it.
+local function equippedWeapon(model)
+    for _, m in ipairs(model:GetChildren()) do
+        if m:IsA("Model") then
+            local motors = m:FindFirstChild("CharacterMotor6D")
+            local eq = motors and motors:FindFirstChild("Equipped")
+            if eq and eq:IsA("Motor6D") and eq.Part0 then return m.Name end
+        end
+    end
+    return nil
 end
 
 local function healthOf(model)
@@ -624,6 +669,11 @@ local function renderPass()
                 local streak = roValue(model.Name, "killstreak", nil)
                 local bits = { math.floor(dist) .. "m" }
                 if lvl then bits[#bits + 1] = "lv" .. tostring(lvl) end
+                -- who is carrying what: the one thing the HUD never tells you,
+                -- and in a game where the sword and the gun play completely
+                -- differently it is the most useful word on the box
+                local weapon = equippedWeapon(model)
+                if weapon then bits[#bits + 1] = weapon end
                 if streak and streak > 0 then bits[#bits + 1] = "x" .. tostring(streak) end
                 set.info.Text = table.concat(bits, "  ")
                 set.info.Size = math.max(12, textSize - 1)
@@ -777,15 +827,102 @@ local function hotkeyHeld(name)
     return keyHeld(name)
 end
 
+-- INPUT DELIVERY, AND WHY IT IS PROBED RATHER THAN ASSUMED --------------------
+--
+-- Measured in Potassium on 2026-09-06, counting what actually arrived at
+-- UserInputService.InputBegan:
+--
+--     mouse1click()            x3  ->  0 inputs
+--     mouse1press/mouse1release x3 ->  0 inputs
+--     keypress(70) / keypress(102) ->  0 inputs   (neither throws)
+--     VirtualInputManager:SendMouseButtonEvent  x3 ->  3 inputs
+--     VirtualInputManager:SendKeyEvent             ->  1 input
+--
+-- So the executor's own input functions EXIST and DO NOTHING. Preferring them
+-- because they are present - which is what every script in this genre does -
+-- means the trigger reports shots it never fired and the auto-parry reports
+-- parries that were never pressed. That is not a small bug: it is a panel
+-- lying about its own state.
+--
+-- The fix is to find out at start-up instead of guessing. F13 is sent through
+-- each transport in turn and UserInputService says which one arrived; it is a
+-- key no game binds, so the probe cannot do anything in the world. Another
+-- executor where mouse1click works keeps using it - nothing here is
+-- Potassium-specific except the measurement that prompted it.
+
+local INPUT = { key = "none", mouse = "none", probed = false }
+
+local function vimService()
+    local ok, vim = pcall(function() return game:GetService("VirtualInputManager") end)
+    if ok then return vim end
+    return nil
+end
+
+local function probeInput()
+    if INPUT.probed then return end
+    INPUT.probed = true
+    local arrived = nil
+    local conn = UserInputService.InputBegan:Connect(function(i)
+        if i.KeyCode == Enum.KeyCode.F13 then arrived = true end
+    end)
+
+    local function tryPath(name, send)
+        arrived = false
+        pcall(send)
+        local t = os.clock()
+        while os.clock() - t < 0.25 and not arrived do task.wait() end
+        if arrived and INPUT.key == "none" then INPUT.key = name end
+        return arrived
+    end
+
+    if keypress and keyrelease then
+        tryPath("keypress", function()
+            keypress(Enum.KeyCode.F13.Value)
+            task.wait(0.03)
+            keyrelease(Enum.KeyCode.F13.Value)
+        end)
+    end
+    local vim = vimService()
+    if INPUT.key == "none" and vim then
+        tryPath("VirtualInputManager", function()
+            vim:SendKeyEvent(true, Enum.KeyCode.F13, false, game)
+            task.wait(0.03)
+            vim:SendKeyEvent(false, Enum.KeyCode.F13, false, game)
+        end)
+    end
+    pcall(function() conn:Disconnect() end)
+
+    -- The mouse cannot be probed the same way - a test click would fire the
+    -- weapon - so it follows the keyboard's verdict. Both come from the same
+    -- executor API family, and where the keyboard path is dead the mouse one
+    -- measured dead too.
+    if INPUT.key == "VirtualInputManager" then
+        INPUT.mouse = "VirtualInputManager"
+    elseif INPUT.key == "keypress" and mouse1click then
+        INPUT.mouse = "mouse1click"
+    elseif vim then
+        INPUT.mouse = "VirtualInputManager"
+    elseif mouse1click then
+        INPUT.mouse = "mouse1click"
+    end
+    note("input: key " .. INPUT.key .. ", mouse " .. INPUT.mouse)
+end
+
 local function pullTrigger()
-    if mouse1click then mouse1click() return true end
-    if mouse1press and mouse1release then
-        mouse1press() task.wait(0.02) mouse1release()
+    if INPUT.mouse == "mouse1click" and mouse1click then
+        mouse1click()
         return true
     end
+    local vim = vimService()
+    if not vim then
+        if mouse1press and mouse1release then
+            mouse1press() task.wait(0.02) mouse1release()
+            return true
+        end
+        return false
+    end
+    local c = centreOf()
     local ok = pcall(function()
-        local vim = game:GetService("VirtualInputManager")
-        local c = centreOf()
         vim:SendMouseButtonEvent(c.X, c.Y, 0, true, game, 0)
         task.wait(0.02)
         vim:SendMouseButtonEvent(c.X, c.Y, 0, false, game, 0)
@@ -794,34 +931,39 @@ local function pullTrigger()
 end
 
 local function clickMethod()
-    if mouse1click then return "mouse1click" end
-    if mouse1press then return "mouse1press" end
-    return "VirtualInputManager"
+    return INPUT.mouse == "none" and "NONE - nothing can fire" or INPUT.mouse
 end
 
 local function tapKey(name)
     local k = resolveKey(name)
     if not k or k.kind ~= "key" then return false end
-    if keypress and keyrelease then
+    if INPUT.key == "keypress" and keypress and keyrelease then
         local ok = pcall(function()
-            keypress(k.value)
+            keypress(k.value.Value)
             task.wait(0.02)
-            keyrelease(k.value)
+            keyrelease(k.value.Value)
         end)
         if ok then return true end
     end
-    local ok2 = pcall(function()
-        local vim = game:GetService("VirtualInputManager")
+    local vim = vimService()
+    if not vim then return false end
+    return (pcall(function()
         vim:SendKeyEvent(true, k.value, false, game)
         task.wait(0.02)
         vim:SendKeyEvent(false, k.value, false, game)
-    end)
-    return ok2
+    end))
+end
+
+local function holdKey(name, down)
+    local k = resolveKey(name)
+    if not k or k.kind ~= "key" then return false end
+    local vim = vimService()
+    if not vim then return false end
+    return (pcall(function() vim:SendKeyEvent(down, k.value, false, game) end))
 end
 
 local function keyMethod()
-    if keypress and keyrelease then return "keypress" end
-    return "VirtualInputManager"
+    return INPUT.key == "none" and "NONE - nothing can be pressed" or INPUT.key
 end
 
 --------------------------------------------------------------------------------
@@ -860,6 +1002,15 @@ local PARRY_OWN     = "rbxassetid://74124883232856"   -- Redliner.Parry
 local lastParryAt = 0
 local watchedHum = {}
 
+-- "are WE looking at them" - the mirror of facingUs below, used by the aura
+local function facingTarget(model)
+    local body = bodyPart(model)
+    if not body then return false end
+    local to = body.Position - cam.CFrame.Position
+    if to.Magnitude < 0.1 then return true end
+    return cam.CFrame.LookVector:Dot(to.Unit) > 0.5
+end
+
 local function facingUs(model)
     local root = model:FindFirstChild("HumanoidRootPart")
     local mine = myRoot()
@@ -891,23 +1042,56 @@ local function onAttackSeen(model, kind, label)
     end)
 end
 
+-- OUR OWN ANIMATIONS DO NOT ARRIVE ON Humanoid.AnimationPlayed, and that is
+-- measured: 12 clicks that provably swung the sword produced zero events there,
+-- while the SAME clicks showed up on the Humanoid's Animator. Remote players are
+-- the other way round - their replicated tracks do fire AnimationPlayed, which
+-- is why watching only the Humanoid looked like it worked. Both are connected
+-- now, and the handler is shared, so neither side can go quiet unnoticed.
+local MY_SWING = {
+    ["rbxassetid://105441036119013"] = true,   -- 3P_LAttack
+    ["rbxassetid://87457990259233"]  = true,   -- 3P_RAttack
+    ["rbxassetid://71188211641772"]  = true,   -- 3P_CAttack
+    ["rbxassetid://76985852878035"]  = true,   -- 1P_Attack1
+    ["rbxassetid://78660674654522"]  = true,   -- 1P_Attack2
+}
+
+-- BOTH the Humanoid and its Animator are connected, because each one is the only
+-- source for one side (ours vs remote players) - and some tracks fire on both,
+-- which double-counted every swing: 9 clicks read as 14 swings on the first live
+-- run. So the same animation on the same model inside 80ms is one event.
+local lastAnim = {}
+
+local function onAnimation(model, id)
+    if not live() or not id then return end
+    local key = tostring(model) .. id
+    local now = os.clock()
+    if lastAnim[key] and now - lastAnim[key] < 0.08 then return end
+    lastAnim[key] = now
+    if model == myChar() then
+        if id == PARRY_SUCCESS then STATE.parrySuccess = STATE.parrySuccess + 1 end
+        if MY_SWING[id] then STATE.auraSwings = STATE.auraSwings + 1 end
+        return
+    end
+    local melee = ATTACK_MELEE[id]
+    if melee then return onAttackSeen(model, "melee", melee) end
+    local gun = ATTACK_GUN[id]
+    if gun then return onAttackSeen(model, "gun", gun) end
+end
+
 local function watchHumanoid(model)
     local hum = model:FindFirstChildOfClass("Humanoid")
     if not hum or watchedHum[hum] then return end
     watchedHum[hum] = true
     hum.AnimationPlayed:Connect(function(track)
-        if not live() then return end
-        local id = track.Animation and track.Animation.AnimationId
-        if not id then return end
-        if model == myChar() then
-            if id == PARRY_SUCCESS then STATE.parrySuccess = STATE.parrySuccess + 1 end
-            return
-        end
-        local melee = ATTACK_MELEE[id]
-        if melee then return onAttackSeen(model, "melee", melee) end
-        local gun = ATTACK_GUN[id]
-        if gun then return onAttackSeen(model, "gun", gun) end
+        onAnimation(model, track.Animation and track.Animation.AnimationId)
     end)
+    local animator = hum:FindFirstChildOfClass("Animator")
+    if animator then
+        animator.AnimationPlayed:Connect(function(track)
+            onAnimation(model, track.Animation and track.Animation.AnimationId)
+        end)
+    end
 end
 
 local function startParryWatch()
@@ -930,6 +1114,127 @@ local function startParryWatch()
     end)
     local c = myChar()
     if c then watchHumanoid(c) end
+end
+
+--------------------------------------------------------------------------------
+-- KILL AURA
+--------------------------------------------------------------------------------
+-- REDLINER is a swordfight before it is a shooter, so the melee is the feature
+-- that matters - and it needs no remote at all: the sword swings on a real left
+-- click, exactly as it does for a hand on the mouse.
+--
+-- Measured on a live FFA round with gameplay control (menu closed, clicks
+-- arriving with gameProcessed = false):
+--
+--     12 clicks 180ms apart  ->  4 swings
+--     gaps between swings    ->  632, 651, 650 ms
+--     and they ALTERNATE     ->  3P_LAttack, 3P_RAttack, 3P_LAttack, 3P_RAttack
+--
+-- So the game paces melee at about 640ms and clicking faster is thrown away -
+-- the same "you measured the fire rate, not the kill list" answer the genre
+-- keeps giving. The default interval is 660ms for that reason, and the panel
+-- counts CLICKS SENT against SWINGS SEEN: the swing counter reads our own
+-- Animator, which is the game confirming it really swung, so a wrong interval
+-- shows up as a gap between two numbers instead of being believed.
+--
+-- NOT measured: the reach. Nobody stayed close enough long enough to find the
+-- distance at which a swing connects, so `auraRange` is a slider with a guess
+-- in it (18 studs) rather than a number this script can defend.
+
+local function swordOut()
+    local c = myChar()
+    return c ~= nil and equippedWeapon(c) == "Redliner"
+end
+
+local function auraActive()
+    if not CONFIG.aura then return false end
+    local mode = CONFIG.auraActivation
+    if mode == "Always" then return true end
+    if mode == "Screen held" then return screenHeld() end
+    return hotkeyHeld(CONFIG.auraKey)
+end
+
+local function auraPick()
+    local root = myRoot()
+    if not root then return nil end
+    local best, bestD
+    for _, model in ipairs(combatants()) do
+        local body = bodyPart(model)
+        if body then
+            local d = (root.Position - body.Position).Magnitude
+            if d <= CONFIG.auraRange then
+                if (not CONFIG.auraFacing) or facingTarget(model) then
+                    if not bestD or d < bestD then best, bestD = model, d end
+                end
+            end
+        end
+    end
+    return best, bestD
+end
+
+local function auraLoop()
+    task.wait()
+    local lastSwing = 0
+    while live() do
+        local ok = pcall(function()
+            if not auraActive() then STATE.auraTarget = nil return end
+            if CONFIG.auraNeedSword and not swordOut() then
+                STATE.auraTarget = "no sword equipped"
+                return
+            end
+            local target, dist = auraPick()
+            STATE.auraTarget = target and (target.Name .. "  " .. math.floor(dist) .. "m") or nil
+            if not target then return end
+            local now = os.clock() * 1000
+            if now - lastSwing < CONFIG.auraInterval then return end
+            lastSwing = now
+            if pullTrigger() then STATE.auraClicks = STATE.auraClicks + 1 end
+        end)
+        if not ok then task.wait(0.2) end
+        task.wait(0.03)
+    end
+end
+
+--------------------------------------------------------------------------------
+-- MOVEMENT
+--------------------------------------------------------------------------------
+-- WRITING WalkSpeed DOES NOTHING WORTH HAVING HERE, and that is a measurement
+-- rather than caution. Sampled over 3.7s of ordinary play: `Humanoid.WalkSpeed`
+-- read **16** while the character was actually travelling at up to **106
+-- studs/s** flat, vertical velocity peaking at 145. The game runs its own
+-- movement controller - the place description says "there is no speed limit"
+-- and the character has `AutoRotate = false` - so the Humanoid number is not the
+-- governor, and raising it would be a client-side placebo at best.
+--
+-- What IS real is the game's own movement tech, and the game itself treats it as
+-- something to automate: its keybind settings carry **BHOP TOGGLE**, **SLIDE
+-- TOGGLE** and **GRAPPLE TOGGLE**. So this page presses the same keys a hand
+-- would, on a timer, and nothing else. Those keys are whatever YOU bound in the
+-- game's own settings - they are rebindable and this script cannot read them, so
+-- they are fields here rather than assumptions.
+
+local function bhopLoop()
+    task.wait()
+    while live() do
+        local ok = pcall(function()
+            if not CONFIG.moveBhop then return end
+            if tapKey(CONFIG.moveBhopKey) then STATE.bhops = STATE.bhops + 1 end
+        end)
+        if not ok then task.wait(0.3) end
+        task.wait(math.max(CONFIG.moveBhopRate, 30) / 1000)
+    end
+end
+
+local function slideLoop()
+    task.wait()
+    while live() do
+        local ok = pcall(function()
+            if not CONFIG.moveSlide then return end
+            if tapKey(CONFIG.moveSlideKey) then STATE.slides = STATE.slides + 1 end
+        end)
+        if not ok then task.wait(0.3) end
+        task.wait(math.max(CONFIG.moveSlideEvery, 200) / 1000)
+    end
 end
 
 --------------------------------------------------------------------------------
@@ -1186,6 +1491,16 @@ RunService:BindToRenderStep("__REDLINER_AIM", Enum.RenderPriority.Camera.Value +
 end)
 
 task.spawn(triggerLoop)
+task.spawn(auraLoop)
+task.spawn(bhopLoop)
+task.spawn(slideLoop)
+task.spawn(function()
+    task.wait()
+    -- Before anything can press anything: find out which transport actually
+    -- delivers. See the INPUT section - the executor's own click and key
+    -- functions exist here and do nothing.
+    pcall(probeInput)
+end)
 task.spawn(function()
     task.wait()
     startParryWatch()
@@ -1447,6 +1762,96 @@ do
     end)
 end
 
+-- KILL AURA ------------------------------------------------------------------
+local auraPage = win:Page("AURA", UI.icon.sword)
+do
+    local c = auraPage:Card("MELEE AURA", 1):Accent()
+    c:Label("This game is a swordfight first, so this is the page that matters. "
+        .. "It presses the real left mouse button when somebody is inside your "
+        .. "sword range - it fires no remote and fabricates no hit. Measured on "
+        .. "a live round: the game paces melee at about 640ms and anything "
+        .. "faster is thrown away, so the interval defaults to 660.")
+    c:Toggle("Kill aura", CONFIG.aura, function(v) CONFIG.aura = v end, nil, UI.theme.warn)
+    c:Dropdown("Activation", { "Hotkey", "Always", "Screen held" }, CONFIG.auraActivation,
+        function(v) CONFIG.auraActivation = v end)
+    keyButton(c, "Key", "auraKey")
+    c:Slider("Range (studs)", 5, 60, CONFIG.auraRange, function(v) CONFIG.auraRange = v end,
+        "NOT measured - nobody stayed in reach long enough to find where a swing connects")
+    c:Slider("Interval (ms)", 200, 1500, CONFIG.auraInterval, function(v) CONFIG.auraInterval = v end,
+        "measured swing gaps were 632, 651 and 650 ms")
+
+    local c2 = auraPage:Card("CONDITIONS", 2)
+    c2:Toggle("Only with the sword out", CONFIG.auraNeedSword,
+        function(v) CONFIG.auraNeedSword = v end,
+        "read from CharacterMotor6D.Equipped, which replicates for every player")
+    c2:Toggle("Only when facing them", CONFIG.auraFacing, function(v) CONFIG.auraFacing = v end)
+
+    local out = auraPage:Card("LIVE", 0):Readout(4)
+    task.spawn(function()
+        task.wait()
+        while live() do
+            pcall(function()
+                out:set({
+                    UI.tf("  target        %s", STATE.auraTarget or "-"),
+                    UI.tf("  clicks sent   %s   (%s)", STATE.auraClicks, clickMethod()),
+                    UI.tf("  SWINGS SEEN   %s", STATE.auraSwings),
+                    UI.tf("  holding       %s", (function()
+                        local ch = myChar()
+                        return (ch and equippedWeapon(ch)) or "-"
+                    end)()),
+                })
+            end)
+            task.wait(0.3)
+        end
+    end)
+end
+
+-- MOVEMENT -------------------------------------------------------------------
+local movePage = win:Page("MOVE", UI.icon.wave)
+do
+    local c = movePage:Card("WHAT IS REAL HERE", 1):Accent()
+    c:Label("There is no speed slider on this page on purpose. Measured over "
+        .. "3.7s of ordinary play: Humanoid.WalkSpeed read 16 while the "
+        .. "character was actually moving at up to 106 studs/s. The game runs "
+        .. "its own movement controller, so writing WalkSpeed is a placebo. "
+        .. "What works is pressing the game's OWN movement keys - its settings "
+        .. "even ship BHOP TOGGLE, SLIDE TOGGLE and GRAPPLE TOGGLE.")
+    c:Label("Set the keys below to whatever YOU have bound in the game's own "
+        .. "settings. They are rebindable and this script cannot read them.")
+
+    local c2 = movePage:Card("AUTO BHOP", 2)
+    c2:Toggle("Auto bhop", CONFIG.moveBhop, function(v) CONFIG.moveBhop = v end,
+        "taps the jump key on a timer")
+    keyButton(c2, "Jump key", "moveBhopKey")
+    c2:Slider("Every (ms)", 30, 400, CONFIG.moveBhopRate, function(v) CONFIG.moveBhopRate = v end)
+
+    local c3 = movePage:Card("AUTO SLIDE", 2)
+    c3:Toggle("Auto slide", CONFIG.moveSlide, function(v) CONFIG.moveSlide = v end)
+    keyButton(c3, "Slide key", "moveSlideKey")
+    c3:Slider("Every (ms)", 200, 4000, CONFIG.moveSlideEvery, function(v) CONFIG.moveSlideEvery = v end)
+
+    local out = movePage:Card("LIVE", 0):Readout(3)
+    task.spawn(function()
+        task.wait()
+        while live() do
+            pcall(function()
+                local ch = myChar()
+                local hum = ch and ch:FindFirstChildOfClass("Humanoid")
+                local root = ch and ch:FindFirstChild("HumanoidRootPart")
+                local v = root and root.AssemblyLinearVelocity
+                local flat = v and math.floor(Vector3.new(v.X, 0, v.Z).Magnitude) or 0
+                out:set({
+                    UI.tf("  actual speed  %s studs/s   (WalkSpeed says %s)",
+                        flat, hum and math.floor(hum.WalkSpeed) or "-"),
+                    UI.tf("  bhop taps     %s   (%s)", STATE.bhops, keyMethod()),
+                    UI.tf("  slide taps    %s", STATE.slides),
+                })
+            end)
+            task.wait(0.3)
+        end
+    end)
+end
+
 -- INFO -----------------------------------------------------------------------
 local infoPage = win:Page("INFO", UI.icon.chart)
 do
@@ -1499,7 +1904,10 @@ do
         CONFIG.aim = false
         CONFIG.trigger = false
         CONFIG.parry = false
-        note("panic: aim, trigger and parry off")
+        CONFIG.aura = false
+        CONFIG.moveBhop = false
+        CONFIG.moveSlide = false
+        note("panic: aim, trigger, parry, aura and movement off")
     end, UI.theme.bad)
 end
 
@@ -1532,7 +1940,9 @@ _G.__REDLINER_DBG = {
     visibleTo = visibleTo, screenRect = screenRect, centreOf = centreOf,
     pickTarget = pickTarget, underCrosshair = underCrosshair,
     aimTargetPart = aimTargetPart, placeKind = placeKind,
-    roValue = roValue, tapKey = tapKey, pullTrigger = pullTrigger,
+    roValue = roValue, tapKey = tapKey, pullTrigger = pullTrigger, holdKey = holdKey,
+    equippedWeapon = equippedWeapon, swordOut = swordOut, auraPick = auraPick,
+    probeInput = probeInput, INPUT = INPUT, clickMethod = clickMethod, keyMethod = keyMethod,
     ATTACK_MELEE = ATTACK_MELEE, ATTACK_GUN = ATTACK_GUN,
     POOL = POOL, CHAMS = CHAMS,
 }
