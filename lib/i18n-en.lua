@@ -8,7 +8,7 @@
 -- they are - they keep passing "Auto rebirth" and only this file decides what
 -- the player reads.
 --
--- 1605 entries.
+-- 1645 entries.
 
 return {
 	["%d Einstellungen - Code steht im Feld, von dort kopieren."] = "%d settings - the code is in the field, copy it from there.",

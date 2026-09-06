@@ -490,6 +490,19 @@
 			"status": "ok",
 			"note": "this game has a REAL anti-cheat: twenty honeypot remotes in DataService.RE where one call is an instant record at risk 100, plus speed/teleport and uncut-grass-traversal checks. The script never warps, never writes WalkSpeed, refuses the honeypot names by name at runtime, and stops itself on AntiCheatService.IncidentWarning",
 			"detect": "local rs = game:GetService('ReplicatedStorage') local s = rs:FindFirstChild('Shared') local c = s and s:FindFirstChild('Configs') return c ~= nil and c:FindFirstChild('Grass') ~= nil and c:FindFirstChild('Zone') ~= nil and c:FindFirstChild('AntiCheat') ~= nil and game.Workspace:FindFirstChild('Zones') ~= nil"
+		},
+		{
+			"alias": "redliner",
+			"name": "REDLINER",
+			"file": "games/redliner.lua",
+			"places": [
+				94987506187454,
+				126691165749976,
+				115875349872417
+			],
+			"status": "ok",
+			"note": "three places, taken from the game's own CEnum.PlaceIds: MAIN 94987506187454 (hub+matchmaking), MATCH 126691165749976 (1v1/2v2), FFA 115875349872417. A duel runs on a RESERVED server so its place id is not always one of the three - the detect below is what catches those, and the script itself reads ReplicatedFirst.IS_MATCH_PLACE / IS_MATCHMAKING_PLACE. Characters are R6 models in workspace.Entities, NOT in the Players service, each with Hurtboxes.Head_Hurtbox; the oracle is ReplicatedStorage.ReadOnly.Players.<userId>. Packet names are hashed and the client classes obfuscated, so the script fires NO remote at all",
+			"detect": "local rs = game:GetService('ReplicatedStorage') local a = rs:FindFirstChild('Assets') if not a then return false end local ms = a:FindFirstChild('ModuleScripts') local sh = a:FindFirstChild('Shared') return ms ~= nil and ms:FindFirstChild('ParryTrainDef') ~= nil and sh ~= nil and sh:FindFirstChild('ReplicationRules') ~= nil and game.Workspace:FindFirstChild('Entities') ~= nil"
 		}
 	]
 }
