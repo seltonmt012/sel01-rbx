@@ -61,13 +61,30 @@ local plr = Players.LocalPlayer
 -- So: gethui() first (not in the DataModel at all), CoreGui second, and if it
 -- really has to be PlayerGui the name is randomised - a panel that is visible is
 -- one thing, a panel that is visible AND identifies the script is another.
+--
+-- And a panel that ends up in PlayerGui has been RENAMED, so nothing can find it
+-- by name afterwards - not the next run's sweep, not a person reading the tree.
+-- Measured 2026-09-06 in +1 Cut Grass Adventure: the window was on screen as
+-- `PlayerGui._215795` while a sweep for "CutGrassPanel" reported none, which is
+-- exactly how a re-execute ends up with two panels stacked. So hostGui registers
+-- every panel under the name the SCRIPT asked for, in the shared global table
+-- rather than as an attribute on the instance - an attribute is a fixed string
+-- sitting on the object and would hand back the identification the random name
+-- exists to avoid.
+local GENV = (getgenv and getgenv()) or _G
+GENV.__SEL_PANELS = GENV.__SEL_PANELS or {}
+
 local function hostGui(gui)
+	local wanted = gui.Name
 	pcall(function() gui.Parent = gethui and gethui() end)
-	if gui.Parent then return gui end
-	pcall(function() gui.Parent = game:GetService("CoreGui") end)
-	if gui.Parent then return gui end
-	gui.Name = "_" .. tostring(math.random(100000, 999999))
-	gui.Parent = plr:WaitForChild("PlayerGui")
+	if not gui.Parent then
+		pcall(function() gui.Parent = game:GetService("CoreGui") end)
+	end
+	if not gui.Parent then
+		gui.Name = "_" .. tostring(math.random(100000, 999999))
+		gui.Parent = plr:WaitForChild("PlayerGui")
+	end
+	GENV.__SEL_PANELS[wanted] = gui
 	return gui
 end
 
@@ -117,6 +134,16 @@ end
 function UI.sweep(name)
 	local names = type(name) == "table" and name or { name }
 	local n = 0
+	-- The registry first, because it is the only thing that finds a panel which
+	-- fell through to PlayerGui: that one was renamed and there is nothing left
+	-- in the tree to match on.
+	for _, want in ipairs(names) do
+		local prev = GENV.__SEL_PANELS[want]
+		if prev then
+			if pcall(function() prev:Destroy() end) then n = n + 1 end
+			GENV.__SEL_PANELS[want] = nil
+		end
+	end
 	for _, root in ipairs(UI.roots()) do
 		local ok, kids = pcall(root.GetChildren, root)
 		if ok then

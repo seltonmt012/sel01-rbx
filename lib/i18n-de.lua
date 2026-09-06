@@ -8,7 +8,7 @@
 -- they are - they keep passing "Auto rebirth" and only this file decides what
 -- the player reads.
 --
--- 1585 entries.
+-- 1590 entries.
 
 return {
 	["$%s   %s/s   slots %d/%d   R%d   endurance %s"] = "%s$   %s/s   Plaetze %d/%d   R%d   Ausdauer %s",
@@ -694,6 +694,7 @@ return {
 	["Scan the field"] = "Feld scannen",
 	["Scope condition"] = "Zoom-Bedingung",
 	["Scoped only"] = "Nur mit Zoom",
+	["Screen held"] = "Bildschirm halten",
 	["Seat + collect now"] = "Setzen + sammeln",
 	["SelectUpgrade to the best the wins balance allows, costs nothing"] = "SelectUpgrade auf das Beste was die Wins erlauben, kostenlos",
 	["Sell"] = "Verkauf",
@@ -782,6 +783,8 @@ return {
 	["The only remote this script ever fires, with the payload the game's own Claim button sends. Read out of Modules.Shared.Config.Codes - press once per code."] = "Das einzige Remote, das dieses Skript je feuert, mit derselben Nutzlast wie der Einlösen-Knopf des Spiels. Aus Modules.Shared.Config.Codes gelesen - einmal pro Code drücken.",
 	["The trigger reads DeagleController.CanShoot and ShootCooldownUntil, so it never clicks into a reload."] = "Der Trigger liest DeagleController.CanShoot und ShootCooldownUntil und klickt deshalb nie ins Nachladen.",
 	["Thickness"] = "Dicke",
+	["This device has no keyboard and no mouse - a hotkey it cannot press falls back to holding the screen, and Screen held does the same on purpose."] = "Dieses Gerät hat weder Tastatur noch Maus - eine Taste, die es nicht drücken kann, greift stattdessen auf Bildschirm halten zurück, und Bildschirm halten macht genau dasselbe.",
+	["This executor offers no way to click - neither mouse1click nor VirtualInputManager. Trigger and auto fire cannot fire here."] = "Dieser Executor bietet keine Möglichkeit zu klicken - weder mouse1click noch VirtualInputManager. Trigger und Autofeuer können hier nicht schießen.",
 	["This is the only feature in the panel that sends the shot itself instead of pressing the mouse. It was measured against the server's own kill counter, not assumed - the card on the right has the numbers. It ships off and no preset switches it on."] = "Das ist die einzige Funktion im Panel, die den Schuss selbst schickt statt die Maus zu drücken. Sie wurde gegen den serverseitigen Killzähler gemessen, nicht angenommen - die Karte rechts hat die Zahlen. Sie ist ab Werk aus und kein Preset schaltet sie ein.",
 	["Three sets that write every number on this page at once. Everything stays editable afterwards."] = "Drei Sätze, die jede Zahl auf dieser Seite auf einmal setzen. Alles bleibt danach änderbar.",
 	["Title rolls"] = "Titel-Rolls",
@@ -1201,6 +1204,7 @@ return {
 	["payback 7.5s at level 1, 2.7h at level 15"] = "Amortisation 7.5s bei Level 1, 2.7h bei Level 15",
 	["per second"] = "pro Sekunde",
 	["pets walk around the middle of the map and are bought where they stand"] = "Pets laufen in der Kartenmitte herum und werden dort gekauft, wo sie stehen",
+	["phone: hotkeys hold the screen instead"] = "Handy: Hotkeys halten stattdessen den Bildschirm",
 	["picked up"] = "aufgesammelt",
 	["picks the best crystal that fits and waits out its hold"] = "nimmt den besten Kristall, der noch passt, und wartet das Halten ab",
 	["pin in the blast zone and cycle blasts"] = "in der Blast-Zone fixieren und Blasts zyklen",
@@ -1357,6 +1361,7 @@ return {
 	["the weapon's own 30-point pattern, bright up to the shot you are on"] = "das 30-Punkte-Muster der Waffe, hell bis zum aktuellen Schuss",
 	["their cash, above the name"] = "sein Geld, über dem Namen",
 	["then it rescans, because fruit regrows while the sweep runs"] = "danach wird neu gesucht, denn Zitronen wachsen während der Runde nach",
+	["this executor cannot click - trigger and auto fire are off"] = "Dieser Executor kann nicht klicken - Trigger und Autofeuer sind aus",
 	["this is the gum engine: ~139 gum a call against 20 a second from the bag"] = "Das ist der Gum-Motor: ~139 Gum pro Aufruf gegen 20 pro Sekunde aus dem Sack",
 	["three identical pets -> one of the next variant, 2x better"] = "drei gleiche Pets -> eines der nächsten Variante, 2x besser",
 	["three of a kind into one better one, locked pets are left alone"] = "drei gleiche zu einem besseren, gesperrte Pets bleiben",

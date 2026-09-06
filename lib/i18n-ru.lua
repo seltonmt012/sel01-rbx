@@ -8,7 +8,7 @@
 -- they are - they keep passing "Auto rebirth" and only this file decides what
 -- the player reads.
 --
--- 1585 entries.
+-- 1590 entries.
 
 return {
 	["$%s   %s/s   slots %d/%d   R%d   endurance %s"] = "%s$   %s/с   слоты %d/%d   R%d   выносливость %s",
@@ -817,6 +817,7 @@ return {
 	["Scan the field"] = "Сканировать поле",
 	["Scope condition"] = "Условие прицела",
 	["Scoped only"] = "Только в прицеле",
+	["Screen held"] = "Удержание экрана",
 	["Script kaputt oder Spiel geupdatet? Ein Klick reicht - wenn du willst, schreib kurz dazu was nicht geht."] = "Скрипт сломан или игра обновилась? Хватит одного клика - и, если хотите, допишите, что именно не так.",
 	["Seat + collect now"] = "Посадить и собрать",
 	["SelectUpgrade to the best the wins balance allows, costs nothing"] = "SelectUpgrade на лучшее по балансу побед, бесплатно",
@@ -920,6 +921,8 @@ return {
 	["The only remote this script ever fires, with the payload the game's own Claim button sends. Read out of Modules.Shared.Config.Codes - press once per code."] = "Единственный remote, который этот скрипт вообще шлёт, с той же нагрузкой, что и кнопка получения в игре. Прочитано из Modules.Shared.Config.Codes - нажимать по одному разу на код.",
 	["The trigger reads DeagleController.CanShoot and ShootCooldownUntil, so it never clicks into a reload."] = "Триггер читает DeagleController.CanShoot и ShootCooldownUntil, поэтому никогда не кликает в перезарядку.",
 	["Thickness"] = "Толщина",
+	["This device has no keyboard and no mouse - a hotkey it cannot press falls back to holding the screen, and Screen held does the same on purpose."] = "На этом устройстве нет ни клавиатуры, ни мыши - недоступная горячая клавиша заменяется удержанием экрана, а режим «Удержание экрана» делает то же самое.",
+	["This executor offers no way to click - neither mouse1click nor VirtualInputManager. Trigger and auto fire cannot fire here."] = "Этот экзекьютор не умеет кликать - ни mouse1click, ни VirtualInputManager. Триггер и автоогонь здесь стрелять не смогут.",
 	["This is the only feature in the panel that sends the shot itself instead of pressing the mouse. It was measured against the server's own kill counter, not assumed - the card on the right has the numbers. It ships off and no preset switches it on."] = "Это единственная функция в панели, которая сама отправляет выстрел вместо нажатия мыши. Она измерена по серверному счётчику убийств, а не предположена - цифры на карточке справа. По умолчанию выключена, и ни один пресет её не включает.",
 	["Three sets that write every number on this page at once. Everything stays editable afterwards."] = "Три набора, которые разом задают все числа на этой странице. Всё потом остаётся редактируемым.",
 	["Title rolls"] = "Роллы титулов",
@@ -1360,6 +1363,7 @@ return {
 	["payback 7.5s at level 1, 2.7h at level 15"] = "окупаемость 7.5с на уровне 1, 2.7ч на уровне 15",
 	["per second"] = "в секунду",
 	["pets walk around the middle of the map and are bought where they stand"] = "питомцы бродят в центре карты и покупаются там, где стоят",
+	["phone: hotkeys hold the screen instead"] = "Телефон: горячие клавиши заменены удержанием экрана",
 	["picked up"] = "собрано",
 	["picks the best crystal that fits and waits out its hold"] = "берёт лучший кристалл, который влезает, и выжидает удержание",
 	["pin in the blast zone and cycle blasts"] = "закрепиться в зоне взрыва и повторять",
@@ -1517,6 +1521,7 @@ return {
 	["the weapon's own 30-point pattern, bright up to the shot you are on"] = "собственный 30-точечный паттерн оружия, ярко до текущего выстрела",
 	["their cash, above the name"] = "его деньги, над именем",
 	["then it rescans, because fruit regrows while the sweep runs"] = "затем пересканирует, ведь фрукты отрастают прямо во время прохода",
+	["this executor cannot click - trigger and auto fire are off"] = "Этот экзекьютор не умеет кликать - триггер и автоогонь выключены",
 	["this is the gum engine: ~139 gum a call against 20 a second from the bag"] = "Это движок жвачки: ~139 за вызов против 20 в секунду из мешка",
 	["three identical pets -> one of the next variant, 2x better"] = "три одинаковых питомца -> один следующего вида, вдвое лучше",
 	["three of a kind into one better one, locked pets are left alone"] = "три одинаковых в одного лучшего, закрытые питомцы не трогаются",

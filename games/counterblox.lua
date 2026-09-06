@@ -950,6 +950,11 @@ pcall(function()
 		and not UserInputService.MouseEnabled
 		and not UserInputService.KeyboardEnabled
 end)
+-- Test hook, the same idea as _G.__SEL_VIEWPORT in the panel template: there is no
+-- way to give a desktop client a phone's input, and a branch that cannot be run on
+-- the machine it is written on is a branch that ships unverified. Never set in
+-- normal use.
+if _G.__CBLOX_FORCE_TOUCH then TOUCH = true end
 STATE.touch = TOUCH
 
 -- Counting fingers with a plain +1/-1 drifts the moment one InputEnded is missed
