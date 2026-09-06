@@ -92,6 +92,19 @@ local CONFIG = {
 	colChamOwn = false,    -- chams use colCham instead of the team colour
 	colFov     = Color3.fromRGB(255, 255, 255),
 
+	-- overlays ------------------------------------------------------------------
+	crosshair  = false,    -- a static cross that ignores the game's own spread
+	crossSize  = 8,
+	crossGap   = 3,
+	crossDot   = true,
+	crossThick = 1,
+	colCross   = Color3.fromRGB(90, 255, 140),
+	sprayDraw  = false,    -- the weapon's own spray curve, drawn on screen
+	spraySize  = 90,       -- pixels for the whole pattern
+	fovChange  = false,    -- client-side field of view
+	fovValue   = 90,
+	bombTimer  = true,     -- big countdown once the C4 is armed
+
 	chamStyle  = "Fill",   -- see CHAM_STYLES
 	chamRainbow = false,   -- cycle the hue instead of using the team colour
 	chamByHealth = false,  -- colour the highlight from the target's health
@@ -132,6 +145,28 @@ local CONFIG = {
 	aimCircle  = true,     -- draw the FOV circles
 	aimCircle2 = true,     -- ...including the second, smaller one
 
+	-- humanisation ---------------------------------------------------------------
+	-- Every number an assist produces that a hand could not produce is a tell, and
+	-- each knob below removes one specific tell. Defaults are the middle preset.
+	hum        = true,
+	humReactMin = 90,      -- ms before the aim engages on a NEW target
+	humReactMax = 180,
+	humSwitchMs = 350,     -- cooldown before it may switch target at all
+	humRampMs  = 220,      -- wind-up: the first frames are slower than the setting
+	humOffset  = 35,       -- % of the target part's own size, as a random offset
+	humOffsetMs = 700,     -- how often that offset is re-rolled
+	humNoise   = 0.45,     -- degrees of continuous smooth wander
+	humNoiseHz = 1.6,      -- how fast the wander moves
+	humOvershoot = 0,      -- % past the target before settling back
+	humDeadPx  = 3,        -- do not correct at all inside this many pixels
+	humMoveFov = 100,      -- % of the FOV while the player is moving
+	humMaxDegS = 420,      -- hard ceiling on correction speed, degrees per second
+	humBreakPct = 0,       -- % chance per second to let go for a moment
+	humBreakMs = 160,
+	humFatigue = 8,        -- ms added to the trigger delay per shot in a burst
+	humPanelOff = true,    -- everything pauses while the panel is open
+	humPanicKey = "F1",    -- one key that switches aim, trigger, rcs and autofire off
+
 	-- trigger ------------------------------------------------------------------
 	trig       = false,
 	trigActive = "Hotkey", -- Hotkey | Always
@@ -151,10 +186,30 @@ local CONFIG = {
 
 	-- recoil -------------------------------------------------------------------
 	rcs        = false,
-	rcsPitch   = 70,       -- percent of the measured vertical kick to cancel
+	-- Two independent sources, and the panel can run either or both.
+	--
+	--   Measured  every frame the camera's angle change is compared against the raw
+	--             mouse movement for that frame; while NOT firing the ratio is the
+	--             effective sensitivity, while firing the leftover is the recoil.
+	--             Adapts on its own, needs no calibration step - but it carries the
+	--             VERTICAL kick well and the sideways half hardly at all, because
+	--             the player's own mouse is moving horizontally the whole time and
+	--             drowns it.
+	--   Pattern   the game hands over the real curve. Each weapon folder carries
+	--             `Pattern`, a JSON array of {fMagnitude, fAngle} - the literal
+	--             CS:GO spray table, one entry per bullet, in POLAR form and
+	--             normalised so the largest magnitude is 1. That is where left and
+	--             right actually come from. What one pattern unit is worth in
+	--             camera radians is the only unknown, and rather than hard-coding a
+	--             guess the script LEARNS it from the measured residual and puts
+	--             the number on screen.
+	rcsMode    = "Both",   -- Measured | Pattern | Both
+	rcsPitch   = 70,       -- percent of the vertical kick to cancel
 	rcsYaw     = 70,
 	rcsAfter   = 1,        -- start compensating from this shot on
 	rcsMaxDeg  = 4,        -- hard cap per frame, degrees
+	rcsPatAuto = true,     -- learn the pattern-to-camera scale instead of setting it
+	rcsPatScale = 100,     -- ...the manual value, in hundredths
 }
 
 -- There is no master switch on this panel and there deliberately is not one:
@@ -195,6 +250,11 @@ local STATE = {
 	trigOn    = false,
 	sensY     = 0, sensP = 0, calibN = 0,
 	kickY     = 0, kickP = 0, kickPeak = 0,
+	patY      = 0, patP = 0, patScale = 0, patN = 0, patLen = 0,
+	waitMs    = 0,       -- reaction delay still to run on the current target
+	breaking  = false,   -- the humaniser has deliberately let go
+	engaged   = false,   -- the aim moved the camera on the last frame
+	panelOpen = false,
 	underCross = "-",
 	lastKey   = "-",
 	clickHow  = "-",   -- which executor call actually delivers a shot, see pullTrigger
@@ -541,17 +601,137 @@ local fovCircle2 = make("Circle", { Thickness = 1, NumSides = 48, Filled = false
 local trigCircle = make("Circle", { Thickness = 1, NumSides = 32, Filled = false,
 	Color = Color3.fromRGB(255, 210, 90), Transparency = 0.45, ZIndex = 1 })
 
+-- FORWARD DECLARED, and this is not a style choice. Both are defined further down
+-- (the weapon block and the recoil block), and a Lua local is invisible above its
+-- own definition - so `drawSpray` would capture a nil and error on every frame,
+-- inside a pcall, surfacing as one quiet line in the panel footer rather than as a
+-- crash. Declaring them here and dropping the `local` at the definitions makes the
+-- render pass see the real functions.
+local weaponInfo, sprayCurve
+
+-- The static overlays. All four are drawn BEFORE the anyDrawing() gate below,
+-- because that gate asks "is any per-player drawing switched on" - a crosshair or
+-- a bomb timer has nothing to do with players and must not disappear because the
+-- ESP list happens to be empty.
+local crossLines = {}
+for i = 1, 4 do
+	crossLines[i] = make("Line", { Thickness = 1, ZIndex = 4 })
+end
+local crossDot = make("Circle", { Filled = true, NumSides = 8, Radius = 1, ZIndex = 4 })
+
+-- 40 rather than 32: the longest Pattern in this game is 31 entries and a rifle
+-- with a bigger magazine skin would run past a 32-line pool silently.
+local sprayLines = {}
+for i = 1, 40 do
+	sprayLines[i] = make("Line", { Thickness = 1, ZIndex = 2, Transparency = 0.55 })
+end
+
+local bombText = make("Text", { Size = 22, Center = true, Outline = true, Font = FONT,
+	Color = Color3.fromRGB(255, 90, 70), ZIndex = 5 })
+
 local function centre()
 	local vp = camera.ViewportSize
 	return Vector2.new(vp.X / 2, vp.Y / 2)
 end
 
+local function drawCrosshair(mid)
+	local on = CONFIG.crosshair
+	for i = 1, 4 do crossLines[i].Visible = on end
+	crossDot.Visible = on and CONFIG.crossDot
+	if not on then return end
+	local g, s, t = CONFIG.crossGap, CONFIG.crossSize, CONFIG.crossThick
+	local dirs = {
+		{ Vector2.new(0, -g), Vector2.new(0, -g - s) },
+		{ Vector2.new(0,  g), Vector2.new(0,  g + s) },
+		{ Vector2.new(-g, 0), Vector2.new(-g - s, 0) },
+		{ Vector2.new( g, 0), Vector2.new( g + s, 0) },
+	}
+	for i = 1, 4 do
+		local line = crossLines[i]
+		line.From = mid + dirs[i][1]
+		line.To   = mid + dirs[i][2]
+		line.Thickness = t
+		line.Color = CONFIG.colCross
+	end
+	if crossDot.Visible then
+		crossDot.Position = mid
+		crossDot.Radius = math.max(1, t)
+		crossDot.Color = CONFIG.colCross
+	end
+end
+
+-- The overlay is the weapon's OWN pattern, the same table the recoil control
+-- corrects against, normalised to its widest point and drawn downward from the
+-- crosshair so it reads the way the spray is actually shot.
+local function drawSpray(mid)
+	local pts = nil
+	if CONFIG.sprayDraw then
+		local _, wname = weaponInfo()
+		pts = sprayCurve(wname)
+	end
+	if not pts then
+		for _, line in ipairs(sprayLines) do line.Visible = false end
+		return
+	end
+	local maxMag = 0.001
+	for _, v in ipairs(pts) do
+		maxMag = math.max(maxMag, math.abs(v.X), math.abs(v.Y))
+	end
+	local scale = CONFIG.spraySize / maxMag
+	local shot = math.max(STATE.shots, 0)
+	for i = 1, #sprayLines do
+		local line = sprayLines[i]
+		local a, b = pts[i], pts[i + 1]
+		if a and b then
+			line.Visible = true
+			line.From = mid + Vector2.new(a.X * scale, -a.Y * scale)
+			line.To   = mid + Vector2.new(b.X * scale, -b.Y * scale)
+			-- The shots already fired are marked with COLOUR and THICKNESS, never
+			-- with Transparency: the Drawing library reads 0 as invisible on some
+			-- executors and as opaque on others, so a "faint" value on one machine is
+			-- solid on the next. 0.85 is nearly opaque under either reading.
+			line.Transparency = 0.85
+			line.Thickness = (i <= shot) and 2 or 1
+			line.Color = (i <= shot) and Color3.fromRGB(255, 200, 90)
+				or Color3.fromRGB(150, 150, 165)
+		else
+			line.Visible = false
+		end
+	end
+end
+
 local filterAt = 0
+local fovSaved = nil     -- the FieldOfView the game had before the switch was on
 
 local function renderPass()
 	if _G.__CBLOX ~= GEN then return end
 
 	local mid = centre()
+
+	drawCrosshair(mid)
+	drawSpray(mid)
+
+	-- A real countdown rather than a count-up: unlike the game BloxStrike is built
+	-- on, this one publishes the fuse itself - workspace.Status.Timer keeps running
+	-- as the bomb timer once Armed is true.
+	bombText.Visible = CONFIG.bombTimer and STATE.armed
+	if bombText.Visible then
+		bombText.Position = Vector2.new(mid.X, mid.Y * 0.35)
+		bombText.Text = string.format("BOMB ARMED   %ds", STATE.timer)
+	end
+
+	-- Restoring to a hardcoded 70 was wrong: this client sits at 75 and the game
+	-- also moves the FOV itself while scoped, so the number to put back is the one
+	-- that was there before the switch was thrown, not a constant. Captured on the
+	-- rising edge and used on the falling one.
+	if CONFIG.fovChange then
+		if not fovSaved then fovSaved = camera.FieldOfView end
+		pcall(function() camera.FieldOfView = CONFIG.fovValue end)
+	elseif fovSaved then
+		pcall(function() camera.FieldOfView = fovSaved end)
+		fovSaved = nil
+	end
+
 	fovCircle.Visible = CONFIG.aim and CONFIG.aimCircle
 	if fovCircle.Visible then
 		fovCircle.Position = mid
@@ -920,6 +1100,19 @@ UserInputService.InputEnded:Connect(function(input)
 	capture(name)
 end)
 
+-- The panic key. One press and every input-touching feature is off - the ESP
+-- stays, because a drawing has never had to be panicked away. Deliberately a
+-- KeyCode comparison rather than keyHeld: this has to fire on the press, once.
+UserInputService.InputBegan:Connect(function(input, typing)
+	if _G.__CBLOX ~= GEN or typing or capturing then return end
+	if input.UserInputType ~= Enum.UserInputType.Keyboard then return end
+	if CONFIG.humPanicKey == "" then return end
+	local spec = resolveKey(CONFIG.humPanicKey)
+	if not spec or not spec.key or input.KeyCode ~= spec.key then return end
+	CONFIG.aim, CONFIG.trig, CONFIG.rcs, CONFIG.aimFire = false, false, false, false
+	note("PANIC - aim, trigger, rcs and auto fire off")
+end)
+
 --------------------------------------------------------------------------------
 -- a client with no mouse and no keyboard
 --------------------------------------------------------------------------------
@@ -1043,7 +1236,7 @@ local WeaponsFolder = ReplicatedStorage:FindFirstChild("Weapons")
 
 local weaponCache = {}
 
-local function weaponInfo()
+function weaponInfo()
 	local char = plr.Character
 	local nameValue = char and char:FindFirstChild("EquippedTool")
 	local name = (nameValue and nameValue.Value) or ""
@@ -1092,15 +1285,108 @@ local function adsGate(mode)
 	return not on
 end
 
+local burstAt, lastKillAt = 0, 0
+
+--------------------------------------------------------------------------------
+-- humanisation
+--------------------------------------------------------------------------------
+--
+-- Everything in this block takes a piece of "perfect" away from the aim, because
+-- perfect is exactly what a machine looks like. Each knob removes one tell:
+--
+--   reaction    a human does not start turning on the frame the enemy appears
+--   switch      ...and does not swap target between two frames either
+--   ramp        the first part of a flick is slower than the middle of it
+--   offset      nobody puts the crosshair on the same millimetre of a head twice;
+--               re-rolled on a timer so it drifts during a hold
+--   noise       the hand never stops moving, even on a still target
+--   overshoot   a fast flick goes past and comes back
+--   deadzone    once it is close enough, STOP - a permanently pixel-perfect
+--               crosshair is the loudest tell there is
+--   move FOV    a moving player tracks worse than a standing one
+--   deg/s cap   the most important one. A smoothing divisor is a fraction of the
+--               REMAINING angle, so at point blank the remaining angle is huge and
+--               even a slow-looking divisor turns the camera faster than any hand
+--   break       occasionally just let go for a moment
+--   fatigue     the trigger gets slower deeper into a burst
+--
+-- The noise is a smooth random walk, not per-frame randomness: white noise on the
+-- camera reads as a stutter, a walk reads as a hand.
+
+local noiseX, noiseY = 0, 0
+local noiseTX, noiseTY = 0, 0
+local noiseAt = 0
+
+local function noiseStep(dt)
+	if not CONFIG.hum or CONFIG.humNoise <= 0 then
+		noiseX, noiseY = 0, 0
+		return 0, 0
+	end
+	local now = os.clock()
+	local period = 1 / math.max(0.1, CONFIG.humNoiseHz)
+	if now - noiseAt > period then
+		noiseAt = now
+		noiseTX = (math.random() * 2 - 1)
+		noiseTY = (math.random() * 2 - 1)
+	end
+	local k = math.clamp(dt / period, 0, 1) * 2
+	noiseX = noiseX + (noiseTX - noiseX) * k
+	noiseY = noiseY + (noiseTY - noiseY) * k
+	local amp = math.rad(CONFIG.humNoise)
+	return noiseX * amp, noiseY * amp
+end
+
+-- A per-target aim offset in studs, re-rolled on a timer and scaled by the size of
+-- the part being aimed at, so a head offset stays inside the head. HeadHB is the
+-- hitbox the game grades headshots against, so an offset scaled to it cannot walk
+-- the aim off the head.
+local offsetVec = Vector3.new()
+local offsetAt = 0
+local offsetFor = nil
+
+local function aimOffset(part, targetPlayer)
+	if not CONFIG.hum or CONFIG.humOffset <= 0 then return Vector3.new() end
+	local now = os.clock() * 1000
+	if offsetFor ~= targetPlayer or now - offsetAt > CONFIG.humOffsetMs then
+		offsetAt = now
+		offsetFor = targetPlayer
+		offsetVec = Vector3.new(math.random() * 2 - 1, math.random() * 2 - 1,
+			math.random() * 2 - 1)
+	end
+	local size = part.Size
+	local f = CONFIG.humOffset / 100 * 0.5
+	return Vector3.new(offsetVec.X * size.X * f, offsetVec.Y * size.Y * f,
+		offsetVec.Z * size.Z * f)
+end
+
+local function aimWorldPoint(part, targetPlayer)
+	return part.Position + aimOffset(part, targetPlayer)
+end
+
+local function movingNow()
+	local char = plr.Character
+	local root = char and char:FindFirstChild("HumanoidRootPart")
+	if not root then return false end
+	local v = root.AssemblyLinearVelocity
+	return (Vector3.new(v.X, 0, v.Z)).Magnitude > 4
+end
+
 --------------------------------------------------------------------------------
 -- aim assist
 --------------------------------------------------------------------------------
 
-local burstAt, lastKillAt = 0, 0
 local stickyTarget = nil
+local lockedAt = 0        -- when the current target was picked, ms
+local switchedAt = 0      -- when the last switch happened, ms
+local reactUntil = 0
+local breakUntil = 0
 
 local function aimActive()
 	if not CONFIG.aim then return false end
+	-- The panel is a window the player is looking at, not the game. An assist that
+	-- keeps tracking while somebody is clicking through settings is a giveaway on a
+	-- recording and helps nobody.
+	if CONFIG.hum and CONFIG.humPanelOff and STATE.panelOpen then return false end
 	if CONFIG.aimActive == "Always" then return true end
 	if CONFIG.aimActive == "Screen held" then return screenHeld() end
 	if CONFIG.aimActive == "While firing" then
@@ -1150,6 +1436,11 @@ end
 -- metres away but ninety degrees off is not the one being shot at.
 local function pickTarget()
 	local fov = select(1, aimNumbers())
+	-- A player who is running tracks worse than one standing still, so the window
+	-- they can acquire in narrows while they move.
+	if CONFIG.hum and CONFIG.humMoveFov < 100 and movingNow() then
+		fov = fov * (CONFIG.humMoveFov / 100)
+	end
 	local mid = centre()
 	local camPos = camera.CFrame.Position
 	local best, bestScore
@@ -1206,12 +1497,16 @@ local function aimPass(dt)
 	if _G.__CBLOX ~= GEN then return end
 	aimWroteCamera = false
 
+	STATE.engaged = false
+
 	if not aimActive() or not gunGate(CONFIG.aimOnlyGun) or not adsGate(CONFIG.aimAds) then
 		STATE.target = "-"
+		STATE.waitMs = 0
 		stickyTarget = nil
 		return
 	end
-	if os.clock() * 1000 - lastKillAt < CONFIG.aimKillMs then
+	local nowMs = os.clock() * 1000
+	if nowMs - lastKillAt < CONFIG.aimKillMs then
 		STATE.target = "-"
 		return
 	end
@@ -1235,31 +1530,120 @@ local function aimPass(dt)
 			end
 		end
 	end
-	pick = pick or pickTarget()
+	-- A switch is allowed only after the cooldown. Without it, five enemies inside
+	-- the FOV make the camera twitch between them every frame, which is not
+	-- something a hand can do.
+	if not pick then
+		if CONFIG.hum and CONFIG.humSwitchMs > 0
+			and stickyTarget ~= nil and nowMs - switchedAt < CONFIG.humSwitchMs then
+			STATE.target = "-"
+			return
+		end
+		pick = pickTarget()
+		if pick and pick.player ~= stickyTarget then
+			switchedAt = nowMs
+			-- the reaction delay starts now, on the NEW target
+			local lo = math.min(CONFIG.humReactMin, CONFIG.humReactMax)
+			local hi = math.max(CONFIG.humReactMin, CONFIG.humReactMax)
+			reactUntil = (CONFIG.hum and hi > 0) and (nowMs + math.random(lo, hi)) or 0
+			lockedAt = nowMs
+		end
+	end
 
 	if not pick or not pick.part or not pick.part.Parent then
 		STATE.target = "-"
+		STATE.waitMs = 0
 		stickyTarget = nil
 		return
 	end
 	stickyTarget = pick.player
 	STATE.target = pick.player.Name
 
+	-- reaction delay ------------------------------------------------------------
+	if reactUntil > nowMs then
+		STATE.waitMs = math.floor(reactUntil - nowMs)
+		return
+	end
+	STATE.waitMs = 0
+
+	-- break-off -----------------------------------------------------------------
+	if CONFIG.hum and CONFIG.humBreakPct > 0 then
+		if nowMs < breakUntil then
+			STATE.breaking = true
+			return
+		end
+		STATE.breaking = false
+		-- the percentage is per SECOND, so it is scaled by the frame time
+		if math.random() < (CONFIG.humBreakPct / 100) * dt then
+			breakUntil = nowMs + CONFIG.humBreakMs
+			return
+		end
+	else
+		STATE.breaking = false
+	end
+
 	local _, smoothH, smoothV = aimNumbers()
+
+	-- wind-up: for the first humRampMs of a lock the smoothing divisor is larger
+	-- (slower) and eases back to the configured one.
+	if CONFIG.hum and CONFIG.humRampMs > 0 then
+		local age = nowMs - lockedAt
+		if age < CONFIG.humRampMs then
+			local k = age / CONFIG.humRampMs
+			local slow = 3 - 2 * k        -- 3x slower at the start, 1x at the end
+			smoothH = smoothH * slow
+			smoothV = smoothV * slow
+		end
+	end
+
 	local cf = camera.CFrame
 	local pos = cf.Position
 	local curPitch, curYaw = cf:ToOrientation()
-	local want = CFrame.lookAt(pos, pick.part.Position)
+	local want = CFrame.lookAt(pos, aimWorldPoint(pick.part, pick.player))
 	local wantPitch, wantYaw = want:ToOrientation()
 
 	-- Yaw and pitch are stepped SEPARATELY, which is the whole point of two
 	-- sliders: a slow vertical with a fast horizontal tracks a strafing player
 	-- without the give-away vertical snap onto the head.
-	local newYaw   = curYaw   + angleDelta(curYaw, wantYaw)     * approach(smoothH, dt)
-	local newPitch = curPitch + angleDelta(curPitch, wantPitch) * approach(smoothV, dt)
+	local dYaw   = angleDelta(curYaw, wantYaw)
+	local dPitch = angleDelta(curPitch, wantPitch)
 
-	camera.CFrame = CFrame.new(pos) * CFrame.fromOrientation(newPitch, newYaw, 0)
+	-- deadzone: close enough is close enough. pick.px is already the pixel distance
+	-- from the crosshair to the target part.
+	if CONFIG.hum and CONFIG.humDeadPx > 0 and pick.px and pick.px <= CONFIG.humDeadPx then
+		dYaw, dPitch = 0, 0
+	end
+
+	local stepH = approach(smoothH, dt)
+	local stepV = approach(smoothV, dt)
+
+	-- overshoot: aim a little past and let the next frames pull it back
+	if CONFIG.hum and CONFIG.humOvershoot > 0 then
+		local over = 1 + CONFIG.humOvershoot / 100
+		stepH = math.min(stepH * over, 1.35)
+		stepV = math.min(stepV * over, 1.35)
+	end
+
+	local moveYaw   = dYaw * stepH
+	local movePitch = dPitch * stepV
+
+	-- The degrees-per-second ceiling, applied to both axes together so a diagonal
+	-- flick is capped at the same speed as a flat one.
+	if CONFIG.hum and CONFIG.humMaxDegS > 0 then
+		local cap = math.rad(CONFIG.humMaxDegS) * dt
+		local mag = math.sqrt(moveYaw * moveYaw + movePitch * movePitch)
+		if mag > cap and mag > 0 then
+			local k = cap / mag
+			moveYaw, movePitch = moveYaw * k, movePitch * k
+		end
+	end
+
+	local nx, ny = noiseStep(dt)
+
+	camera.CFrame = CFrame.new(pos)
+		* CFrame.fromOrientation(curPitch + movePitch + ny, curYaw + moveYaw + nx, 0)
 	aimWroteCamera = true
+	STATE.engaged = true
 end
 
 --------------------------------------------------------------------------------
@@ -1301,6 +1685,75 @@ local lastYaw, lastPitch = nil, nil
 local sensYaw, sensPitch = 0, 0
 local sprayAt = 0
 
+-- THE SPRAY CURVE, and it is the reason a measured-only correction can never pull
+-- sideways: the residual carries the vertical kick cleanly and the horizontal half
+-- is buried under the player's own aiming. The curve is where left and right come
+-- from, and this game simply hands it over.
+--
+-- `Weapons.<name>.Pattern` is a JSON array of {fMagnitude, fAngle}, one entry per
+-- bullet, POLAR and normalised so the largest magnitude is exactly 1. Decoded for
+-- the AK47: 31 entries, straight up to shot 9, then out to x -0.14 by shot 8, back
+-- across to +0.37 around 15, left again to -0.24 by 20 - the CS:GO table, exactly
+-- as it reads in the game it is copied from.
+--
+-- Positions are CUMULATIVE, so the correction for one shot is the difference to
+-- the entry before it, not the entry itself.
+local HttpService = game:GetService("HttpService")
+local sprayCache = {}
+
+function sprayCurve(name)
+	if not name or name == "" or not WeaponsFolder then return nil end
+	local hit = sprayCache[name]
+	if hit ~= nil then return hit or nil end
+
+	local folder = WeaponsFolder:FindFirstChild(name)
+	local value = folder and folder:FindFirstChild("Pattern")
+	local raw = value and value.Value
+	if type(raw) ~= "string" or raw == "" then
+		sprayCache[name] = false
+		return nil
+	end
+	local ok, list = pcall(function() return HttpService:JSONDecode(raw) end)
+	if not ok or type(list) ~= "table" or #list < 2 then
+		sprayCache[name] = false
+		return nil
+	end
+
+	local curve = {}
+	for i, entry in ipairs(list) do
+		local m = tonumber(entry.fMagnitude) or 0
+		local a = math.rad(tonumber(entry.fAngle) or 0)
+		-- Screen convention: +y is UP, which is the direction the crosshair climbs.
+		curve[i] = Vector2.new(m * math.cos(a), m * math.sin(a))
+	end
+	sprayCache[name] = curve
+	return curve
+end
+
+local patLast, patShot = nil, 0
+local patScale = 0
+
+local function patternStep()
+	local _, wname = weaponInfo()
+	local curve = sprayCurve(wname)
+	if not curve then
+		patLast, patShot = nil, 0
+		STATE.patLen = 0
+		return nil
+	end
+	STATE.patLen = #curve
+	local shot = math.max(1, STATE.shots)
+	-- Past the end of the table the spray is flat, so the last entry is HELD rather
+	-- than wrapping round to the start - wrapping would send the correction back to
+	-- the top of the curve mid-magazine.
+	local here = curve[math.min(shot, #curve)]
+
+	local step = nil
+	if patLast and shot > patShot then step = here - patLast end
+	patLast, patShot = here, shot
+	return step
+end
+
 local function rcsPass(dt)
 	if _G.__CBLOX ~= GEN then return end
 	local cf = camera.CFrame
@@ -1332,8 +1785,13 @@ local function rcsPass(dt)
 	STATE.sensY = sensYaw
 	STATE.sensP = sensPitch
 
+	local step = patternStep()
+	STATE.patY = step and step.X or 0
+	STATE.patP = step and step.Y or 0
+
 	if not shooting then
 		STATE.kickY, STATE.kickP = 0, 0
+		patLast = nil
 		return
 	end
 
@@ -1357,13 +1815,52 @@ local function rcsPass(dt)
 		STATE.kickPeak = STATE.kickP
 	end
 
+	-- Learn what ONE pattern unit is worth in camera radians, from frames the script
+	-- did not move the camera itself. Only steps with a real vertical component are
+	-- used: near the top of the curve the predicted step is almost zero and the
+	-- ratio is then noise divided by noise.
+	if step and CONFIG.rcsPatAuto and not aimWroteCamera then
+		local predicted = step.Y
+		if math.abs(predicted) > 0.02 then
+			local ratio = resPitch / predicted
+			if ratio == ratio and math.abs(ratio) < 1 then
+				patScale = patScale == 0 and ratio or (patScale * 0.92 + ratio * 0.08)
+				STATE.patN = STATE.patN + 1
+			end
+		end
+	end
+	STATE.patScale = patScale
+
 	if not CONFIG.rcs or aimWroteCamera then return end
-	if sensYaw == 0 and sp == 0 then return end
 	if STATE.shots < CONFIG.rcsAfter then return end
 
+	local corrYaw, corrPitch = 0, 0
+	local mode = CONFIG.rcsMode
+
+	if mode == "Measured" or mode == "Both" then
+		if sensYaw ~= 0 or sp ~= 0 then
+			corrYaw   = corrYaw   - resYaw   * (CONFIG.rcsYaw   / 100)
+			corrPitch = corrPitch - resPitch * (CONFIG.rcsPitch / 100)
+		end
+	end
+
+	if (mode == "Pattern" or mode == "Both") and step then
+		local scale = CONFIG.rcsPatAuto and patScale or (CONFIG.rcsPatScale * 0.0001)
+		if scale ~= 0 then
+			corrYaw   = corrYaw   - step.X * scale * (CONFIG.rcsYaw   / 100)
+			corrPitch = corrPitch - step.Y * scale * (CONFIG.rcsPitch / 100)
+		end
+	end
+
+	-- Both means both halves are pulling at the same kick, so each contributes half
+	-- - otherwise the correction is twice what either mode alone would apply.
+	if mode == "Both" then
+		corrYaw, corrPitch = corrYaw * 0.5, corrPitch * 0.5
+	end
+
 	local cap = math.rad(CONFIG.rcsMaxDeg)
-	local corrYaw   = math.clamp(-resYaw   * (CONFIG.rcsYaw   / 100), -cap, cap)
-	local corrPitch = math.clamp(-resPitch * (CONFIG.rcsPitch / 100), -cap, cap)
+	corrYaw   = math.clamp(corrYaw, -cap, cap)
+	corrPitch = math.clamp(corrPitch, -cap, cap)
 	if math.abs(corrYaw) < 1e-5 and math.abs(corrPitch) < 1e-5 then return end
 
 	camera.CFrame = CFrame.new(cf.Position)
@@ -1525,6 +2022,7 @@ local trigWasHeld = false
 
 local function trigActive()
 	if not CONFIG.trig then return false end
+	if CONFIG.hum and CONFIG.humPanelOff and STATE.panelOpen then return false end
 	if CONFIG.trigActive == "Always" then return true end
 	if CONFIG.trigActive == "Screen held" then return screenHeld() end
 	return hotkeyHeld(CONFIG.trigKey)
@@ -1576,7 +2074,11 @@ task.spawn(function()
 
 			local lo = math.min(CONFIG.trigDelayMin, CONFIG.trigDelayMax)
 			local hi = math.max(CONFIG.trigDelayMin, CONFIG.trigDelayMax)
-			if hi > 0 then task.wait(math.random(lo, hi) / 1000) end
+			-- fatigue: every shot deeper into the burst is a little slower, the way a
+			-- real finger is
+			local tired = (CONFIG.hum and CONFIG.humFatigue > 0)
+				and (trigShots * CONFIG.humFatigue) or 0
+			if hi > 0 then task.wait((math.random(lo, hi) + tired) / 1000) end
 
 			-- Re-check AFTER the reaction delay. Without this the trigger fires at
 			-- where the enemy was 90 ms ago, which on a strafing player is a miss
@@ -1826,6 +2328,40 @@ chamCard:Toggle("Own cham colour", CONFIG.colChamOwn, function(v)
 end, "on = use the colour below instead of the team colour")
 chamCard:Colour("Cham colour", CONFIG.colCham, function(c) CONFIG.colCham = c end)
 
+-- VISUALS -----------------------------------------------------------------------
+--
+-- Everything on this page is drawn over YOUR screen and touches nothing the server
+-- can see. It is on its own page rather than under ESP because none of it is about
+-- other players.
+
+local visPage = win:Page("VISUALS", UI.icon.chart)
+
+local crossCard = visPage:Card("CROSSHAIR", 1):Accent()
+crossCard:Toggle("Static crosshair", CONFIG.crosshair, function(v)
+	CONFIG.crosshair = v
+end, "a fixed cross that does not open up with the game's own spread", UI.theme.good)
+crossCard:Slider("Length", 2, 30, CONFIG.crossSize, function(v) CONFIG.crossSize = v end)
+crossCard:Slider("Gap", 0, 20, CONFIG.crossGap, function(v) CONFIG.crossGap = v end)
+crossCard:Slider("Thickness", 1, 5, CONFIG.crossThick, function(v) CONFIG.crossThick = v end)
+crossCard:Toggle("Centre dot", CONFIG.crossDot, function(v) CONFIG.crossDot = v end)
+crossCard:Colour("Colour", CONFIG.colCross, function(c) CONFIG.colCross = c end)
+
+local sprayCard = visPage:Card("SPRAY & SCREEN", 2)
+sprayCard:Toggle("Spray overlay", CONFIG.sprayDraw, function(v) CONFIG.sprayDraw = v end,
+	"the weapon's own pattern out of the game, bright up to the shot you are on",
+	UI.theme.good)
+sprayCard:Slider("Overlay size", 30, 260, CONFIG.spraySize, function(v)
+	CONFIG.spraySize = v
+end, "pixels for the whole pattern")
+sprayCard:Toggle("Bomb countdown", CONFIG.bombTimer, function(v) CONFIG.bombTimer = v end,
+	"large timer once the C4 is armed - the real fuse, read from the round state")
+sprayCard:Toggle("Field of view", CONFIG.fovChange, function(v)
+	-- The render pass puts the old value back by itself; setting one here as well
+	-- would be a second, different guess at what the game had.
+	CONFIG.fovChange = v
+end, "client side only - it changes what YOU see and nothing else", UI.theme.warn)
+sprayCard:Slider("FOV", 60, 120, CONFIG.fovValue, function(v) CONFIG.fovValue = v end)
+
 -- AIM ---------------------------------------------------------------------------
 
 local aimPage = win:Page("AIM", UI.icon.target)
@@ -1941,6 +2477,140 @@ fireCard:Toggle("Draw second FOV", CONFIG.aimCircle2, function(v) CONFIG.aimCirc
 
 local aimOut = aimPage:Card("TARGET", 1):Readout(4)
 
+-- HUMANISE ----------------------------------------------------------------------
+
+local humPage = win:Page("HUMANISE", UI.icon.shield)
+
+local humCard = humPage:Card("REACTION", 1):Accent()
+humCard:Toggle("Humanisation on", CONFIG.hum, function(v)
+	CONFIG.hum = v
+	note(v and "humanisation on" or "humanisation OFF - the aim is a machine now")
+end, "everything on this page is ignored while this is off", UI.theme.good)
+humCard:Slider("Reaction min (ms)", 0, 600, CONFIG.humReactMin, function(v)
+	CONFIG.humReactMin = v
+end, "the aim does not engage on the same frame the enemy appears")
+humCard:Slider("Reaction max (ms)", 0, 600, CONFIG.humReactMax, function(v)
+	CONFIG.humReactMax = v
+end, "random between min and max - a fixed value is a pattern")
+humCard:Slider("Target switch lock (ms)", 0, 1500, CONFIG.humSwitchMs, function(v)
+	CONFIG.humSwitchMs = v
+end, "no second target may be taken inside this window")
+humCard:Slider("Wind up (ms)", 0, 800, CONFIG.humRampMs, function(v)
+	CONFIG.humRampMs = v
+end, "the first part of a flick is three times slower and eases in")
+
+local handCard = humPage:Card("HAND", 2)
+handCard:Slider("Aim offset %", 0, 100, CONFIG.humOffset, function(v)
+	CONFIG.humOffset = v
+end, "of the target part's own size - nobody hits the same millimetre twice")
+handCard:Slider("Offset re-roll (ms)", 100, 3000, CONFIG.humOffsetMs, function(v)
+	CONFIG.humOffsetMs = v
+end, "so the offset drifts during a long hold instead of standing still")
+handCard:Slider("Noise (1/10 deg)", 0, 30, math.floor(CONFIG.humNoise * 10),
+	function(v) CONFIG.humNoise = v / 10 end,
+	"a smooth wander, not per-frame randomness - white noise reads as a stutter")
+handCard:Slider("Noise speed (1/10 Hz)", 1, 60, math.floor(CONFIG.humNoiseHz * 10),
+	function(v) CONFIG.humNoiseHz = v / 10 end)
+handCard:Slider("Overshoot %", 0, 60, CONFIG.humOvershoot, function(v)
+	CONFIG.humOvershoot = v
+end, "a fast flick goes past the target and comes back")
+
+local limitCard = humPage:Card("LIMITS", 2)
+limitCard:Slider("Turn speed cap (deg/s)", 60, 2000, CONFIG.humMaxDegS, function(v)
+	CONFIG.humMaxDegS = v
+end, "the most important one - no hand turns 3000 deg/s at point blank")
+limitCard:Slider("Deadzone (px)", 0, 20, CONFIG.humDeadPx, function(v)
+	CONFIG.humDeadPx = v
+end, "stop correcting once it is this close; pixel-perfect forever is a tell")
+limitCard:Slider("FOV while moving %", 20, 100, CONFIG.humMoveFov, function(v)
+	CONFIG.humMoveFov = v
+end, "a running player tracks worse than a standing one")
+limitCard:Slider("Break off % per second", 0, 60, CONFIG.humBreakPct, function(v)
+	CONFIG.humBreakPct = v
+end, "chance to simply let go of the target for a moment")
+limitCard:Slider("Break length (ms)", 40, 800, CONFIG.humBreakMs, function(v)
+	CONFIG.humBreakMs = v
+end)
+limitCard:Slider("Trigger fatigue (ms/shot)", 0, 60, CONFIG.humFatigue, function(v)
+	CONFIG.humFatigue = v
+end, "each shot deeper into a burst reacts a little slower")
+
+local safeCard = humPage:Card("SAFETY", 1)
+safeCard:Toggle("Pause while the panel is open", CONFIG.humPanelOff, function(v)
+	CONFIG.humPanelOff = v
+end, "aim and trigger stop while this window is visible", UI.theme.good)
+bindButton(safeCard, "PANIC KEY", function() return CONFIG.humPanicKey end,
+	function(v) CONFIG.humPanicKey = v end)
+safeCard:Label("One press turns aim, trigger, auto fire and recoil control off. "
+	.. "The ESP stays - a drawing has never needed panicking away.")
+
+-- Three starting points, because forty sliders with no reference is not a feature.
+-- Each writes the WHOLE set, so switching between them is reversible and nothing
+-- is left standing from the previous choice.
+local function preset(name)
+	if name == "Legit" then
+		CONFIG.aimFov, CONFIG.aimSmoothH, CONFIG.aimSmoothV = 45, 40, 55
+		CONFIG.aimSameAll, CONFIG.aimFov2 = false, 30
+		CONFIG.aimSmoothH2, CONFIG.aimSmoothV2 = 60, 70
+		CONFIG.aimPart, CONFIG.aimVisible, CONFIG.aimSticky = "Torso", true, true
+		CONFIG.aimFire = false
+		CONFIG.hum = true
+		CONFIG.humReactMin, CONFIG.humReactMax = 140, 260
+		CONFIG.humSwitchMs, CONFIG.humRampMs = 500, 300
+		CONFIG.humOffset, CONFIG.humOffsetMs = 55, 600
+		CONFIG.humNoise, CONFIG.humNoiseHz = 0.7, 1.8
+		CONFIG.humOvershoot, CONFIG.humDeadPx = 12, 5
+		CONFIG.humMoveFov, CONFIG.humMaxDegS = 60, 260
+		CONFIG.humBreakPct, CONFIG.humBreakMs = 12, 200
+		CONFIG.humFatigue = 14
+		CONFIG.trigDelayMin, CONFIG.trigDelayMax = 90, 190
+		CONFIG.trigHitPct = 88
+	elseif name == "Normal" then
+		CONFIG.aimFov, CONFIG.aimSmoothH, CONFIG.aimSmoothV = 120, 25, 25
+		CONFIG.aimSameAll = true
+		CONFIG.aimPart, CONFIG.aimVisible, CONFIG.aimSticky = "Head", true, true
+		CONFIG.hum = true
+		CONFIG.humReactMin, CONFIG.humReactMax = 90, 180
+		CONFIG.humSwitchMs, CONFIG.humRampMs = 350, 220
+		CONFIG.humOffset, CONFIG.humOffsetMs = 35, 700
+		CONFIG.humNoise, CONFIG.humNoiseHz = 0.45, 1.6
+		CONFIG.humOvershoot, CONFIG.humDeadPx = 0, 3
+		CONFIG.humMoveFov, CONFIG.humMaxDegS = 100, 420
+		CONFIG.humBreakPct, CONFIG.humBreakMs = 0, 160
+		CONFIG.humFatigue = 8
+		CONFIG.trigDelayMin, CONFIG.trigDelayMax = 40, 90
+		CONFIG.trigHitPct = 100
+	else -- Raw
+		CONFIG.aimFov, CONFIG.aimSmoothH, CONFIG.aimSmoothV = 250, 3, 3
+		CONFIG.aimSameAll = true
+		CONFIG.aimPart, CONFIG.aimVisible, CONFIG.aimSticky = "Head", true, true
+		CONFIG.hum = false
+		-- Written even though `hum` is off, so the numbers on this page match what
+		-- is actually configured. Leaving the previous preset's values standing made
+		-- the readout claim a 260 deg/s cap while nothing was capped at all.
+		CONFIG.humReactMin, CONFIG.humReactMax = 0, 0
+		CONFIG.humSwitchMs, CONFIG.humRampMs = 0, 0
+		CONFIG.humOffset, CONFIG.humOffsetMs = 0, 700
+		CONFIG.humNoise, CONFIG.humNoiseHz = 0, 1.6
+		CONFIG.humOvershoot, CONFIG.humDeadPx = 0, 0
+		CONFIG.humMoveFov, CONFIG.humMaxDegS = 100, 0
+		CONFIG.humBreakPct, CONFIG.humBreakMs = 0, 160
+		CONFIG.humFatigue = 0
+		CONFIG.trigDelayMin, CONFIG.trigDelayMax = 0, 20
+		CONFIG.trigHitPct = 100
+	end
+	note("preset: " .. name .. " - reopen the page to see the sliders move")
+	pcall(function() win:Refresh() end)
+end
+
+local presetCard = humPage:Card("PRESETS", 1)
+presetCard:Button("LEGIT", function() preset("Legit") end, UI.theme.good)
+presetCard:Button("NORMAL", function() preset("Normal") end, UI.theme.band)
+presetCard:Button("RAW - no humanisation at all", function() preset("Raw") end,
+	UI.theme.bad)
+
+local humOut = humPage:Card("LIVE", 2):Readout(7)
+
 -- TRIGGER -----------------------------------------------------------------------
 
 local trigPage = win:Page("TRIGGER", UI.icon.bolt)
@@ -2008,8 +2678,13 @@ rcsCard:Toggle("RCS enabled", CONFIG.rcs, function(v)
 	CONFIG.rcs = v
 	note(v and "rcs on" or "rcs off")
 end, "measures itself against your own mouse - no calibration step", UI.theme.warn)
+rcsCard:Dropdown("Source", { "Both", "Measured", "Pattern" }, CONFIG.rcsMode,
+	function(v) CONFIG.rcsMode = v end)
+rcsCard:Label("Measured carries the vertical kick and almost none of the sideways "
+	.. "one - your own aiming drowns it. Pattern is the weapon's real CS spray "
+	.. "table out of the game, which is where left and right come from.")
 rcsCard:Slider("Pitch %", 0, 100, CONFIG.rcsPitch, function(v) CONFIG.rcsPitch = v end,
-	"share of the measured vertical kick that is taken back out")
+	"share of the vertical kick that is taken back out")
 rcsCard:Slider("Yaw %", 0, 100, CONFIG.rcsYaw, function(v) CONFIG.rcsYaw = v end)
 rcsCard:Slider("Start at shot", 1, 10, CONFIG.rcsAfter, function(v) CONFIG.rcsAfter = v end,
 	"the first bullet has no recoil, so there is nothing to cancel")
@@ -2017,7 +2692,16 @@ rcsCard:Slider("Max correction (deg)", 1, 15, CONFIG.rcsMaxDeg, function(v)
 	CONFIG.rcsMaxDeg = v
 end, "hard per-frame cap so the correction cannot oscillate")
 
-local rcsOut = rcsPage:Card("MEASUREMENT", 2):Readout(6)
+local patCard = rcsPage:Card("SPRAY PATTERN", 1)
+patCard:Toggle("Learn the scale", CONFIG.rcsPatAuto, function(v)
+	CONFIG.rcsPatAuto = v
+end, "works out what one pattern unit is worth in camera degrees while you spray",
+	UI.theme.good)
+patCard:Slider("Scale by hand", 1, 400, CONFIG.rcsPatScale, function(v)
+	CONFIG.rcsPatScale = v
+end, "hundredths, only used with Learn off - the readout shows what it learned")
+
+local rcsOut = rcsPage:Card("MEASUREMENT", 2):Readout(9)
 local wpnOut = rcsPage:Card("WEAPON", 2):Readout(6)
 
 -- INFO --------------------------------------------------------------------------
@@ -2126,6 +2810,24 @@ task.spawn(function()
 			end)
 
 			pcall(function()
+				humOut:set({
+					"  LIVE",
+					"  " .. (CONFIG.hum and "humanisation ON" or "humanisation OFF"),
+					string.format("  reaction %d-%dms   switch lock %dms",
+						CONFIG.humReactMin, CONFIG.humReactMax, CONFIG.humSwitchMs),
+					string.format("  cap %d deg/s   deadzone %dpx   noise %.1f deg",
+						CONFIG.humMaxDegS, CONFIG.humDeadPx, CONFIG.humNoise),
+					string.format("  offset %d%% of part   overshoot %d%%",
+						CONFIG.humOffset, CONFIG.humOvershoot),
+					"  now      " .. (STATE.breaking and "broken off"
+						or (STATE.waitMs > 0 and ("reacting, " .. STATE.waitMs .. "ms")
+							or (STATE.engaged and "tracking" or "idle"))),
+					"  panic key " .. keyDisplay(CONFIG.humPanicKey)
+						.. (STATE.panelOpen and "   (panel open)" or ""),
+				})
+			end)
+
+			pcall(function()
 				trigOut:set({
 					"  state    " .. (CONFIG.trig
 						and (STATE.trigOn and "armed"
@@ -2151,10 +2853,16 @@ task.spawn(function()
 					string.format("  samples  %d", STATE.calibN),
 					string.format("  kick H   %.2f deg", STATE.kickY),
 					string.format("  kick V   %.2f deg", STATE.kickP),
+					"  PATTERN   " .. (STATE.patLen > 0
+						and (STATE.patLen .. " shots from the game")
+						or "no curve for this weapon"),
+					string.format("  step     H %+.3f   V %+.3f", STATE.patY, STATE.patP),
+					string.format("  scale    %.5f   (%d samples)",
+						STATE.patScale, STATE.patN),
 					"  " .. (CONFIG.rcs
-						and ((STATE.calibN > 0) and "active"
+						and (CONFIG.rcsMode .. "  " .. ((STATE.calibN > 0) and "active"
 							or (TOUCH and "waiting for camera movement"
-								or "waiting for mouse movement"))
+								or "waiting for mouse movement")))
 						or "off"),
 				})
 			end)
@@ -2192,6 +2900,20 @@ task.spawn(function()
 	end
 end)
 
+-- Is the panel on screen? The safety toggle needs to know, and the template shows
+-- and hides the WINDOW FRAME (`window.root.Visible`) rather than the ScreenGui -
+-- RightShift flips exactly that one property. Reading `gui.Enabled` instead would
+-- be true the whole time and the pause would never fire.
+task.spawn(function()
+	while _G.__CBLOX == GEN do
+		pcall(function()
+			local root = win and win.root
+			STATE.panelOpen = (root ~= nil) and root.Visible == true
+		end)
+		task.wait(0.25)
+	end
+end)
+
 -- The camera reference is replaced on every respawn, so a cached one silently
 -- stops updating after the first death - which looked exactly like "the ESP broke
 -- after I died".
@@ -2216,6 +2938,10 @@ _G.__CBLOX_DBG = {
 	hideAll = hideAll, clearChams = clearChams, note = note,
 	TOUCH = TOUCH, screenHeld = screenHeld, reachable = reachable,
 	hotkeyHeld = hotkeyHeld, aimActive = aimActive, trigActive = trigActive,
+	sprayCurve = sprayCurve, patternStep = patternStep,
+	noiseStep = noiseStep, aimOffset = aimOffset, aimWorldPoint = aimWorldPoint,
+	movingNow = movingNow, preset = preset, drawCrosshair = drawCrosshair,
+	drawSpray = drawSpray,
 }
 
 if TOUCH then
