@@ -14,6 +14,15 @@
   },
   "games": [
     {
+      "alias": "universal",
+      "name": "UNIVERSAL (any shooter)",
+      "file": "games/universal.lua",
+      "status": "ok",
+      "fallback": true,
+      "noqueue": true,
+      "note": "The fallback the loader runs when no other entry matches this place. Deliberately has NO places and NO detect, so pick() can never select it - loadGame reaches it by alias from the dispatch. ESP over Drawing plus a camera-side aim assist, both of which need no remote and no per-game knowledge. noqueue because a script that fits every game is the last one that should follow you into the next. Team detection is a chain (Player.Team, Team attribute, TeamColor, nameplate colour), each link sanity-checked and the first that holds up wins"
+    },
+    {
       "alias": "islandescape",
       "name": "Mrbeast Island Escape",
       "file": "games/islandescape.lua",

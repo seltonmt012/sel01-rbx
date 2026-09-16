@@ -663,7 +663,13 @@ local function loadGame(entry, why)
     -- whole ENTRY goes in, not just the alias: arm() bakes its places and its
     -- detect snippet into the queued string so the payload can refuse a place
     -- that does not belong to this game.
-    arm(entry)
+    --
+    -- `noqueue` exists for exactly one entry: the universal fallback. It matches
+    -- no place and no detect snippet, so a gate baked from it would gate on
+    -- nothing - and a script that by definition fits every game is the very last
+    -- one that should be allowed to follow you into the next one. It runs where
+    -- it is started and nowhere else.
+    if not entry.noqueue then arm(entry) end
 
     local chunk, err = run(body, entry.file)
     if not chunk then
@@ -833,5 +839,11 @@ if not mayStart() then
 elseif entry then
     loadGame(entry, why)
 else
-    picker()
+    -- Nothing in the registry matches this place. A list of scripts for OTHER
+    -- games is not much use here, so the universal fallback runs instead - ESP
+    -- and a camera-side aim assist, which need no per-game knowledge at all. The
+    -- picker is still one button away inside its panel, and it is what comes up
+    -- if the fallback is missing from a cached index.json or fails to load.
+    local uni = byAlias("universal")
+    if not (uni and loadGame(uni, "fallback")) then picker() end
 end

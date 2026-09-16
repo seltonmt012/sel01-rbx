@@ -248,7 +248,7 @@ local STATE = {
 	shots     = 0,
 	trigHits  = 0,
 	trigOn    = false,
-	sensY     = 0, sensP = 0, calibN = 0,
+	sensY     = 0, sensP = 0, calibN = 0, calibP = 0,
 	kickY     = 0, kickP = 0, kickPeak = 0,
 	patY      = 0, patP = 0, patScale = 0, patN = 0, patLen = 0,
 	waitMs    = 0,       -- reaction delay still to run on the current target
@@ -1705,6 +1705,17 @@ local lastYaw, lastPitch = nil, nil
 local sensYaw, sensPitch = 0, 0
 local sprayAt = 0
 
+-- Least-squares accumulators for the two sensitivities, and the residual gathered
+-- since the last shot landed. Both replace a per-frame estimate that could not
+-- survive a real frame rate - see the two long notes in rcsPass.
+local yawXY, yawXX = 0, 0
+local pitchXY, pitchXX = 0, 0
+local SENS_HALFLIFE = 20   -- seconds until an old sample counts half, so a player
+                           -- who changes their sensitivity mid-game is followed
+local SENS_MIN = 60        -- px^2 of evidence before sensPitch is believed at all
+local accResP, accResY = 0, 0
+local pendStep = nil
+
 -- THE SPRAY CURVE, and it is the reason a measured-only correction can never pull
 -- sideways: the residual carries the vertical kick cleanly and the horizontal half
 -- is buried under the player's own aiming. The curve is where left and right come
@@ -1789,18 +1800,41 @@ local function rcsPass(dt)
 
 	local shooting = firing()
 
-	-- Calibration only runs on frames the script did not touch the camera itself,
-	-- and only on real mouse movement - a still mouse divides by nothing.
+	-- Calibration only runs on frames the script did not touch the camera itself.
+	-- It is NOT a per-frame ratio behind a "moved more than 2 pixels" gate any
+	-- more, because that gate starved the VERTICAL axis to death: measured on a
+	-- live client, 200 idle frames produced 29 samples on yaw and **zero** on
+	-- pitch. People flick sideways constantly and up/down almost never, so
+	-- sensPitch kept an ancient value 24% below the yaw one (0.00533 against
+	-- 0.00701) and never corrected itself.
+	--
+	-- That single number poisons everything downstream. The residual is
+	-- `dPitch + sensPitch * my`, so a sensPitch that is 24% too small turns the
+	-- player's OWN downward pull against the recoil into a phantom residual of the
+	-- opposite sign - and the correction, which is minus that residual, then pushes
+	-- the camera UP. It also taught patScale the wrong sign.
+	--
+	-- A least-squares fit through the origin uses every frame that moved at all,
+	-- however slightly: sens = sum(-dAngle * mouse) / sum(mouse^2). No gate, so the
+	-- vertical axis is fed by the small movements it actually produces.
 	if not shooting and not aimWroteCamera then
-		if math.abs(mx) > 2 then
-			local s = -dYaw / mx
-			sensYaw = sensYaw == 0 and s or (sensYaw * 0.9 + s * 0.1)
+		local keep = 0.5 ^ (dt / SENS_HALFLIFE)   -- per SECOND, not per frame
+		if mx ~= 0 then
+			yawXY = yawXY * keep + (-dYaw) * mx
+			yawXX = yawXX * keep + mx * mx
 			STATE.calibN = STATE.calibN + 1
 		end
-		if math.abs(my) > 2 then
-			local s = -dPitch / my
-			sensPitch = sensPitch == 0 and s or (sensPitch * 0.9 + s * 0.1)
+		if my ~= 0 then
+			pitchXY = pitchXY * keep + (-dPitch) * my
+			pitchXX = pitchXX * keep + my * my
+			STATE.calibP = (STATE.calibP or 0) + 1
 		end
+		if yawXX > 0 then sensYaw = yawXY / yawXX end
+		-- Believed only once there is real evidence behind it. Below that it is left
+		-- at zero on purpose, which is what the fallback below keys off - a wrong
+		-- vertical number is worse than none, because none falls back to the yaw
+		-- figure and the same mouse drives both axes.
+		sensPitch = (pitchXX >= SENS_MIN) and (pitchXY / pitchXX) or 0
 	end
 	STATE.sensY = sensYaw
 	STATE.sensP = sensPitch
@@ -1812,6 +1846,7 @@ local function rcsPass(dt)
 	if not shooting then
 		STATE.kickY, STATE.kickP = 0, 0
 		patLast = nil
+		accResP, accResY, pendStep = 0, 0, nil
 		return
 	end
 
@@ -1835,20 +1870,36 @@ local function rcsPass(dt)
 		STATE.kickPeak = STATE.kickP
 	end
 
-	-- Learn what ONE pattern unit is worth in camera radians, from frames the script
-	-- did not move the camera itself. Only steps with a real vertical component are
-	-- used: near the top of the curve the predicted step is almost zero and the
-	-- ratio is then noise divided by noise.
-	if step and CONFIG.rcsPatAuto and not aimWroteCamera then
-		local predicted = step.Y
-		if math.abs(predicted) > 0.02 then
-			local ratio = resPitch / predicted
-			if ratio == ratio and math.abs(ratio) < 1 then
-				patScale = patScale == 0 and ratio or (patScale * 0.92 + ratio * 0.08)
-				STATE.patN = STATE.patN + 1
+	-- Learn what ONE pattern unit is worth in camera radians. The kick from a shot
+	-- is spread across every frame until the NEXT shot, so the residual has to be
+	-- integrated over that whole interval. Sampling only the single frame the shot
+	-- counter ticked on reads a nineteenth of the kick and calls the rest of it
+	-- noise - measured on this client: 191 FPS, 5.2 ms a frame, and an AK47 at
+	-- rate 0.1 is 19 frames per shot. That is how patScale ended up at -0.0049,
+	-- the wrong SIGN by the curve's own convention (+y is up, the way the crosshair
+	-- climbs), and in "Both" mode a wrong-signed pattern half pulls against the
+	-- measured half. Together they read as "the recoil control does nothing".
+	--
+	-- `pendStep` is the step the kick currently being measured belongs to; the
+	-- ratio is only formed when the next shot closes the interval.
+	if step then
+		if pendStep and CONFIG.rcsPatAuto and not aimWroteCamera then
+			local predicted = pendStep.Y
+			-- near the top of the curve the predicted step is almost zero and the
+			-- ratio would be noise divided by noise
+			if math.abs(predicted) > 0.02 then
+				local ratio = accResP / predicted
+				if ratio == ratio and math.abs(ratio) < 5 then
+					patScale = patScale == 0 and ratio or (patScale * 0.85 + ratio * 0.15)
+					STATE.patN = STATE.patN + 1
+				end
 			end
 		end
+		pendStep = step
+		accResP, accResY = 0, 0
 	end
+	accResP = accResP + resPitch
+	accResY = accResY + resYaw
 	STATE.patScale = patScale
 
 	if not CONFIG.rcs or aimWroteCamera then return end
@@ -1864,17 +1915,29 @@ local function rcsPass(dt)
 		end
 	end
 
+	local patUsed = false
 	if (mode == "Pattern" or mode == "Both") and step then
+		-- An auto scale that has seen almost nothing is not a scale, it is the first
+		-- few samples of one. Using it early is how a half-learned, wrong-signed
+		-- number got to pull against the measured half.
 		local scale = CONFIG.rcsPatAuto and patScale or (CONFIG.rcsPatScale * 0.0001)
+		if CONFIG.rcsPatAuto and STATE.patN < 5 then scale = 0 end
 		if scale ~= 0 then
 			corrYaw   = corrYaw   - step.X * scale * (CONFIG.rcsYaw   / 100)
 			corrPitch = corrPitch - step.Y * scale * (CONFIG.rcsPitch / 100)
+			patUsed = true
 		end
 	end
 
 	-- Both means both halves are pulling at the same kick, so each contributes half
-	-- - otherwise the correction is twice what either mode alone would apply.
-	if mode == "Both" then
+	-- - otherwise the correction is twice what either mode alone would apply. Only
+	-- on the frames where the pattern half ACTUALLY contributed, though: its step
+	-- exists on the one frame per shot that the shot counter ticks, which at 191
+	-- FPS is one frame in nineteen. Halving unconditionally therefore ran the
+	-- measured half at half strength through the entire spray while nothing pulled
+	-- on the other side - eighteen frames out of nineteen paid for a partner that
+	-- was not there.
+	if mode == "Both" and patUsed then
 		corrYaw, corrPitch = corrYaw * 0.5, corrPitch * 0.5
 	end
 
@@ -2870,7 +2933,9 @@ task.spawn(function()
 				rcsOut:set({
 					"  MEASUREMENT",
 					string.format("  sens H   %.5f   V %.5f", STATE.sensY, STATE.sensP),
-					string.format("  samples  %d", STATE.calibN),
+					-- both counts, because a healthy H with a V stuck near zero is
+					-- exactly the starved-vertical case and is worth seeing
+					string.format("  samples  H %d   V %d", STATE.calibN, STATE.calibP),
 					string.format("  kick H   %.2f deg", STATE.kickY),
 					string.format("  kick V   %.2f deg", STATE.kickP),
 					"  PATTERN   " .. (STATE.patLen > 0
