@@ -5,15 +5,26 @@
     smash a Lucky Egg with a pickaxe, the animal that hatches is carried home
     and dropped in your pen, and it pays cash per second forever.
 
+    READ THIS FIRST: THIS GAME HAS A SERVER-SIDE MOVEMENT CHECK AND IT KICKS.
+    An earlier build of this script warped with CFrame for every leg of the loop
+    and the account was disconnected with "Movement exploit detected. (Error
+    Code: 267)". A client-side string sweep for kick/anti-cheat vocabulary had
+    come back clean, and that was written up as "no anti-cheat" - which was
+    simply wrong reasoning: a SERVER-side detector has no client code, so no
+    sweep of the client VM could ever have found it. Nothing in this script
+    teleports. The character walks at the speed the game gave it, and CFrame is
+    written only for ROTATION, where the displacement is zero.
+
     The loop, as measured through the bridge on 2026-09-16:
 
       pick the richest egg lying in the four bands (all of them are visible
       and carry their SizeTier and Mutation as ATTRIBUTES before they break)
-        -> warp next to it, FACE it, PickaxeSwing:FireServer(egg) x ceil(hp/power)
+        -> WALK to it, stopping outside its shell, turn to FACE it, then
+           PickaxeSwing:FireServer(egg) x ceil(hp/power)
         -> ~1.3s later the prize appears in Spawning.ItemSpawners.Prizes,
            tagged "PrizeTimer", with BrokenBy = our UserId
-        -> pin on it ~1.2s, fireproximityprompt("Pick Up", 10 studs)
-        -> warp to the pen (the animal rides along, warping does NOT drop it)
+        -> walk onto it, fireproximityprompt("Pick Up", 10 studs)
+        -> walk to the pen (the animal rides along the whole way)
         -> RequestPlaceItem:FireServer(x, z, rot) in PEN-LOCAL coordinates
 
     Verified facts this script is built on (do not re-derive):
@@ -39,12 +50,15 @@
         Mutation, Kg, SizeTier, Gender and Uid as attributes.
       * CARRYING IS ONE ANIMAL AT A TIME. Firing a second Pick Up prompt while
         holding one changes nothing - held stays 1.
-      * DO NOT STAND AROUND AFTER THE GRAB. The bosses roam this field and a hit
-        is 50 knockback plus 1.5s of Limp (BossConfig), which costs the animal.
-        The pin therefore releases the frame the animal is in hand instead of
-        after a flat wait, and the delivery runs in the SAME cycle rather than
-        on the next tick - waiting one tick is ~0.4s of standing still in front
-        of a boss for no reason at all.
+      * ESCAPE FIRST, DECIDE LATER. The bosses roam this field and a hit is 50
+        knockback plus 1.5s of Limp (BossConfig), which costs the animal. So the
+        warp out is part of the GRAB, not of the delivery: the pin releases the
+        frame the animal is in hand and the character leaves immediately, before
+        the pen census, the value floor or a sale are even looked at. All three
+        of those are position-free, so doing them on the spot bought nothing and
+        left the character parked next to a boss with the prize in its hands -
+        which is what it looked like in game, and releasing the pin earlier did
+        not fix it on its own.
       * plr.CarryCount is a ZONE FLAG, not ownership. It drops to 0 the moment
         you leave the CollectionZone (a 315x528x456 volume covering the whole
         egg field out to z = +77) while the animal stays parented to the
@@ -71,6 +85,16 @@
         while the pen read 8/10 before AND after. There is no "Inventory"
         variant in this game, but the aurabrainrots rule still applies - never
         widen that argument on a hunch, the pen is the whole farm.
+      * SELLING IS POSITION GATED AT THE VENDOR, and believing otherwise
+        deadlocks the whole loop. Measured on one carry: fired from 46 studs
+        nothing happened, fired from 6 studs it sold. The first reading said
+        "not position gated" and was simply luck - that probe ran while the
+        character still stood at the vendor from the step before it. With a full
+        pen and no vendor warp the farm parks in the middle of the field holding
+        the animal and retries the sale forever, which is exactly the boss food
+        the escape rule above is trying to avoid.
+      * RequestBaseUpgrade:FireServer() takes no arguments and works - verified
+        on 2026-09-16, capacity 10 -> 14 for $1M with $2.0M banked.
       * THE PEN IS ONE-WAY AND THAT IS THE WHOLE STRATEGY. A placed animal
         cannot be taken back: there is no prompt anywhere on the pen, and the
         three client controllers that touch placements are all read-only -
@@ -88,10 +112,8 @@
 
     Deliberately NOT automated, and why:
 
-      * RequestBaseUpgrade is wired but was never affordable during the session
-        that mapped this game, so it is marked unverified in the panel and the
-        toggle defaults to off.
-      * LuckMachine, potions, gear and RequestTeleport are unmapped.
+      * LuckMachine, potions, gear, the group reward and RequestTeleport are
+        unmapped. None of them were probed, so none of them are fired.
 
     Panel: RightShift.  Console handle: _G.__BREAKEGG_DBG
 ]]
@@ -143,6 +165,37 @@ local function eggHp(size)
     return (row and tonumber(row.HP)) or math.huge
 end
 
+-- What a size is worth on average, DERIVED FROM CONTENT rather than guessed.
+-- Each size's Pool {Min,Max} indexes the animal roster sorted by Income - the
+-- first Small egg opened here handed over roster entry 10 exactly, and the one
+-- mismatch was flagged `Upset` on the prize itself, so the mapping holds and
+-- upsets are the exception. Averaging the span gives a real expected income per
+-- size, which is what lets a long walk be weighed against a big egg.
+local SIZE_VALUE = {}
+do
+    local sorted = {}
+    if ItemConfig and ItemConfig.Items then
+        for name, cfg in pairs(ItemConfig.Items) do
+            sorted[#sorted + 1] = { name = name, inc = tonumber(cfg.Income) or 0 }
+        end
+        table.sort(sorted, function(a, b)
+            if a.inc == b.inc then return a.name < b.name end
+            return a.inc < b.inc
+        end)
+    end
+    for size, row in pairs((EggConfig and EggConfig.Rows) or {}) do
+        local pool = row.Pool
+        local sum, n = 0, 0
+        if pool and pool.Min and #sorted > 0 then
+            for i = pool.Min, math.min(pool.Max, #sorted) do
+                sum = sum + sorted[i].inc
+                n = n + 1
+            end
+        end
+        SIZE_VALUE[size] = (n > 0) and (sum / n) or 1
+    end
+end
+
 -- ------------------------------------------------------------------- config
 local CONFIG = {
     autoFarm        = true,
@@ -157,7 +210,7 @@ local CONFIG = {
     pickyBelow      = 3,         -- with this many slots left, only place an upgrade
     autoPickaxe     = true,
     pickaxeReserve  = 0.0,       -- keep this fraction of the balance back
-    autoPenUpgrade  = false,     -- UNVERIFIED - never affordable while mapping
+    autoPenUpgrade  = true,      -- verified: capacity 10 -> 14 for $1M
     autoDaily       = true,
 }
 
@@ -212,6 +265,46 @@ end
 local function alive()
     local _, _, hum = character()
     return hum and hum.Health > 0
+end
+
+-- ---------------------------------------------------------------- movement
+-- THIS GAME HAS A SERVER-SIDE MOVEMENT CHECK AND IT KICKS. Measured the hard
+-- way on 2026-09-16: an earlier build warped with CFrame for every leg of the
+-- loop and the account was disconnected with "Movement exploit detected.
+-- (Error Code: 267)". A client-side string sweep had come back clean, which
+-- proves nothing at all - a server-side detector has no client code to find.
+--
+-- So nothing here teleports. The character WALKS at the speed the game gave it,
+-- and CFrame is only ever written for ROTATION, where the displacement is zero
+-- and there is nothing for a movement check to see.
+local function walkTo(pos, arriveDist, timeout)
+    local _, hrp, hum = character()
+    if not (hrp and hum) then return false end
+    arriveDist = arriveDist or 6
+    timeout    = timeout or 30
+
+    local t0 = os.clock()
+    while os.clock() - t0 < timeout do
+        if _G.__BREAKEGG ~= GEN then return false end
+        if not alive() then return false end
+        local here = character() and hrp.Position
+        if not here then return false end
+        if (here - pos).Magnitude <= arriveDist then return true end
+        hum:MoveTo(pos)
+        task.wait(0.2)
+    end
+    return (hrp.Position - pos).Magnitude <= arriveDist
+end
+
+-- Turn on the spot. Same position, new look direction - which is all the
+-- pickaxe's own raycast needs.
+local function faceTowards(pos)
+    local _, hrp = character()
+    if not hrp then return end
+    local from = hrp.Position
+    local flat = Vector3.new(pos.X, from.Y, pos.Z)
+    if (flat - from).Magnitude < 0.15 then return end
+    hrp.CFrame = CFrame.lookAt(from, flat)
 end
 
 -- --------------------------------------------------------------- the pickaxe
@@ -283,8 +376,8 @@ local function swingsFor(egg)
     return math.ceil(hp / math.max(1, power()))
 end
 
--- Rank on size ordinal times the mutation multiplier. Both are readable on the
--- egg BEFORE it is touched, which is what makes picking targets free.
+-- Expected income times the mutation multiplier. Both are readable on the egg
+-- BEFORE it is touched, which is what makes picking targets free.
 local function eggScore(egg)
     local size = egg:GetAttribute("SizeTier")
     local rank = SIZE_RANK[size]
@@ -292,7 +385,21 @@ local function eggScore(egg)
     local mut  = egg:GetAttribute("Mutation")
     local mult = (mut and MUTATIONS[mut]) or 1
     if not CONFIG.preferMutated then mult = 1 end
-    return rank * mult, rank, mut, mult
+    return (SIZE_VALUE[size] or 1) * mult, rank, mut, mult
+end
+
+-- Now that the character WALKS, a far egg costs real seconds and the ranking
+-- has to be a rate, not a prize. Otherwise the loop crosses the whole field for
+-- one more size step and earns less per minute than it would nearby.
+local function eggRate(egg, fromPos)
+    local score = eggScore(egg)
+    if not score then return nil end
+    local _, _, hum = character()
+    local speed = (hum and hum.WalkSpeed > 0 and hum.WalkSpeed) or 16
+    local dist  = (egg:GetPivot().Position - fromPos).Magnitude
+    -- travel out, the swings themselves, and the walk home plus the handling
+    local seconds = dist / speed + swingsFor(egg) * CONFIG.swingRate + 14
+    return score / seconds, score, seconds, dist
 end
 
 local function bestEgg()
@@ -304,18 +411,19 @@ local function bestEgg()
     local now   = os.time()
     local best, bestScore
 
+    local from = hrp.Position
     for _, egg in ipairs(folder:GetChildren()) do
         if egg:GetAttribute("IsLuckyEgg") then
-            local score, rank = eggScore(egg)
+            local rate, score, seconds = eggRate(egg, from)
+            local _, rank = eggScore(egg)
             local need = swingsFor(egg)
             local expires = egg:GetAttribute("ExpiresAt")
-            -- An egg that dies before we can finish it is wasted travel, and a
-            -- half-broken egg heals back at 4%/s anyway.
-            local timeNeeded = need * CONFIG.swingRate + 4
-            local doomed = expires and (expires - now) < timeNeeded
-            if score and rank >= floor and need <= CONFIG.maxSwings and not doomed then
-                if (not bestScore) or score > bestScore then
-                    best, bestScore = egg, score
+            -- An egg that dies before we can even walk there is wasted travel,
+            -- and a half-broken egg heals back at 4%/s anyway.
+            local doomed = expires and seconds and (expires - now) < seconds
+            if rate and rank and rank >= floor and need <= CONFIG.maxSwings and not doomed then
+                if (not bestScore) or rate > bestScore then
+                    best, bestScore = egg, rate
                 end
             end
         end
@@ -341,10 +449,13 @@ local function eggAim(egg)
     return pos + Vector3.new(0, 2, 0), (tonumber(egg:GetAttribute("Radius")) or 2) + 5
 end
 
-local function faceAndPin(pos, standoff)
-    local _, hrp = character()
-    if not hrp then return end
-    hrp.CFrame = CFrame.lookAt(pos + Vector3.new(0, 1.5, standoff or 6), pos)
+-- Walk up to the egg, stopping a body's length outside its shell, then turn to
+-- face it. Approaching on foot also means the egg's parts have streamed in by
+-- the time we are in range.
+local function approachEgg(pos, standoff)
+    local ok = walkTo(pos, standoff, 30)
+    faceTowards(pos)
+    return ok
 end
 
 local function breakEgg(egg)
@@ -357,8 +468,12 @@ local function breakEgg(egg)
         size or "?", egg:GetAttribute("Mutation") and (" " .. egg:GetAttribute("Mutation")) or "", need)
 
     local pos, standoff = eggAim(egg)
-    faceAndPin(pos, standoff)
-    task.wait(0.35)
+    if not approachEgg(pos, standoff) then
+        note("could not walk to the egg")
+        STATE.failed = STATE.failed + 1
+        return false
+    end
+    task.wait(0.2)
 
     -- Re-face every swing: a boss knockback turns the character and every
     -- swing after that raycasts into empty air.
@@ -370,7 +485,14 @@ local function breakEgg(egg)
             return true
         end
         if not alive() then note("died while mining") return false end
-        faceAndPin(pos, standoff)
+        -- A boss knockback shoves the character off the egg AND turns it, so
+        -- both have to be corrected - but by WALKING back, never by warping.
+        local _, hrpNow = character()
+        if not hrpNow then return false end
+        if (hrpNow.Position - pos).Magnitude > standoff + 6 then
+            walkTo(pos, standoff, 8)
+        end
+        faceTowards(pos)
         pcall(function() Events.PickaxeSwing:FireServer(egg) end)
         task.wait(CONFIG.swingRate)
     end
@@ -384,6 +506,10 @@ local function breakEgg(egg)
 end
 
 -- ---------------------------------------------------------------- the prize
+-- Forward declaration: the escape has to happen inside the grab, and the pen
+-- helpers are defined below it.
+local goToPen
+
 local function carriedAnimal()
     local ch = character()
     if not ch then return nil end
@@ -418,18 +544,15 @@ local function grabPrize(timeout)
     local pp = prize:FindFirstChildWhichIsA("ProximityPrompt", true)
     if not pp then return nil end
 
-    -- Position gated at 10 studs, and a warp plus an immediate fire does
-    -- nothing - the character has to be standing there for a beat first.
+    -- Position gated at 10 studs. The old build pinned the root part on the
+    -- prize every Heartbeat, which is teleport spam on top of the warp that got
+    -- it there - walking in is both safe and enough.
     local pos = prize:GetPivot().Position
-    local stop = false
-    task.spawn(function()
-        local _, hrp = character()
-        while not stop and _G.__BREAKEGG == GEN and hrp do
-            hrp.CFrame = CFrame.new(pos + Vector3.new(0, 3, 3))
-            RunService.Heartbeat:Wait()
-        end
-    end)
-    task.wait(1.2)
+    if not walkTo(pos, 5, 25) then
+        note("could not walk to the prize")
+        return nil
+    end
+    task.wait(0.3)
     pcall(function() fireproximityprompt(pp) end)
 
     -- STANDING AROUND AFTER THE GRAB IS WHAT LOSES THE ANIMAL. The bosses roam
@@ -442,10 +565,15 @@ local function grabPrize(timeout)
         held = carriedAnimal()
         if not held then RunService.Heartbeat:Wait() end
     until held or os.clock() > deadline2
-    stop = true
 
     if held then
         STATE.lastAnimal = tostring(held:GetAttribute("OriginalName"))
+        -- LEAVE FIRST, DECIDE LATER. Everything that follows a grab - the pen
+        -- census, the value floor, even the sale - is position-free, so none of
+        -- it is worth doing while standing in a field the bosses patrol with
+        -- the prize in your hands. The walk home is no longer instant, so it
+        -- starts here rather than after the arithmetic.
+        pcall(goToPen)
         return held
     end
     return nil
@@ -546,13 +674,38 @@ end
 
 -- Standing at the pen is enforced (PenConfig.StandsAtPen, 10 stud margin), so
 -- the warp lands just outside the fence rather than in the middle of it.
-local function goToPen()
+function goToPen()
     local part = penPart()
-    local _, hrp = character()
-    if not (part and hrp) then return false end
-    hrp.CFrame = CFrame.new(part.Position + Vector3.new(0, 6, -part.Size.Z / 2 - 6))
-    task.wait(0.9)
-    return true
+    if not part then return false end
+    -- Stand just outside the fence: PenConfig enforces a 10 stud margin for the
+    -- placement, so arriving anywhere along the edge is close enough.
+    local target = part.Position + Vector3.new(0, 0, -part.Size.Z / 2 - 5)
+    return walkTo(target, 8, 45)
+end
+
+-- The sell vendor. SELLING IS POSITION GATED and that is easy to get wrong:
+-- measured on one carry, a fire from 46 studs did nothing and the same fire
+-- from 6 studs sold it. An earlier "it is not position gated" reading was a
+-- coincidence - that test happened to run while the character was still parked
+-- at the vendor from the previous probe.
+local function vendorPos()
+    local gp = workspace:FindFirstChild("Gameplay")
+    local shops = gp and gp:FindFirstChild("Shops")
+    local shop = shops and shops:FindFirstChild("SellShop")
+    local vendor = shop and shop:FindFirstChild("Vendor")
+    local head = vendor and vendor:FindFirstChild("Head")
+    local anchor = head and head:FindFirstChild("PromptPoint")
+    if anchor then
+        if anchor:IsA("BasePart") then return anchor.Position end
+        if anchor:IsA("Attachment") then return anchor.WorldPosition end
+    end
+    return shop and shop:GetPivot().Position or nil
+end
+
+local function goToVendor()
+    local pos = vendorPos()
+    if not pos then return false end
+    return walkTo(pos, 8, 40)
 end
 
 -- "Equipped" is the only argument this game's own SellController ever sends,
@@ -562,6 +715,10 @@ local function sellCarried()
     local held = carriedAnimal()
     if not held then return false end
     local name = tostring(held:GetAttribute("OriginalName"))
+
+    -- Stand at the vendor first, or the remote is silently ignored and the loop
+    -- retries forever WHILE HOLDING THE ANIMAL in the middle of the field.
+    goToVendor()
 
     -- Income keeps ticking while we measure, so the balance alone cannot
     -- confirm a sale. The hands emptying is the honest signal.
@@ -694,8 +851,8 @@ local function claimDaily()
     return plr:GetAttribute("DailyRewardCanClaim") ~= true
 end
 
--- UNVERIFIED: never affordable during the session that mapped this game, so the
--- balance moving is the only confirmation and the toggle defaults to off.
+-- Verified 2026-09-16: capacity 10 -> 14 for $1M. Capacity is the confirmation,
+-- never the balance - income keeps ticking while the call is in flight.
 local function penUpgrade()
     local _, cap = penCensus()
     local before = money()
@@ -775,8 +932,8 @@ cSpend:Toggle("Buy pickaxes", CONFIG.autoPickaxe, function(v) CONFIG.autoPickaxe
     "buys the best affordable tier outright - the ladder can be skipped",
     UI.theme.good)
 cSpend:Toggle("Upgrade the pen", CONFIG.autoPenUpgrade, function(v) CONFIG.autoPenUpgrade = v end,
-    "UNVERIFIED: $1M for +4 slots, never affordable while this was mapped",
-    UI.theme.warn)
+    "$1M for +4 permanent slots, to a ceiling of 26 - the only way a full pen grows",
+    UI.theme.good)
 cSpend:Toggle("Daily reward", CONFIG.autoDaily, function(v) CONFIG.autoDaily = v end)
 
 cSpend:Button("Buy best pickaxe now", function()
@@ -823,10 +980,14 @@ task.spawn(function()
             ("  last %s  (+%s/s)"):format(STATE.lastAnimal, fmt(STATE.lastGain)),
             "EGGS",
             (egg
-                and ("  best now: %s%s, %d swings, score %.1f"):format(
+                and ("  best now: %s%s, %d swings, %d studs away"):format(
                     tostring(egg:GetAttribute("SizeTier")),
                     egg:GetAttribute("Mutation") and (" " .. egg:GetAttribute("Mutation")) or "",
-                    swingsFor(egg), score or 0)
+                    swingsFor(egg),
+                    (function()
+                        local _, hrp = character()
+                        return hrp and math.floor((egg:GetPivot().Position - hrp.Position).Magnitude) or 0
+                    end)())
                 or  "  best now: none passes the filter"),
             ("  carrying %s"):format(carriedAnimal() and STATE.lastAnimal or "-"),
             "PEN",
@@ -861,11 +1022,13 @@ STATE.running = true
 _G.__BREAKEGG_DBG = {
     CONFIG = CONFIG, STATE = STATE,
     farmCycle = farmCycle, breakEgg = breakEgg, bestEgg = bestEgg,
-    eggScore = eggScore, swingsFor = swingsFor, eggHp = eggHp,
-    eggAim = eggAim, faceAndPin = faceAndPin,
+    eggScore = eggScore, eggRate = eggRate, swingsFor = swingsFor, eggHp = eggHp,
+    eggAim = eggAim, approachEgg = approachEgg,
+    walkTo = walkTo, faceTowards = faceTowards, SIZE_VALUE = SIZE_VALUE,
     grabPrize = grabPrize, myPrize = myPrize, carriedAnimal = carriedAnimal,
     placeCarried = placeCarried, sellCarried = sellCarried,
     freeSpot = freeSpot, goToPen = goToPen,
+    goToVendor = goToVendor, vendorPos = vendorPos,
     penCensus = penCensus, myPen = myPen, penPart = penPart,
     animalValue = animalValue,
     buyPickaxe = buyPickaxe, bestAffordablePickaxe = bestAffordablePickaxe,

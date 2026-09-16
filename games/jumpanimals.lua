@@ -66,9 +66,17 @@
         child ("Detector"), and the tool's EggId. Verified: PlacedEggs 0 -> 1.
         Activating the tool instead sends NOTHING unless the real mouse happens
         to be pointing at ground, which is why :Activate() looks dead.
-      * The egg then hatches on a server timer: the placed model carries
-        PlacedAt and HatchAt (unix, compare against workspace:GetServerTimeNow)
-        plus a HatchReady flag. A Common Meadow egg measured 20s.
+      * The egg runs a server timer - PlacedAt and HatchAt (unix, compare
+        against workspace:GetServerTimeNow) plus a HatchReady flag, about 20s
+        for a Common Meadow egg - and then IT DOES NOT OPEN BY ITSELF. Measured:
+        eight eggs all reading HatchReady = true, 220 SECONDS past their HatchAt,
+        none of them opened. The action is a second prompt on the same
+        attachment, EggRoot.EggPromptAttachment.HatchPrompt ("Open", 14.9 studs,
+        hold 0.5). Verified: eggs 8 -> 7, animals 1 -> 2, CashPerSecond 1 -> 16.
+        Since Eggs.Placement.MaximumIncubatingEggs is 8 and an unopened egg
+        holds its slot forever, this is the binding constraint on the entire
+        farm - it outranks stealing, and a farm that only steals stalls at eight
+        eggs with one animal.
       * ClaimAnimalIndexReward:FireServer(<animal name>) is NOT position gated
         and is the biggest lever in the game. Verified from the lobby:
         XP 39 -> 6 with a level crossing (+15) and Cash 881 -> 1085 (+200),
@@ -156,6 +164,7 @@ local CONFIG = {
     autoTrain     = true,   -- squat on the barbell pad whenever nothing else is due
     autoSteal     = true,   -- steal the best reachable egg
     autoPlace     = true,   -- place every egg Tool sitting in the backpack
+    autoHatch     = true,   -- open every ready egg - they NEVER open by themselves
     autoIndex     = true,   -- claim animal index rewards (verified, free, huge)
     autoEquipBest = true,   -- PetInventory "EquipBest" (harmless, unproven as a swapper)
 
@@ -271,9 +280,30 @@ local function placedAnimalCount()
     return f and #f:GetChildren() or 0
 end
 
+-- Two caps, and the INCUBATING one is the binding one: Eggs.Placement gives
+-- MaximumPlacedEggs 20 but MaximumIncubatingEggs 8, and an unhatched egg counts
+-- against both. Ranking room off the larger number filled the pen to 8 and then
+-- stole four more eggs a minute that could never be placed.
 local function plotRoom()
-    local maxEggs = (EggsCfg and EggsCfg.Placement and EggsCfg.Placement.MaximumPlacedEggs) or 20
-    return maxEggs - placedEggCount()
+    local P = EggsCfg and EggsCfg.Placement
+    local maxEggs = (P and P.MaximumPlacedEggs) or 20
+    local maxInc  = (P and P.MaximumIncubatingEggs) or 8
+    local placed  = placedEggCount()
+    return math.min(maxEggs - placed, maxInc - placed)
+end
+
+-- The weakest animal already in the pen, as a raw predicted CPS. Placed animals
+-- carry CashPerSecond directly as an attribute.
+local function weakestAnimal()
+    local plot = myPlot()
+    local f = plot and plot:FindFirstChild("PlacedAnimals")
+    if not f then return 0 end
+    local worst = nil
+    for _, a in ipairs(f:GetChildren()) do
+        local c = a:GetAttribute("CashPerSecond")
+        if c and (worst == nil or c < worst) then worst = c end
+    end
+    return worst or 0
 end
 
 -- ------------------------------------------------------------- animal index
@@ -365,6 +395,17 @@ local function eggPrompt(model)
     return nil
 end
 
+-- An egg is only worth a trip if it adds something: a missing index entry, or
+-- more income than the weakest animal already in the pen. Without this the loop
+-- stole Meadow chickens forever and NEVER TRAINED, so Jump Power never moved and
+-- the farm could not reach a second area - it looked busy and made no progress.
+local function worthStealing(model)
+    if CONFIG.indexFirst and not indexHas(model.Name) then return true end
+    local mine = weakestAnimal()
+    if mine <= 0 then return true end
+    return predictCPS(model.Name, model:GetAttributes()) > mine
+end
+
 -- Best egg across every REACHABLE area. Everything replicates from the plot,
 -- so this costs no travel at all.
 local function bestEgg()
@@ -378,7 +419,7 @@ local function bestEgg()
             if folder then
                 for _, egg in ipairs(folder:GetChildren()) do
                     local root = eggRoot(egg)
-                    if root and eggPrompt(egg) then
+                    if root and eggPrompt(egg) and worthStealing(egg) then
                         local v = eggScore(egg)
                         if v > bestVal then best, bestVal = egg, v end
                     end
@@ -582,6 +623,66 @@ local function placeAll()
     return n
 end
 
+-- ---------------------------------------------------------------- hatching
+-- EGGS DO NOT HATCH BY THEMSELVES. They sit on the plot with HatchReady = true
+-- forever until the prompt is fired - measured, eight eggs 220 seconds past
+-- their HatchAt and not one of them had opened. Since the incubator cap (8) is
+-- what limits the whole farm, this is the highest priority action there is.
+-- Verified: eggs 8 -> 7, animals 1 -> 2, CashPerSecond 1 -> 16 on one Pony.
+local function hatchAll()
+    local plot = myPlot()
+    local f = plot and plot:FindFirstChild("PlacedEggs")
+    if not f then return 0 end
+
+    -- Same rule as the steal: a prompt does nothing while squatting.
+    stopTraining()
+
+    local now = serverNow()
+    local n = 0
+    for _, egg in ipairs(f:GetChildren()) do
+        if _G.__JUMPANIMALS ~= GEN then break end
+        local ready = egg:GetAttribute("HatchReady") == true
+            or (egg:GetAttribute("HatchAt") or math.huge) <= now
+        if ready then
+            local root = egg:FindFirstChild("EggRoot") or egg.PrimaryPart
+            local prompt = eggPrompt(egg)
+            if root and prompt then
+                local before = #f:GetChildren()
+                local conn = RunService.Heartbeat:Connect(function()
+                    local _, hrp = char()
+                    if hrp then
+                        hrp.CFrame = CFrame.new(root.Position + Vector3.new(0, 4, 0))
+                        hrp.AssemblyLinearVelocity = Vector3.zero
+                    end
+                end)
+                task.wait(1.1)
+                pcall(function() fireproximityprompt(prompt) end)
+                local t = 0
+                while t < 3 do
+                    task.wait(0.15); t = t + 0.15
+                    if #f:GetChildren() < before then n = n + 1 break end
+                end
+                conn:Disconnect()
+            end
+        end
+    end
+    if n > 0 then note(("hatched %d"):format(n)) end
+    return n
+end
+
+local function readyToHatch()
+    local plot = myPlot()
+    local f = plot and plot:FindFirstChild("PlacedEggs")
+    if not f then return 0 end
+    local now = serverNow()
+    local n = 0
+    for _, egg in ipairs(f:GetChildren()) do
+        if egg:GetAttribute("HatchReady") == true
+            or (egg:GetAttribute("HatchAt") or math.huge) <= now then n = n + 1 end
+    end
+    return n
+end
+
 -- ------------------------------------------------------------- free levers
 -- Verified: the single-name form moved XP and Cash exactly as the config said.
 -- The "__ALL__" sentinel is read out of AnimalIndexController's vocabulary next
@@ -680,7 +781,20 @@ local function farmCycle()
         return
     end
 
-    if CONFIG.autoPlace and #eggTools() > 0 then
+    -- 1b. Hatching outranks everything except delivery. The incubator cap is
+    --     the binding constraint on the whole farm, and a ready egg sitting
+    --     unopened holds a slot forever.
+    if CONFIG.autoHatch and readyToHatch() > 0 then
+        STATE.mode = "hatching"
+        withUI("hatch", hatchAll)
+        return
+    end
+
+    -- ONLY with room. An egg Tool that cannot be placed because the incubator
+    -- is full used to hold the brain in "placing" forever: it retried every
+    -- 0.8s, never trained, and Jump Power sat still while the farm looked busy.
+    -- Surplus tools simply wait in the backpack until a slot frees up.
+    if CONFIG.autoPlace and #eggTools() > 0 and plotRoom() > 0 then
         STATE.mode = "placing"
         withUI("place", function()
             stopTraining()
@@ -706,9 +820,11 @@ local function farmCycle()
     end
 
     -- 3. Nothing to fetch - train. Starting is position gated, so this walks
-    --    home once and then the attribute carries the rest.
+    --    home once and then the attribute carries the rest. This is where the
+    --    farm spends most of its time once the incubator is full, and that is
+    --    correct: Jump Power is the gate on every deeper area.
     if CONFIG.autoTrain then
-        STATE.mode = "training"
+        STATE.mode = (plotRoom() <= 0) and "training (pen full)" or "training"
         if not squatting() then
             withUI("train", function() startTraining() end)
         end
@@ -754,6 +870,8 @@ _G.__JUMPANIMALS_DBG = {
     CONFIG = CONFIG, STATE = STATE,
     farmCycle = farmCycle, bestEgg = bestEgg, eggScore = eggScore, predictCPS = predictCPS,
     stealEgg = stealEgg, goHome = goHome, placeAll = placeAll, placeOne = placeOne,
+    hatchAll = hatchAll, readyToHatch = readyToHatch, weakestAnimal = weakestAnimal,
+    worthStealing = worthStealing,
     startTraining = startTraining, stopTraining = stopTraining,
     claimIndex = claimIndex, indexUnclaimed = indexUnclaimed, indexHas = indexHas,
     equipBest = equipBest, upgradeBarbell = upgradeBarbell,
@@ -784,6 +902,9 @@ cLoop:Toggle("Auto steal", CONFIG.autoSteal, function(v) CONFIG.autoSteal = v en
     "Warps to the best reachable egg and carries it home")
 cLoop:Toggle("Auto place", CONFIG.autoPlace, function(v) CONFIG.autoPlace = v end,
     "Drops every carried egg into the pen")
+cLoop:Toggle("Auto hatch", CONFIG.autoHatch, function(v) CONFIG.autoHatch = v end,
+    "Eggs never open by themselves - this is what frees incubator slots",
+    UI.theme.good)
 cLoop:Toggle("Auto train", CONFIG.autoTrain, function(v) CONFIG.autoTrain = v end,
     "Squats whenever there is nothing to fetch")
 cLoop:Stepper("Highest area", CONFIG.maxAreaIndex, 1, 10, 1, function(v) CONFIG.maxAreaIndex = v end,
@@ -830,8 +951,8 @@ task.spawn(function()
                     STATE.stolen, STATE.placed, STATE.claimed),
                 ("  last egg %s   trained %ds"):format(STATE.lastEgg, STATE.trainSecs),
                 "PEN",
-                ("  %d eggs, %d animals, %d egg slots free"):format(
-                    placedEggCount(), placedAnimalCount(), plotRoom()),
+                ("  %d eggs (%d ready to open), %d animals, %d slots free"):format(
+                    placedEggCount(), readyToHatch(), placedAnimalCount(), plotRoom()),
                 ("  %d index rewards waiting to be claimed"):format(pending),
                 "TARGET",
                 egg and ("  %s in %s   score %.0f"):format(
