@@ -71,10 +71,20 @@
         while the pen read 8/10 before AND after. There is no "Inventory"
         variant in this game, but the aurabrainrots rule still applies - never
         widen that argument on a hunch, the pen is the whole farm.
-      * A FULL PEN IS NOT A DEAD END, it is a cash engine. There is no pull-back
-        prompt on a placed animal, so nothing can be swapped out; what the loop
-        does instead is keep breaking eggs and sell every catch, which funds the
-        pen upgrade that adds the next four slots.
+      * THE PEN IS ONE-WAY AND THAT IS THE WHOLE STRATEGY. A placed animal
+        cannot be taken back: there is no prompt anywhere on the pen, and the
+        three client controllers that touch placements are all read-only -
+        CreatureHoverController is a hover tooltip (a viewport raycast that
+        fills in Kg and Gender), DropController only watches CarryCount and
+        DropLockUntil for the throw-away button, and PenPlacementClient only
+        ever places. So a slot spent is spent forever, and a loop that seats
+        whatever it happens to catch first ends up holding 10/s Giant Isopods
+        while it sells 186/s Shoebills for want of a slot - measured, that is
+        exactly what the first build did. While the pen is mostly empty
+        anything beats an empty slot; once `pickyBelow` slots are left, a catch
+        has to beat the weakest animal already placed or it is sold instead.
+      * A FULL PEN IS NOT A DEAD END, it is a cash engine: keep breaking eggs
+        and sell every catch, which funds the pen upgrade and its four slots.
 
     Deliberately NOT automated, and why:
 
@@ -144,6 +154,7 @@ local CONFIG = {
     swingRate       = 0.30,      -- seconds between swings
 
     autoSell        = true,      -- on a full pen, sell the catch instead of stalling
+    pickyBelow      = 3,         -- with this many slots left, only place an upgrade
     autoPickaxe     = true,
     pickaxeReserve  = 0.0,       -- keep this fraction of the balance back
     autoPenUpgrade  = false,     -- UNVERIFIED - never affordable while mapping
@@ -457,6 +468,19 @@ local function penPart()
     return enc and enc:FindFirstChild("PenPart"), enc, pen
 end
 
+-- Base income times the mutation multiplier, which is the RAW comparable figure
+-- on both sides: a placed VisualItem and a carried one publish the same two
+-- attributes, so a carried animal can be ranked against the pen directly. Never
+-- compare this against plr.CashPerSecond, which is the multiplied total.
+local function animalValue(model)
+    if not model then return 0 end
+    local nm  = model:GetAttribute("OriginalName")
+    local cfg = nm and ItemConfig and ItemConfig.Items and ItemConfig.Items[nm]
+    local base = cfg and tonumber(cfg.Income) or 0
+    local mut = model:GetAttribute("Mutation")
+    return base * ((mut and MUTATIONS[mut]) or 1)
+end
+
 local function penCensus()
     local _, enc = penPart()
     local items = enc and enc:FindFirstChild("Items")
@@ -474,6 +498,7 @@ local function penCensus()
                     mutation = vi:GetAttribute("Mutation"),
                     x = slot:GetAttribute("X"), z = slot:GetAttribute("Z"),
                     radius = slot:GetAttribute("Radius"),
+                    value = animalValue(vi),
                 }
             end
         end
@@ -555,13 +580,32 @@ local function placeCarried()
     local held = carriedAnimal()
     if not held then return false end
 
-    local used, cap = penCensus()
+    local used, cap, placed = penCensus()
     if cap > 0 and used >= cap then
         -- Nothing can be pulled off a placement, so a full pen has exactly one
         -- productive move left: turn the catch into cash for the pen upgrade.
         if CONFIG.autoSell then return sellCarried() end
         note(("pen full (%d/%d) - turn on selling or upgrade the pen"):format(used, cap))
         return false
+    end
+
+    -- A SLOT IS PERMANENT, so the last few are worth being picky about. While
+    -- the pen is mostly empty anything beats an empty slot, but once it is
+    -- nearly full a slot spent on something worse than the current floor is
+    -- spent forever - there is no evicting it later.
+    local free = cap - used
+    if cap > 0 and free <= CONFIG.pickyBelow and #placed > 0 then
+        local weakest = math.huge
+        for _, p in ipairs(placed) do
+            if (p.value or 0) < weakest then weakest = p.value or 0 end
+        end
+        local mine = animalValue(held)
+        if mine < weakest then
+            note(("%s (%s/s raw) is below the pen floor %s - sold, %d slots left"):format(
+                STATE.lastAnimal, fmt(mine), fmt(weakest), free))
+            if CONFIG.autoSell then return sellCarried() end
+            return false
+        end
     end
 
     if not goToPen() then return false end
@@ -724,6 +768,9 @@ local cSpend = farm:Card("SPEND", 2)
 cSpend:Toggle("Sell when the pen is full", CONFIG.autoSell, function(v) CONFIG.autoSell = v end,
     "RequestSell(\"Equipped\") - only ever the animal in hand, never the pen",
     UI.theme.good)
+cSpend:Slider("Get picky with N slots left", 0, 8, CONFIG.pickyBelow,
+    function(v) CONFIG.pickyBelow = math.floor(v) end,
+    "a placed animal can never be taken back, so save the last slots for upgrades")
 cSpend:Toggle("Buy pickaxes", CONFIG.autoPickaxe, function(v) CONFIG.autoPickaxe = v end,
     "buys the best affordable tier outright - the ladder can be skipped",
     UI.theme.good)
@@ -749,8 +796,14 @@ local out = cStatus:Readout(11)
 
 task.spawn(function()
     while _G.__BREAKEGG == GEN do
-        local used, cap = penCensus()
+        local used, cap, placed = penCensus()
         local egg, score = bestEgg()
+
+        local weakest, weakestName = math.huge, "-"
+        for _, p in ipairs(placed) do
+            if (p.value or 0) < weakest then weakest, weakestName = p.value or 0, tostring(p.name) end
+        end
+        if weakest == math.huge then weakest, weakestName = 0, "-" end
 
         win:SetStatus(("%s$   %s/s   pen %d/%d   power %d"):format(
             fmt(money()), fmt(cps()), used, cap, power()))
@@ -779,6 +832,9 @@ task.spawn(function()
             "PEN",
             ("  %d of %d slots used%s"):format(used, cap,
                 (cap > 0 and used >= cap) and "  - full, catches are being sold" or ""),
+            ("  floor: %s at %s/s raw%s"):format(weakestName, fmt(weakest),
+                (cap > 0 and (cap - used) <= CONFIG.pickyBelow)
+                    and "  (picky: a catch must beat it)" or ""),
             (nextTier
                 and ("  next pickaxe: %s, power %d, %s"):format(
                     nextTier.Name, nextTier.Power, fmt(nextTier.Price))
@@ -811,6 +867,7 @@ _G.__BREAKEGG_DBG = {
     placeCarried = placeCarried, sellCarried = sellCarried,
     freeSpot = freeSpot, goToPen = goToPen,
     penCensus = penCensus, myPen = myPen, penPart = penPart,
+    animalValue = animalValue,
     buyPickaxe = buyPickaxe, bestAffordablePickaxe = bestAffordablePickaxe,
     equipPickaxe = equipPickaxe, penUpgrade = penUpgrade, claimDaily = claimDaily,
     money = money, power = power, cps = cps, fmt = fmt,

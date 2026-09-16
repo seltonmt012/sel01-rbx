@@ -528,6 +528,17 @@
       "status": "ok",
       "note": "carry-and-place with a mining step in front. PickaxeSwing:FireServer(egg) is the damage call and the CLIENT raycasts along the character's LookVector, so the root part has to FACE the egg - and the stand-off must scale with the egg's Radius attribute (a Giant is 6.46, so a fixed 6-stud offset parks you inside it and every swing misses). Hits = ceil(hp/PickaxePower), hp 6/20/70/500/3000/12000/45000 per size. Eggs carry SizeTier and Mutation as attributes BEFORE they break, so targets are picked for free. MoneyLog10 is the exact money oracle; leaderstats has no money. BuyPickaxe skips the ladder. Placing is RequestPlaceItem(x, z, rot) in PEN-LOCAL coords; selling is RequestSell('Equipped') and only ever touches the animal in hand. plr.CarryCount is a zone flag, not ownership",
       "detect": "local rs = game:GetService('ReplicatedStorage') local e = rs:FindFirstChild('Events') local m = rs:FindFirstChild('Modules') if not e or not m then return false end local gp = game.Workspace:FindFirstChild('Gameplay') return e:FindFirstChild('PickaxeSwing') ~= nil and e:FindFirstChild('EggHit') ~= nil and e:FindFirstChild('RequestPlaceItem') ~= nil and m:FindFirstChild('EggConfig') ~= nil and m:FindFirstChild('PenConfig') ~= nil and gp ~= nil and gp:FindFirstChild('Eggs') ~= nil"
+    },
+    {
+      "alias": "jumpanimals",
+      "name": "Jump for Animals!",
+      "file": "games/jumpanimals.lua",
+      "places": [
+        126870639873289
+      ],
+      "status": "ok",
+      "note": "carry-and-place plot income with the progression moved into JUMP POWER: squat on the barbell for Jump XP, Jump Power gates which area you may enter, steal an egg, carry it home, place it in the pen and it hatches into an animal paying cash per second. A near relative of stealegg but with NO anti-cheat (sweeps over 5-7k live functions found nothing), so plain CFrame warping is used. The trap that makes the whole farm look broken: while the player attribute IsSquatting is true the egg CollectPrompt silently never pays out, so StopSquattingRequest has to be fired first, every time. Starting to squat is position gated and needs a Heartbeat pin; continuing is not revalidated, so the travel legs are free training. Never burst SquatTrainingRequest - the client already fires it ~4x/s and a flood makes the server refuse training for 40-60s in silence",
+      "detect": "local rs = game:GetService('ReplicatedStorage') local r = rs:FindFirstChild('Remotes') if not r then return false end local m = game.Workspace:FindFirstChild('Map') return r:FindFirstChild('StopSquattingRequest') ~= nil and r:FindFirstChild('PlaceEggRequest') ~= nil and r:FindFirstChild('SquatTrainingRequest') ~= nil and m ~= nil and m:FindFirstChild('Stages') ~= nil"
     }
   ]
 }
