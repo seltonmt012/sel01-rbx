@@ -1493,9 +1493,25 @@ end
 
 local aimWroteCamera = false
 
+-- The wander is an OFFSET ON the camera, not a movement OF it, so last frame's
+-- offset has to come back out before the next step is computed. Without that it is
+-- added on top of itself every frame while the correction only ever takes
+-- 1/smooth of the REMAINING angle back - the two balance at smooth x amplitude,
+-- which is 25 x 0.45 = 11 degrees at the defaults. Measured: an aim starting 8
+-- degrees off closed to 1, then wandered back out to 7.7 and never settled. That
+-- is what "it pulls away from the enemy instead of onto him" was. Inside the
+-- deadzone there is no correction at all, so there it walked off unchecked.
+local lastNX, lastNY = 0, 0
+
 local function aimPass(dt)
 	if _G.__CBLOX ~= GEN then return end
 	aimWroteCamera = false
+
+	-- Cleared here rather than at every early return: a frame that does not write
+	-- the camera leaves its offset baked in, and that is correct - it is still in
+	-- there. It just must never be subtracted twice.
+	local prevNX, prevNY = lastNX, lastNY
+	lastNX, lastNY = 0, 0
 
 	STATE.engaged = false
 
@@ -1599,6 +1615,9 @@ local function aimPass(dt)
 	local cf = camera.CFrame
 	local pos = cf.Position
 	local curPitch, curYaw = cf:ToOrientation()
+	-- de-noise: everything below works on where the aim actually put the camera,
+	-- not on where the wander left it
+	curPitch, curYaw = curPitch - prevNY, curYaw - prevNX
 	local want = CFrame.lookAt(pos, aimWorldPoint(pick.part, pick.player))
 	local wantPitch, wantYaw = want:ToOrientation()
 
@@ -1639,6 +1658,7 @@ local function aimPass(dt)
 	end
 
 	local nx, ny = noiseStep(dt)
+	lastNX, lastNY = nx, ny
 
 	camera.CFrame = CFrame.new(pos)
 		* CFrame.fromOrientation(curPitch + movePitch + ny, curYaw + moveYaw + nx, 0)
