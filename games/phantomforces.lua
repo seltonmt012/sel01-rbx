@@ -179,6 +179,14 @@ local CONFIG = {
 	aimVisible = true,
 	aimMaxDist = 1200,
 	aimCircle  = true,
+	aimPredict = true,        -- aim where the bullet ARRIVES, not where the head is
+	aimLead    = true,        -- and lead a moving target
+
+	-- hitbox magnet - measured, unproven against the server, ships OFF ---------
+	snap       = false,
+	snapFiring = true,        -- only while the mouse is down
+	snapMax    = 5,           -- studs; the game gates on a 6-stud sphere
+	snapPart   = "Head",
 
 	-- trigger --------------------------------------------------------------------
 	trg        = false,
@@ -243,6 +251,12 @@ local STATE = {
 	mouseSens = 0,
 	rcsSens   = 0,        -- rad per mouse unit, learned from the player's own hand
 	rcsKick   = 0,        -- the residual left after subtracting the player, in deg
+	dropStuds = 0,        -- how far above the head the assist is aiming
+	bulletSpeed = 0,      -- measured off our own echoed shot, 0 until one is fired
+	weapon    = "-",
+	snapFrames = 0,       -- frames the magnet actually held a part
+	snapHits   = 0,       -- bulletHitConfirm since the magnet was switched on
+	snapPartHits = 0,     -- ...of which named the part the magnet was holding
 	clickWay  = "not probed",
 	shots     = 0,
 	hud       = "-",
@@ -1089,6 +1103,270 @@ local function noiseStep(dt)
 end
 
 --------------------------------------------------------------------------------
+-- ballistics: this game's bullets travel and they fall
+--------------------------------------------------------------------------------
+--
+-- Read straight off a captured `newbullets` payload: every bullet carries
+-- `acceleration = (0, -196.2, 0)` and a velocity whose magnitude is the weapon's
+-- `bulletspeed` - 2950 for the AN-94, 2800 for the HOWA TYPE 20 and the WA2000,
+-- 1400 for the HARDBALLER. At 300 studs a 2800 stud/s bullet is in the air for
+-- 0.107 s and has dropped 1.1 studs, which is most of a head; at 600 it is 4.5
+-- studs and the shot goes under the feet. An assist that aims at the head
+-- position therefore misses at exactly the ranges where an assist is worth
+-- having.
+--
+-- The whole stat block is readable from the MAIN VM: the weapon folders under
+-- ReplicatedStorage.Content.ProductionContent.WeaponDatabase each hold a
+-- ModuleScript, and requiring it from here returns a private copy - useless for
+-- changing anything, perfect for reading 95 static numbers.
+--
+-- WHICH weapon is held is not stored anywhere readable, so it is identified by
+-- its FIRE RATE: the HUD prints it ("[580 S]"), the loadout arrives in the
+-- `newspawn` payload, and the entry whose `firerate` matches is the one in our
+-- hands. No slot-index mapping to guess and nothing to keep in sync when the
+-- game reorders its inventory.
+
+local RS = game:GetService("ReplicatedStorage")
+
+local GRAVITY = 196.2
+pcall(function()
+	for _, m in ipairs(getloadedmodules()) do
+		if m.Name == "PublicSettings" then
+			local ok, t = pcall(require, m)
+			if ok and type(t) == "table" and typeof(t.bulletAcceleration) == "Vector3" then
+				GRAVITY = math.abs(t.bulletAcceleration.Y)
+			end
+			break
+		end
+	end
+end)
+
+local statCache = {}
+
+local function weaponStats(name)
+	if name == nil or name == "" then return nil end
+	if statCache[name] ~= nil then return statCache[name] or nil end
+	local db = RS:FindFirstChild("Content")
+	db = db and db:FindFirstChild("ProductionContent")
+	db = db and db:FindFirstChild("WeaponDatabase")
+	if not db then statCache[name] = false return nil end
+	for _, cat in ipairs(db:GetChildren()) do
+		local gun = cat:FindFirstChild(name)
+		if gun then
+			for _, k in ipairs(gun:GetChildren()) do
+				if k:IsA("ModuleScript") then
+					local ok, res = pcall(require, k)
+					if ok and type(res) == "table" then
+						statCache[name] = res
+						return res
+					end
+				end
+			end
+		end
+	end
+	statCache[name] = false
+	return nil
+end
+
+local myLoadout = {}          -- filled from our own newspawn
+
+local function hudRpm()
+	local gui = plr:FindFirstChild("PlayerGui")
+	gui = gui and gui:FindFirstChild("HudScreenGui")
+	local main = gui and gui:FindFirstChild("Main")
+	local st = main and main:FindFirstChild("DisplayStatus")
+	local l = st and st:FindFirstChild("TextFiremode", true)
+	if not l then return nil end
+	return tonumber(l.Text:gsub("<[^>]->", ""):match("(%d+)"))
+end
+
+-- The largest magazine count seen since the fire rate last changed: that IS the
+-- capacity, and it is the second half of the weapon's fingerprint.
+local maxMagSeen, magForRpm = 0, nil
+
+local function trackMag()
+	local gui = plr:FindFirstChild("PlayerGui")
+	gui = gui and gui:FindFirstChild("HudScreenGui")
+	local main = gui and gui:FindFirstChild("Main")
+	local st = main and main:FindFirstChild("DisplayStatus")
+	local l = st and st:FindFirstChild("TextMagCount", true)
+	local n = l and tonumber(l.Text)
+	if not n then return end
+	local rpm = hudRpm()
+	if rpm ~= magForRpm then
+		magForRpm, maxMagSeen = rpm, 0
+	end
+	if n > maxMagSeen then maxMagSeen = n end
+end
+
+local function firerateOf(stats)
+	local fr = stats and stats.firerate
+	if type(fr) == "number" then return fr end
+	if type(fr) == "table" then
+		for _, v in pairs(fr) do if type(v) == "number" then return v end end
+	end
+	return nil
+end
+
+-- The loadout only arrives on a RESPAWN, so on the first run the weapon is
+-- unknown until the player next dies - and a drop compensation that waits for
+-- that is a drop compensation nobody ever sees working. The whole database is
+-- therefore indexed by fire rate in the background, which makes the HUD's own
+-- "[750 A]" enough to identify the gun on its own. Chunked with a yield every
+-- 25 modules: requiring ~400 of them in one frame is a visible hitch.
+local rpmIndex = nil
+local rpmIndexed = 0
+
+task.spawn(function()
+	local db = RS:FindFirstChild("Content")
+	db = db and db:FindFirstChild("ProductionContent")
+	db = db and db:FindFirstChild("WeaponDatabase")
+	if not db then return end
+	local idx, n = {}, 0
+	for _, cat in ipairs(db:GetChildren()) do
+		for _, gun in ipairs(cat:GetChildren()) do
+			if _G.__SELPF ~= GEN then return end
+			for _, k in ipairs(gun:GetChildren()) do
+				if k:IsA("ModuleScript") then
+					local ok, res = pcall(require, k)
+					if ok and type(res) == "table" and res.bulletspeed then
+						local fr = firerateOf(res)
+						if fr then
+							idx[fr] = idx[fr] or {}
+							table.insert(idx[fr], { name = gun.Name, stats = res })
+						end
+					end
+					n = n + 1
+					if n % 25 == 0 then task.wait() end
+				end
+			end
+		end
+	end
+	rpmIndex, rpmIndexed = idx, n
+end)
+
+-- The held weapon: the loadout first, because that is only four candidates and
+-- cannot be ambiguous, then the whole index.
+local heldName, heldStats, heldAt = "-", nil, 0
+
+local function heldWeapon()
+	local now = os.clock()
+	trackMag()
+	if now - heldAt < 0.5 then return heldName, heldStats end
+	heldAt = now
+	local rpm = hudRpm()
+	local function near(fr) return rpm and fr and math.abs(fr - rpm) <= math.max(2, rpm * 0.03) end
+
+	local bestName, bestStats
+	for _, name in pairs(myLoadout) do
+		local st = weaponStats(name)
+		if st and near(firerateOf(st)) then bestName, bestStats = name, st break end
+		if st and not bestStats then bestName, bestStats = name, st end
+	end
+
+	if not (bestStats and near(firerateOf(bestStats))) and rpmIndex and rpm then
+		local hit = rpmIndex[rpm]
+		if not hit then
+			-- the HUD rounds, so take the closest rate in the index
+			local bestDiff
+			for fr, list in pairs(rpmIndex) do
+				local diff = math.abs(fr - rpm)
+				if not bestDiff or diff < bestDiff then bestDiff, hit = diff, list end
+			end
+			if bestDiff and bestDiff > math.max(2, rpm * 0.03) then hit = nil end
+		end
+		if hit and hit[1] then
+			-- Ten weapons share 750 rounds a minute, so the rate alone is not an
+			-- identification. The MAGAZINE is the second key: the HUD prints the
+			-- rounds left, the highest value seen since the gun was picked up is
+			-- its capacity, and that pair is almost always unique.
+			local list = hit
+			if maxMagSeen and maxMagSeen > 0 then
+				local filtered = {}
+				for _, c in ipairs(hit) do
+					if tonumber(c.stats.magsize) == maxMagSeen then
+						filtered[#filtered + 1] = c
+					end
+				end
+				if #filtered > 0 then list = filtered end
+			end
+			-- Where several still qualify, say so rather than picking silently:
+			-- what matters downstream is the bullet speed, and if they agree on
+			-- that the ambiguity costs nothing.
+			local sameSpeed = true
+			for _, c in ipairs(list) do
+				if c.stats.bulletspeed ~= list[1].stats.bulletspeed then sameSpeed = false break end
+			end
+			bestName = list[1].name
+			if #list > 1 then
+				bestName = bestName .. (sameSpeed and (" (+" .. (#list - 1) .. ", same speed)")
+					or (" (+" .. (#list - 1) .. " unsure)"))
+			end
+			bestStats = list[1].stats
+		end
+	end
+
+	heldName = bestName or "-"
+	heldStats = bestStats
+	return heldName, heldStats
+end
+
+-- Where to aim so the bullet ARRIVES at the target, rather than where the target
+-- is now. Two iterations is plenty: the flight time changes the lead, the lead
+-- barely changes the flight time.
+local velTrack = {}           -- name -> { pos, t, vel }
+
+local function trackVelocity(name, pos)
+	local now = os.clock()
+	local e = velTrack[name]
+	if not e then
+		velTrack[name] = { pos = pos, t = now, vel = Vector3.zero }
+		return Vector3.zero
+	end
+	local dt = now - e.t
+	if dt > 0.015 then
+		local raw = (pos - e.pos) / dt
+		-- a rebuilt model can jump; anything faster than a sprinting player is
+		-- replication noise, not movement
+		if raw.Magnitude < 120 then
+			e.vel = e.vel * 0.6 + raw * 0.4
+		end
+		e.pos, e.t = pos, now
+	end
+	return e.vel
+end
+
+-- The bullet speed does not have to be looked up at all: the server echoes our
+-- OWN bullets back to us in `newbullets`, and the payload carries the real
+-- velocity and acceleration. Measured on a live round: 22 of our own shots came
+-- back reading exactly 2800.0 studs/s and -196.2. A measured constant beats a
+-- database entry chosen from ten weapons that share a fire rate, so the lookup
+-- is only the seed until the first shot is fired.
+local measuredSpeed, measuredGravity = 0, nil
+
+local function predictPoint(part, name)
+	local pos = part.Position
+	if not CONFIG.aimPredict then return pos end
+	local speed = measuredSpeed
+	if speed <= 0 then
+		local _, stats = heldWeapon()
+		speed = stats and tonumber(stats.bulletspeed) or 0
+	end
+	if speed <= 0 then return pos end
+	local g = measuredGravity or GRAVITY
+
+	local origin = camera.CFrame.Position
+	local vel = CONFIG.aimLead and trackVelocity(name, pos) or Vector3.zero
+	local aim = pos
+	for _ = 1, 2 do
+		local t = (aim - origin).Magnitude / speed
+		aim = pos + vel * t + Vector3.new(0, g * t * t / 2, 0)
+	end
+	STATE.dropStuds = aim.Y - pos.Y
+	return aim
+end
+
+--------------------------------------------------------------------------------
 -- recoil control that measures itself
 --------------------------------------------------------------------------------
 --
@@ -1366,7 +1644,8 @@ local function aimPass(dt)
 
 	local pos = cf.Position
 	local curPitch, curYaw = pitchNow - prevNY, yawNow - prevNX
-	local want = CFrame.lookAt(pos, pick.part.Position)
+	-- the ARRIVAL point, not the current one: this game's bullets travel and fall
+	local want = CFrame.lookAt(pos, predictPoint(pick.part, pick.name))
 	local wantPitch, wantYaw = want:ToOrientation()
 
 	local dYaw   = angleDelta(curYaw, wantYaw)
@@ -1451,6 +1730,109 @@ local function aimPass(dt)
 
 	STATE.engaged = true
 end
+
+--------------------------------------------------------------------------------
+-- the hitbox magnet
+--------------------------------------------------------------------------------
+--
+-- NOT a forged packet, and it cannot be one: every message carries a rolling key
+-- that only exists inside the game's Actor VM. What this does instead is move
+-- the GEOMETRY the client grades its own shots against, and then the client
+-- sends the hit itself, with its own key, through its own code path.
+--
+-- Why it is possible at all, measured on a live server:
+--
+--   ReplicationInterface.playerHitCheck sweeps the bullet against
+--   `CharacterHash[partName].CFrame` with a box from DesktopHitBox
+--   (Head 1x1x1 precedence 1, Torso 2x2x1, limbs 1x2x1, radius 0.1) - and that
+--   CFrame belongs to one of the six 0.001-stud anchors sitting in
+--   workspace.Players, which is an ordinary writable Instance.
+--
+--   A single write is undone before the next frame, but a write REPEATED every
+--   frame holds: measured 0.00 studs of deviation both at RenderPriority.Last
+--   and at Heartbeat, which is after the physics step and where the bullets are
+--   walked.
+--
+-- Why it is capped, and why it is not "aim anywhere":
+--
+--   the same function gates on `Math.doesRayIntersectSphere(origin, ray,
+--   entry:getPosition(), 6)` BEFORE any part is considered, and getPosition()
+--   is the replicated body position rather than the part we moved. So a shot
+--   still has to pass within about six studs of the real player. This turns
+--   near misses into hits on the part you chose; it cannot hit somebody behind
+--   you, and a panel that called it silent aim would be lying.
+--
+-- WHETHER THE SERVER ACCEPTS THE RESULT IS NOT PROVEN. The client will happily
+-- report the hit; `bulletHitConfirm` coming back is the only evidence that it
+-- counted, so the page counts those and prints them. It ships OFF, it is in no
+-- preset, and the readout says "unverified" until that counter moves.
+
+local function snapPass()
+	if _G.__SELPF ~= GEN then return end
+	if not CONFIG.snap then return end
+	if CONFIG.snapFiring and not firing() then return end
+
+	local pick = pickTarget()
+	if not pick then return end
+	local info = pick.info
+	local part = (CONFIG.snapPart == "Torso") and (info.parts[2] or info.head) or info.head
+	if not part or not part.Parent then return end
+
+	local cf = camera.CFrame
+	local real = part.Position
+	local dist = (real - cf.Position).Magnitude
+	local onRay = cf.Position + cf.LookVector * dist
+	local delta = onRay - real
+	local cap = math.max(0, CONFIG.snapMax)
+	if delta.Magnitude > cap then delta = delta.Unit * cap end
+	part.CFrame = CFrame.new(real + delta)
+	STATE.snapFrames = STATE.snapFrames + 1
+end
+
+--------------------------------------------------------------------------------
+-- reading the wire, and only reading it
+--------------------------------------------------------------------------------
+--
+-- Nothing is ever sent. Listening is free and answers two things the client
+-- cannot otherwise answer: what we spawned holding, and whether the server
+-- accepted a hit.
+
+local function tapNetwork()
+	local ev = RS:FindFirstChild("RemoteEvent")
+	if not ev then return end
+	ev.OnClientEvent:Connect(function(cmd, a, b, c)
+		if _G.__SELPF ~= GEN then return end
+		if cmd == "bulletHitConfirm" then
+			-- (victim, hitPart, position, damage, headshot, time)
+			STATE.snapHits = STATE.snapHits + 1
+			if b == CONFIG.snapPart then
+				STATE.snapPartHits = STATE.snapPartHits + 1
+			end
+		elseif cmd == "newbullets" and type(a) == "table" and a.player == plr then
+			local bullet = a.bullets and a.bullets[1]
+			if bullet then
+				if typeof(bullet.velocity) == "Vector3" then
+					measuredSpeed = bullet.velocity.Magnitude
+					STATE.bulletSpeed = measuredSpeed
+				end
+				if typeof(bullet.acceleration) == "Vector3" then
+					measuredGravity = math.abs(bullet.acceleration.Y)
+				end
+			end
+		elseif cmd == "newspawn" and a == plr and type(c) == "table" then
+			-- (player, position, loadout) - the loadout is keyed Primary /
+			-- Secondary / Knife / Grenade, each with a Name
+			local set = {}
+			for slot, entry in pairs(c) do
+				if type(entry) == "table" and type(entry.Name) == "string" then
+					set[slot] = entry.Name
+				end
+			end
+			myLoadout = set
+		end
+	end)
+end
+tapNetwork()
 
 --------------------------------------------------------------------------------
 -- trigger
@@ -1607,7 +1989,7 @@ end)
 -- this frame. Anything earlier is simply overwritten and the survival probe
 -- would read zero.
 
-for _, name in ipairs({ "SeluxPFAim", "SeluxPFESP" }) do
+for _, name in ipairs({ "SeluxPFAim", "SeluxPFESP", "SeluxPFSnap" }) do
 	pcall(function() RunService:UnbindFromRenderStep(name) end)
 end
 
@@ -1631,6 +2013,19 @@ RunService:BindToRenderStep("SeluxPFESP", Enum.RenderPriority.Camera.Value + 2,
 		end
 		local ok, err = pcall(renderPass)
 		if not ok then note("esp: " .. tostring(err)) end
+	end)
+
+-- Camera + 3, AFTER the ESP pass on purpose: the boxes are then drawn from the
+-- position the replication last wrote, so switching the magnet on does not make
+-- the ESP jump around with it.
+RunService:BindToRenderStep("SeluxPFSnap", Enum.RenderPriority.Camera.Value + 3,
+	function()
+		if _G.__SELPF ~= GEN then
+			pcall(function() RunService:UnbindFromRenderStep("SeluxPFSnap") end)
+			return
+		end
+		local ok, err = pcall(snapPass)
+		if not ok then note("snap: " .. tostring(err)) end
 	end)
 
 --------------------------------------------------------------------------------
@@ -1731,6 +2126,11 @@ aimCard:Toggle("Sticky target", CONFIG.aimSticky, function(v) CONFIG.aimSticky =
 aimCard:Toggle("Visible only", CONFIG.aimVisible, function(v) CONFIG.aimVisible = v end,
 	"never aim through a wall", UI.theme.good)
 aimCard:Toggle("Show FOV circle", CONFIG.aimCircle, function(v) CONFIG.aimCircle = v end)
+aimCard:Toggle("Compensate bullet drop", CONFIG.aimPredict,
+	function(v) CONFIG.aimPredict = v end,
+	"bullets here fly 2800-2950 studs per second and fall at 196", UI.theme.good)
+aimCard:Toggle("Lead moving targets", CONFIG.aimLead, function(v) CONFIG.aimLead = v end,
+	"aim where they will be when the bullet arrives", UI.theme.good)
 
 local tuneCard = aimPage:Card("TUNING", 2)
 tuneCard:Slider("FOV (pixels)", 5, 600, CONFIG.aimFov, function(v) CONFIG.aimFov = v end)
@@ -1767,6 +2167,30 @@ trgTune:Slider("Pixel FOV", 0, 30, CONFIG.trgFovPx, function(v) CONFIG.trgFovPx 
 trgTune:Slider("Max distance", 50, 2000, CONFIG.trgMaxDist,
 	function(v) CONFIG.trgMaxDist = v end)
 local trgOut = trgTune:Readout(3)
+
+--------------------------------------------------------------- HITBOX
+local snapPage = win:Page("HITBOX", UI.icon.target)
+local snapCard = snapPage:Card("HITBOX MAGNET", 1):Accent()
+snapCard:Toggle("Hitbox magnet", CONFIG.snap, function(v)
+	CONFIG.snap = v
+	STATE.snapFrames, STATE.snapHits, STATE.snapPartHits = 0, 0, 0
+end, "UNVERIFIED against the server - read the note below", UI.theme.bad)
+snapCard:Toggle("Only while firing", CONFIG.snapFiring,
+	function(v) CONFIG.snapFiring = v end,
+	"hold the mouse and it works; otherwise it runs all the time")
+snapCard:Dropdown("Pull towards", { "Head", "Torso" }, CONFIG.snapPart,
+	function(v) CONFIG.snapPart = v end)
+snapCard:Slider("Max pull (studs)", 0, 6, CONFIG.snapMax,
+	function(v) CONFIG.snapMax = v end,
+	"the game only considers a body the shot passed within six studs of")
+snapCard:Label("This is not silent aim and it cannot be: every packet this game "
+	.. "sends carries a rolling key that only exists inside its own Actor VM, so "
+	.. "nothing can be forged. What this moves is the GEOMETRY your own client "
+	.. "grades your shots against - the six 0.001-stud anchors in the enemy "
+	.. "model - and your client then reports the hit itself. It only works on "
+	.. "shots that already pass close to the real body, so it turns near misses "
+	.. "into head hits and nothing more.")
+local snapOut = snapPage:Card("DOES THE SERVER AGREE", 2):Readout(5)
 
 --------------------------------------------------------------- RECOIL
 local rcsPage = win:Page("RECOIL", UI.icon.wave or UI.icon.chart)
@@ -1851,6 +2275,8 @@ task.spawn(function()
 				"churn     " .. STATE.churn .. " models rebuilt per second",
 			}, "\n"))
 
+			local wName, wStats = heldWeapon()
+			STATE.weapon = wName
 			aimOut:set(table.concat({
 				"target    " .. STATE.target
 					.. (STATE.waitMs > 0 and ("   reacting " .. STATE.waitMs .. "ms") or ""),
@@ -1858,6 +2284,31 @@ task.spawn(function()
 					.. (STATE.mouseSens > 0
 						and string.format("   %.5f rad/unit", STATE.mouseSens) or ""),
 				string.format("aim err   %.2f deg", STATE.aimErr),
+				"weapon    " .. wName,
+				"bullet    " .. (STATE.bulletSpeed > 0
+					and string.format("%.0f studs/s (measured from your own shot)",
+						STATE.bulletSpeed)
+					or ((wStats and (tostring(wStats.bulletspeed)
+						.. " studs/s (from the database - fire once to measure it)"))
+						or "unknown")),
+				string.format("drop      aiming %.2f studs high", STATE.dropStuds),
+			}, "\n"))
+
+			local verdict
+			if not CONFIG.snap then
+				verdict = "off"
+			elseif STATE.snapHits == 0 then
+				verdict = "no confirm yet - UNPROVEN"
+			else
+				verdict = STATE.snapPartHits .. " of " .. STATE.snapHits
+					.. " named " .. CONFIG.snapPart
+			end
+			snapOut:set(table.concat({
+				"held      " .. STATE.snapFrames .. " frames",
+				"confirms  " .. STATE.snapHits .. " since switched on",
+				"of those  " .. STATE.snapPartHits .. " named " .. CONFIG.snapPart,
+				"verdict   " .. verdict,
+				"the server confirming a hit is the ONLY evidence this works",
 			}, "\n"))
 
 			trgOut:set(table.concat({
