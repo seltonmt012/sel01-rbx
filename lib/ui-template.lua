@@ -93,7 +93,7 @@ local UI = {}
 -- 3.8: the universal panel's strings entered the dictionaries. The version is
 -- part of the i18n cache filename, so without this bump every client that has
 -- ever opened a panel keeps its old copy and the new controls come up untranslated.
-UI.VERSION = "3.8"
+UI.VERSION = "3.9"
 UI.BRAND = "SELUX"
 UI.DISCORD = "discord.gg/ARdpzFuKMm"
 UI.REPO = "seltonmt012/sel01-rbx"
