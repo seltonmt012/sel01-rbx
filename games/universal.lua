@@ -101,8 +101,22 @@ local GEN = _G.__SELUNI
 --------------------------------------------------------------------------------
 
 local HAS_DRAWING = (Drawing ~= nil and Drawing.new ~= nil)
-local moveMouse = rawget(getfenv(), "mousemoverel")
-if type(moveMouse) ~= "function" then moveMouse = nil end
+
+-- NOT rawget. Measured in Potassium 2026-09-18: a loadstring'd script's env
+-- carries a metatable and the executor globals arrive through its __index, so
+-- `rawget(getfenv(), "mousemoverel")` is nil for a function that is right there
+-- (`getfenv()["mousemoverel"]` and a plain `mousemoverel` both find it). This
+-- file had the rawget form, so moveMouse was nil, deliverMode() could never
+-- return "Mouse", and in every game that rebuilds its own camera the aim assist
+-- silently did nothing while the panel honestly reported "Camera".
+local moveMouse
+for _, get in ipairs({
+	function() return getgenv and getgenv()["mousemoverel"] or nil end,
+	function() return getfenv()["mousemoverel"] end,
+}) do
+	local ok, v = pcall(get)
+	if ok and type(v) == "function" then moveMouse = v break end
+end
 
 --------------------------------------------------------------------------------
 -- config

@@ -23,6 +23,17 @@
       "note": "The fallback the loader runs when no other entry matches this place. Deliberately has NO places and NO detect, so pick() can never select it - loadGame reaches it by alias from the dispatch. ESP over Drawing plus a camera-side aim assist, both of which need no remote and no per-game knowledge. noqueue because a script that fits every game is the last one that should follow you into the next. Team detection is a chain (Player.Team, Team attribute, TeamColor, nameplate colour), each link sanity-checked and the first that holds up wins"
     },
     {
+      "alias": "phantomforces",
+      "name": "Phantom Forces",
+      "file": "games/phantomforces.lua",
+      "places": [
+        292439477
+      ],
+      "status": "ok",
+      "note": "FREE. The first game here that fights being read: the Players SERVICE is renamed (game.Players throws), the DataModel, the two team folders, every character model and every part carry random names, and the models are destroyed and rebuilt ~3.5 times a second. Player.Character and Player.Team are nil for everyone. Identity comes out of NameTagGui.PlayerTag inside each model, the part that tag hangs on IS the head, and the team comes from the leaderboard GUI. Camera writes are thrown away within a frame, so the aim assist delivers through mousemoverel and learns the sensitivity from the player's own hand. No remote is fired: the whole client runs in an Actor VM and every send carries a rolling key that only exists in there",
+      "detect": "local rs = game:GetService('ReplicatedStorage') local c = rs:FindFirstChild('Content') local pc = c and c:FindFirstChild('ProductionContent') return rs:FindFirstChild('ReadyEvent') ~= nil and rs:FindFirstChild('PlayerDataEvent') ~= nil and pc ~= nil and pc:FindFirstChild('WeaponDatabase') ~= nil"
+    },
+    {
       "alias": "islandescape",
       "name": "Mrbeast Island Escape",
       "file": "games/islandescape.lua",

@@ -1,0 +1,1956 @@
+--[[ phantomforces.lua - Phantom Forces (StyLiS Studios), place 292439477
+
+  ESP, aim assist and a trigger for the one shooter in this hub that actively
+  fights being read. Nothing here fires a remote, requires a module or touches
+  the game's Actor VM: every value below comes out of Instances, and the two
+  inputs go through the real mouse.
+
+  ============================================================================
+  WHAT PHANTOM FORCES DOES TO SCRIPTS, all measured 2026-09-18 on a live server
+  ============================================================================
+
+  1. EVERY NAME IS A RANDOM STRING, including the ones you would never check.
+     `game.Players` THROWS - "Players is not a valid member of DataModel" -
+     because the service is renamed (`hUfmmK^` that session). The DataModel
+     itself reads `Ugc` one minute and `JM[RzIP7lZf` the next. The team folders,
+     the character models and every part in them are random too.
+
+     So: `game:GetService(...)` everywhere, never `game.X`, and nothing in this
+     file looks anything up by name except the handful of REAL names the game
+     cannot obfuscate because its own GUI templates use them (`NameTagGui`,
+     `PlayerTag`, the HUD labels).
+
+  2. THERE IS NO ROBLOX CHARACTER. `Player.Character` is nil for everybody,
+     `Player.Team` is nil and the Teams service is EMPTY. The real bodies are
+     Models in `workspace.Players.<team folder>.<model>`, and each one is six
+     parts of 0.001 studs (the replicated skeleton) plus a folder of ~18
+     MeshParts (what you actually see).
+
+  3. THE MODELS ARE DESTROYED AND REBUILT CONSTANTLY. Measured with
+     ChildAdded/ChildRemoved on both folders: 55 adds and 52 removes in 15
+     seconds with 15 players on the server. A model reference is worthless
+     within a few seconds, so nothing here caches one: the ESP pool is keyed by
+     PLAYER NAME and the world is re-enumerated every frame. Cheap - two
+     folders, fifteen models.
+
+  4. THE IDENTITY IS IN THE NAMETAG, AND SO IS THE HEAD. Every model carries a
+     `NameTagGui` BillboardGui whose `PlayerTag` TextLabel holds the real player
+     name - both teams, whether the tag is visible or not. And the PART IT HANGS
+     ON IS THE HEAD: verified against the six parts sorted by height, the tag
+     holder was the topmost every time. That is the whole rig problem solved
+     without a single name match.
+
+  5. HEALTH DOES NOT REPLICATE RELIABLY. The nametag has a `Health` frame with a
+     `Percent` bar, and it is present on some reads and absent on others - 15
+     tags in one sweep, zero of them carrying it. So this script shows health
+     WHEN THE GAME ITSELF PUBLISHES IT and draws nothing otherwise, rather than
+     printing a made-up 100.
+
+  6. THE CAMERA FIGHTS BACK. CameraType is Scriptable and the game rebuilds the
+     CFrame from angles it keeps itself. Measured with eight 5 deg writes: the
+     write survives the frame it is made in and is then thrown back - every
+     following sample read 0.01-0.05 deg against the PREVIOUS orientation and
+     ~5 deg against the wanted one. Same shape as BloxStrike, so the delivery
+     default here is MOUSE, not camera. Auto still probes, in case a future
+     update changes it.
+
+  7. `keypress` IS A DEAD STUB. Probed with F13 and counted at
+     UserInputService.InputBegan: keypress 0 arrived, mouse1click 1,
+     VirtualInputManager 1 for both key and button. So the trigger uses
+     mouse1click with a VirtualInputManager fallback, it PROBES which one works
+     at start-up instead of preferring whichever exists, and the panel names the
+     winner - a trigger that cannot fire looks exactly like one that is never
+     armed.
+
+  8. THE CLIENT RUNS IN AN ACTOR VM (getactors 1, getrunningscripts 0, 2702
+     loaded modules). Nothing here needs it. It also means a __namecall hook in
+     the main VM sees none of the game's traffic, so do not go looking for the
+     shot path that way.
+
+  What is NOT in here, on purpose: nothing writes health, position, speed or a
+  hitbox size, and no remote is fired. Phantom Forces validates movement server
+  side and has done for years; the honest camera-and-mouse toolkit is the whole
+  offer.
+]]
+
+local Players          = game:GetService("Players")       -- NEVER game.Players here
+local RunService       = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local GuiService       = game:GetService("GuiService")
+
+local plr    = Players.LocalPlayer
+local camera = workspace.CurrentCamera
+
+workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function()
+	if workspace.CurrentCamera then camera = workspace.CurrentCamera end
+end)
+
+--------------------------------------------------------------------------------
+-- generation guard
+--------------------------------------------------------------------------------
+--
+-- Re-executing does not restart the Lua VM. Every loop and render bind checks
+-- this so last run's ghosts stop themselves.
+
+_G.__SELPF = (_G.__SELPF or 0) + 1
+local GEN = _G.__SELPF
+
+--------------------------------------------------------------------------------
+-- executor capabilities, resolved once
+--------------------------------------------------------------------------------
+
+-- NEVER rawget these. Potassium hands the executor globals out through the
+-- sandbox env's __index metamethod, so `rawget(getfenv(), "mousemoverel")`
+-- returns nil for a function that is right there and callable. That one line
+-- cost the whole aim assist: with moveMouse nil the delivery fell back to the
+-- CAMERA path, which this game throws away within a frame, and the panel
+-- honestly reported "Camera" while the user reported "the aimbot does nothing".
+-- Measured live: 10.30 deg of error converging to 2.62 and then climbing back to
+-- 8.62 - the signature of a write being undone.
+local function globalFn(name)
+	for _, src in ipairs({
+		function() return getgenv and getgenv()[name] or nil end,
+		function() return getfenv()[name] end,
+		function() return _G[name] end,
+	}) do
+		local ok, v = pcall(src)
+		if ok and type(v) == "function" then return v end
+	end
+	return nil
+end
+
+local HAS_DRAWING = (Drawing ~= nil and Drawing.new ~= nil)
+local moveMouse   = globalFn("mousemoverel")
+local clickDown   = globalFn("mouse1press")
+local clickUp     = globalFn("mouse1release")
+local clickOnce   = globalFn("mouse1click")
+local getHui      = globalFn("gethui")
+
+local VIM = nil
+pcall(function() VIM = game:GetService("VirtualInputManager") end)
+
+--------------------------------------------------------------------------------
+-- config
+--------------------------------------------------------------------------------
+
+local CONFIG = {
+	-- targets --------------------------------------------------------------------
+	teamMode   = "Auto",      -- Auto | Everyone
+	teamInvert = false,
+	maxDist    = 2000,
+
+	-- esp ------------------------------------------------------------------------
+	esp        = true,
+	espBox     = true,
+	espBoxFill = false,
+	espName    = true,
+	espInfo    = true,        -- distance
+	espScore   = false,       -- kills/deaths off the leaderboard
+	espHealth  = true,        -- only when the game publishes it, see header (5)
+	espTracer  = false,
+	espHeadDot = false,
+	espSkeleton = false,
+	espVisOnly = false,
+	espDimHidden = true,
+	espTextSize = 13,
+	espFont    = 1,           -- the OS face - the only one hinted for small sizes
+
+	-- chams ----------------------------------------------------------------------
+	chams      = false,
+	chamsFill  = 0.55,
+	chamsOutline = 0.2,
+
+	-- recoil control -------------------------------------------------------------
+	rcs        = false,
+	rcsPct     = 70,          -- how much of the measured kick is taken back
+	rcsMaxDeg  = 4,           -- per-frame clamp, so nothing oscillates
+
+	-- aim ------------------------------------------------------------------------
+	aim        = false,       -- OFF by default: ESP is information, this is input
+	aimActive  = "Hotkey",
+	aimKey     = "MouseButton2",
+	aimPart    = "Head",
+	aimPick    = "Crosshair",
+	aimDeliver = "Mouse",     -- measured: camera writes are thrown away here
+	aimFov     = 110,
+	aimSmoothH = 24,
+	aimSmoothV = 28,
+	aimSticky  = true,
+	aimVisible = true,
+	aimMaxDist = 1200,
+	aimCircle  = true,
+
+	-- trigger --------------------------------------------------------------------
+	trg        = false,
+	trgActive  = "Hotkey",
+	trgKey     = "C",
+	trgHeadOnly = false,
+	trgVisible = true,
+	trgMaxDist = 800,
+	trgDelayMin = 90,
+	trgDelayMax = 180,
+	trgRefire  = 140,
+	trgChance  = 92,
+	trgFovPx   = 4,           -- a single centre ray only ever hits a standing target
+
+	-- humanisation - THIS is the safety ------------------------------------------
+	hum        = true,
+	humReactMin = 90,
+	humReactMax = 190,
+	humRampMs  = 220,
+	humNoise   = 0.4,
+	humNoiseHz = 1.6,
+	humDeadPx  = 3,
+	humMaxDegS = 360,
+	humPanelOff = true,
+	panicKey   = "F1",
+
+	-- colours --------------------------------------------------------------------
+	colEnemy   = Color3.fromRGB(255, 86, 86),
+	colVisible = Color3.fromRGB(120, 235, 140),
+	colText    = Color3.fromRGB(240, 240, 240),
+	colFov     = Color3.fromRGB(255, 255, 255),
+}
+
+local PRESETS = {
+	Legit = { aimSmoothH = 34, aimSmoothV = 40, aimFov = 70, humReactMin = 140,
+		humReactMax = 260, humRampMs = 300, humNoise = 0.5, humDeadPx = 5,
+		humMaxDegS = 200, hum = true, trgDelayMin = 130, trgDelayMax = 240,
+		trgChance = 85 },
+	Normal = { aimSmoothH = 24, aimSmoothV = 28, aimFov = 110, humReactMin = 90,
+		humReactMax = 190, humRampMs = 220, humNoise = 0.4, humDeadPx = 3,
+		humMaxDegS = 360, hum = true, trgDelayMin = 90, trgDelayMax = 180,
+		trgChance = 92 },
+	Raw = { aimSmoothH = 8, aimSmoothV = 9, aimFov = 200, humReactMin = 0,
+		humReactMax = 0, humRampMs = 0, humNoise = 0, humDeadPx = 0,
+		humMaxDegS = 1200, hum = false, trgDelayMin = 0, trgDelayMax = 0,
+		trgChance = 100 },
+}
+
+local STATE = {
+	targets   = 0,
+	alive     = 0,
+	myTeam    = "-",
+	teamNote  = "-",
+	chain     = {},
+	churn     = 0,        -- models rebuilt per second, see header (3)
+	target    = "-",
+	engaged   = false,
+	waitMs    = 0,
+	aimErr    = 0,
+	deliver   = "-",
+	stickPct  = -1,
+	mouseSens = 0,
+	rcsSens   = 0,        -- rad per mouse unit, learned from the player's own hand
+	rcsKick   = 0,        -- the residual left after subtracting the player, in deg
+	clickWay  = "not probed",
+	shots     = 0,
+	hud       = "-",
+	panelOpen = false,
+	note      = "",
+}
+
+local function note(s) STATE.note = tostring(s) end
+
+--------------------------------------------------------------------------------
+-- the world layer: where Phantom Forces keeps its players
+--------------------------------------------------------------------------------
+--
+-- workspace.Players holds exactly two folders with random names - the two teams.
+-- Which folder is which is decided further down by the leaderboard; here we only
+-- read what is there.
+
+local function playersRoot()
+	return workspace:FindFirstChild("Players")
+end
+
+-- The name and the head come out of the same object. Cached per MODEL with weak
+-- keys, which is the only cache shape that survives header (3): a model that has
+-- been rebuilt drops out of the table by itself instead of pinning a dead rig.
+local infoCache = setmetatable({}, { __mode = "k" })
+
+local function modelInfo(model)
+	local hit = infoCache[model]
+	if hit ~= nil then
+		-- the head part can be destroyed while the model lives on
+		if hit.head and hit.head.Parent then return hit end
+		infoCache[model] = nil
+	end
+
+	local tag = model:FindFirstChild("NameTagGui", true)
+	if not tag then return nil end
+	local label = tag:FindFirstChild("PlayerTag")
+	local head  = tag.Parent
+	if not label or not head or not head:IsA("BasePart") then return nil end
+	local name = label.Text
+	if type(name) ~= "string" or name == "" then return nil end
+
+	-- The six parts sorted top down. The tag holder IS the head (verified), the
+	-- lowest is a foot, and that pair is all the box needs.
+	local parts = {}
+	for _, p in ipairs(model:GetChildren()) do
+		if p:IsA("BasePart") then parts[#parts + 1] = p end
+	end
+	table.sort(parts, function(a, b) return a.Position.Y > b.Position.Y end)
+
+	local set = { head = head, parts = parts, name = name, tag = tag }
+	infoCache[model] = set
+	return set
+end
+
+-- Health when the game publishes it, nil when it does not. See header (5) - the
+-- Health frame comes and goes, and inventing a number for the bar would be the
+-- panel lying about what it knows.
+local function healthOf(info)
+	local hf = info.tag and info.tag:FindFirstChild("Health")
+	local pc = hf and hf:FindFirstChild("Percent")
+	if not pc then return nil end
+	local frac = pc.Size.X.Scale
+	if type(frac) ~= "number" or frac ~= frac then return nil end
+	return math.clamp(frac, 0, 1)
+end
+
+-- The lowest part of the rig, for the bottom of the box. Feet are not named, so
+-- it is whichever of the six sits lowest THIS frame - which follows a crouch and
+-- a prone exactly, for free.
+local function footOf(info)
+	local parts = info.parts
+	if not parts or #parts == 0 then return nil end
+	local low = parts[1]
+	for _, p in ipairs(parts) do
+		if p.Parent and p.Position.Y < low.Position.Y then low = p end
+	end
+	return low
+end
+
+--------------------------------------------------------------------------------
+-- which folder is my team: the leaderboard says so, in plain text
+--------------------------------------------------------------------------------
+--
+-- Player.Team is nil and the Teams service is empty, so the team cannot be read
+-- off the Player object at all. What the game does still have to do is show the
+-- human a scoreboard, and that scoreboard is ordinary GUI:
+--
+--   LeaderboardScreenGui.DisplayScoreFrame.Container
+--     DisplayPhantomBoard.DisplayTeamBar.TextTeam   -> "PHANTOMS"
+--     DisplayPhantomBoard.Container.DisplayPlayerScore.TextPlayer -> a name
+--     DisplayGhostBoard   ... the same for "GHOSTS"
+--
+-- So: name -> board for everyone including us, then folder -> board by majority
+-- vote of the names inside it. The vote matters because a model can be mid-swap
+-- (header 3) and answer for nobody; one blank must not flip a whole team.
+--
+-- The GUI is read whether or not it is on screen - Enabled is false most of the
+-- time and the labels are filled in anyway.
+
+local boardOf   = {}          -- player name -> "PHANTOMS" / "GHOSTS"
+local boardStat = {}          -- player name -> { kills, deaths, score, rank }
+local folderTeam = {}         -- folder instance -> board name
+local myBoard   = nil
+local boardAt   = 0
+
+local function readBoards()
+	local gui = plr:FindFirstChild("PlayerGui")
+	gui = gui and gui:FindFirstChild("LeaderboardScreenGui")
+	local frame = gui and gui:FindFirstChild("DisplayScoreFrame")
+	local root  = frame and frame:FindFirstChild("Container")
+	if not root then return false, "no leaderboard gui" end
+
+	local found = {}
+	local stats = {}
+	local boards = 0
+	for _, board in ipairs(root:GetChildren()) do
+		local bar  = board:FindFirstChild("DisplayTeamBar")
+		local name = bar and bar:FindFirstChild("TextTeam")
+		local list = board:FindFirstChild("Container")
+		if name and list then
+			boards = boards + 1
+			local teamName = name.Text
+			for _, row in ipairs(list:GetChildren()) do
+				local who = row:FindFirstChild("TextPlayer", true)
+				if who and who.Text ~= "" then
+					found[who.Text] = teamName
+					local function num(n)
+						local l = row:FindFirstChild(n, true)
+						return l and tonumber((l.Text:gsub("%s", ""))) or 0
+					end
+					stats[who.Text] = { kills = num("TextKills"), deaths = num("TextDeaths"),
+						score = num("TextScore"), rank = num("TextRank") }
+				end
+			end
+		end
+	end
+	if boards == 0 then return false, "leaderboard has no boards" end
+
+	boardOf, boardStat = found, stats
+	myBoard = found[plr.Name]
+	return true, boards .. " boards, " .. (function()
+		local n = 0 for _ in pairs(found) do n = n + 1 end return n
+	end)() .. " players"
+end
+
+local function evaluateTeams()
+	local now = os.clock()
+	if now - boardAt < 1.5 then return end
+	boardAt = now
+
+	local report = {}
+	local ok, why = readBoards()
+	report[#report + 1] = "leaderboard: " .. (ok and why or ("FAILED - " .. why))
+
+	local root = playersRoot()
+	if not root then
+		STATE.chain = report
+		STATE.teamNote = "workspace.Players missing"
+		return
+	end
+
+	-- folder -> team, by majority of the names inside it
+	local newMap = {}
+	for _, folder in ipairs(root:GetChildren()) do
+		local votes, best, bestN = {}, nil, 0
+		local counted = 0
+		for _, model in ipairs(folder:GetChildren()) do
+			local info = modelInfo(model)
+			local b = info and boardOf[info.name]
+			if b then
+				counted = counted + 1
+				votes[b] = (votes[b] or 0) + 1
+				if votes[b] > bestN then best, bestN = b, votes[b] end
+			end
+		end
+		if best then newMap[folder] = best end
+		report[#report + 1] = "folder " .. folder.Name .. ": "
+			.. (best and (best .. " (" .. bestN .. " of " .. counted .. ")")
+				or "no name resolved yet")
+	end
+	folderTeam = newMap
+
+	if myBoard then
+		STATE.myTeam = myBoard
+		STATE.teamNote = "leaderboard"
+		report[#report + 1] = "you are " .. myBoard
+	else
+		-- Dead in the lobby, or the board has not filled in yet. Everyone is a
+		-- target: showing too much is recoverable, going silent in the game the
+		-- script exists for is not.
+		STATE.myTeam = "-"
+		STATE.teamNote = "no side for you - everyone is a target"
+		report[#report + 1] = "you are on no board - everyone is a target"
+	end
+	STATE.chain = report
+end
+
+local function isTarget(folder, info)
+	if info.name == plr.Name then return false end
+	if CONFIG.teamMode == "Everyone" then return true end
+	if not myBoard then return true end
+	local team = folderTeam[folder] or boardOf[info.name]
+	if not team then return true end
+	local hostile = (team ~= myBoard)
+	if CONFIG.teamInvert then hostile = not hostile end
+	return hostile
+end
+
+--------------------------------------------------------------------------------
+-- one entry per NAME, newest model wins
+--------------------------------------------------------------------------------
+--
+-- A rebuild (header 3) leaves the dying model and its replacement in the folder
+-- AT THE SAME TIME, and both carry the same PlayerTag. Read straight out of the
+-- folder, both write the same Drawing set within one frame and the box jumps
+-- between the stale position and the live one several times a second - which is
+-- exactly the "the ESP bugs out when someone goes green" report, and the same
+-- flicker made the aim assist chase a body that had stopped moving.
+--
+-- GetChildren is insertion order, so the LAST model carrying a name is the new
+-- one. Everything downstream - ESP, aim, trigger, chams - goes through here, so
+-- none of them can disagree about who is where.
+
+local snapList, snapAt = {}, 0
+
+local function snapshot()
+	local now = os.clock()
+	if now - snapAt < 0.004 then return snapList end   -- at most once per frame
+	local root = playersRoot()
+	local byName = {}
+	if root then
+		for _, folder in ipairs(root:GetChildren()) do
+			for _, model in ipairs(folder:GetChildren()) do
+				local info = modelInfo(model)
+				if info then
+					info.folder = folder
+					byName[info.name] = info
+				end
+			end
+		end
+	end
+	local list = {}
+	for _, info in pairs(byName) do list[#list + 1] = info end
+	snapList, snapAt = list, now
+	return list
+end
+
+local function eachTarget(fn)
+	for _, info in ipairs(snapshot()) do
+		if isTarget(info.folder, info) then fn(info) end
+	end
+end
+
+--------------------------------------------------------------------------------
+-- churn meter
+--------------------------------------------------------------------------------
+--
+-- Header (3) is the single most surprising thing about this game, so the panel
+-- measures it live rather than quoting the session it was found in. It is also a
+-- health check: if this drops to zero the replication has stopped and the ESP is
+-- drawing a frozen world.
+
+local churnCount, churnAt, churnHooked = 0, os.clock(), {}
+
+local function hookChurn()
+	local root = playersRoot()
+	if not root then return end
+	for _, folder in ipairs(root:GetChildren()) do
+		if not churnHooked[folder] then
+			churnHooked[folder] = true
+			folder.ChildAdded:Connect(function()
+				if _G.__SELPF == GEN then churnCount = churnCount + 1 end
+			end)
+		end
+	end
+end
+
+--------------------------------------------------------------------------------
+-- line of sight
+--------------------------------------------------------------------------------
+--
+-- Measured on this map: 10035 parts, of which 108 are fully transparent AND not
+-- collidable (effect ghosts) and 368 are transparent but collidable (real
+-- invisible walls). Only the first group is excluded - the Arsenal property
+-- test - because an invisible wall still stops a bullet here, and there is no
+-- clip-brush layer like Counter Blox's 210 CLIP parts. Six sample rays to enemy
+-- heads all stopped on opaque collidable geometry, so nothing needed a special
+-- case.
+
+local rayParams = RaycastParams.new()
+rayParams.FilterType = Enum.RaycastFilterType.Exclude
+rayParams.IgnoreWater = true
+
+local filterAt = 0
+local ghosts = {}
+local ghostAt = 0
+local ghostMap = nil
+
+local function rescanGhosts()
+	local map = workspace:FindFirstChild("Map")
+	if not map then return end
+	-- Only when the map model itself was replaced: the scan is ~19 ms over 11k
+	-- descendants, which is fine on a timer and not fine per frame.
+	if map == ghostMap and os.clock() - ghostAt < 30 then return end
+	ghostMap, ghostAt = map, os.clock()
+	local list = {}
+	for _, p in ipairs(map:GetDescendants()) do
+		if p:IsA("BasePart") and p.Transparency >= 1 and not p.CanCollide then
+			list[#list + 1] = p
+		end
+	end
+	ghosts = list
+end
+
+local function refreshFilter()
+	local now = os.clock()
+	if now - filterAt < 1 then return end
+	filterAt = now
+	rescanGhosts()
+
+	local list = {}
+	local root = playersRoot()
+	if root then list[#list + 1] = root end          -- every body, ours included
+	-- The VIEWMODEL. workspace.Camera carries three Models of 21, 9 and 14 parts -
+	-- our own arms and gun, a few studs in front of the ray origin. A bullet does
+	-- not stop on your own weapon, and leaving them in marks every enemy blocked.
+	if camera then list[#list + 1] = camera end
+	for _, name in ipairs({ "Ignore", "Effects", "Debris", "Roots" }) do
+		local f = workspace:FindFirstChild(name)
+		if f then list[#list + 1] = f end
+	end
+	for _, p in ipairs(ghosts) do list[#list + 1] = p end
+	rayParams.FilterDescendantsInstances = list
+end
+
+local function visible(worldPos)
+	local origin = camera.CFrame.Position
+	return workspace:Raycast(origin, worldPos - origin, rayParams) == nil
+end
+
+--------------------------------------------------------------------------------
+-- drawing
+--------------------------------------------------------------------------------
+--
+-- Keyed by PLAYER NAME, not by model and not by Player object: the models are
+-- rebuilt every few seconds (header 3) and a model-keyed pool would allocate a
+-- fresh set of Drawings several times a second per player.
+
+local drawn, pool = {}, {}
+
+-- Last run's objects are still on screen after a re-execute with nothing driving
+-- them. The generation guard stops the LOOP; only this clears the PIXELS.
+if _G.__SELPF_POOL then
+	for _, obj in ipairs(_G.__SELPF_POOL) do pcall(function() obj:Remove() end) end
+end
+_G.__SELPF_POOL = pool
+
+local function make(kind, props)
+	if not HAS_DRAWING then return nil end
+	local ok, obj = pcall(function() return Drawing.new(kind) end)
+	if not ok or not obj then return nil end
+	obj.Visible = false
+	for k, v in pairs(props or {}) do pcall(function() obj[k] = v end) end
+	pool[#pool + 1] = obj
+	return obj
+end
+
+local function objectsFor(name)
+	local set = drawn[name]
+	if set then
+		set.seen = os.clock()
+		return set
+	end
+	set = {
+		outline = make("Square", { Thickness = 3, Filled = false, ZIndex = 1,
+			Color = Color3.new(0, 0, 0), Transparency = 0.6 }),
+		box     = make("Square", { Thickness = 1, Filled = false, ZIndex = 2 }),
+		fill    = make("Square", { Filled = true, ZIndex = 0, Transparency = 0.15 }),
+		hpBg    = make("Square", { Filled = true, ZIndex = 1, Color = Color3.new(0, 0, 0),
+			Transparency = 0.6 }),
+		hp      = make("Square", { Filled = true, ZIndex = 2 }),
+		name    = make("Text", { Size = 13, Center = true, Outline = true, ZIndex = 3 }),
+		info    = make("Text", { Size = 12, Center = true, Outline = true, ZIndex = 3 }),
+		tracer  = make("Line", { Thickness = 1, ZIndex = 1 }),
+		head    = make("Circle", { Thickness = 1, Filled = false, NumSides = 14, ZIndex = 3 }),
+		bones   = {},
+		seen    = os.clock(),
+	}
+	-- five bones: head down the spine to the lowest part, and the four others
+	-- hung off it. The rig has no named limbs, so the skeleton is drawn from the
+	-- six points as they sort, which is honest about what is actually known.
+	for i = 1, 5 do
+		set.bones[i] = make("Line", { Thickness = 1, ZIndex = 2 })
+	end
+	drawn[name] = set
+	return set
+end
+
+-- The set is walked by KEY, never by type. A Drawing is userdata in Potassium,
+-- not a table, so an "is it a table" guard here silently hid nothing at all -
+-- and the symptom is the one that got reported: boxes from a finished match
+-- still on screen next to the live ones, because the only thing that ever
+-- cleared them was never running.
+local DRAW_KEYS = { "outline", "box", "fill", "hpBg", "hp", "name", "info",
+	"tracer", "head" }
+
+local function hideSet(set)
+	for _, k in ipairs(DRAW_KEYS) do
+		local obj = set[k]
+		if obj then pcall(function() obj.Visible = false end) end
+	end
+	if set.bones then
+		for _, b in ipairs(set.bones) do
+			if b then pcall(function() b.Visible = false end) end
+		end
+	end
+end
+
+local function removeSet(set)
+	for _, k in ipairs(DRAW_KEYS) do
+		local obj = set[k]
+		if obj then pcall(function() obj:Remove() end) end
+	end
+	if set.bones then
+		for _, b in ipairs(set.bones) do
+			if b then pcall(function() b:Remove() end) end
+		end
+	end
+end
+
+local function hideAll()
+	for _, set in pairs(drawn) do hideSet(set) end
+end
+
+local fovCircle = make("Circle", { Thickness = 1, NumSides = 48, Filled = false,
+	Transparency = 0.5, ZIndex = 1 })
+
+--------------------------------------------------------------------------------
+-- chams
+--------------------------------------------------------------------------------
+--
+-- A Highlight has to be a real Instance, so the only question is where it lives.
+-- Parented into the character it sits in the Workspace where any client script
+-- can walk onto it; parented to gethui() with Adornee set it renders identically
+-- and is not in the game's tree at all.
+--
+-- The PF twist: the model it is adorned to is destroyed and rebuilt several
+-- times a second (header 3), so the Adornee is re-pointed every frame from the
+-- deduped snapshot. A Highlight whose Adornee was destroyed simply draws
+-- nothing, which is why this looked like "chams that fade out after a second"
+-- on the first build.
+
+local chamsHost = nil
+pcall(function()
+	chamsHost = (getHui and getHui()) or game:GetService("CoreGui")
+end)
+
+local chams = {}
+
+if _G.__SELPF_CHAMS then
+	for _, h in pairs(_G.__SELPF_CHAMS) do pcall(function() h:Destroy() end) end
+end
+_G.__SELPF_CHAMS = chams
+
+local function chamFor(name)
+	local h = chams[name]
+	if h and h.Parent then return h end
+	if not chamsHost then return nil end
+	local ok, made = pcall(function()
+		local x = Instance.new("Highlight")
+		x.Name = "SeluxPF"
+		x.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+		x.Enabled = false
+		x.Parent = chamsHost
+		return x
+	end)
+	if not ok then return nil end
+	chams[name] = made
+	return made
+end
+
+local function hideCham(name)
+	local h = chams[name]
+	if h then pcall(function() h.Enabled = false h.Adornee = nil end) end
+end
+
+local function hideAllChams()
+	for name in pairs(chams) do hideCham(name) end
+end
+
+--------------------------------------------------------------------------------
+-- the box
+--------------------------------------------------------------------------------
+--
+-- Head down to the lowest part, both projected. The projected distance between
+-- them IS the on-screen height, so it scales with range for free and follows a
+-- crouch exactly. Model:GetBoundingBox() is never called - see traps.md, and in
+-- this game it would be measuring six 0.001-stud anchors anyway.
+
+local function screenBox(info)
+	local head = info.head
+	local foot = footOf(info)
+	if not head or not foot or not head.Parent then return nil end
+
+	-- the anchors are 0.001 studs, so the visible head sits about 0.9 studs above
+	-- the head anchor and the soles about 0.1 below the lowest one
+	local top = head.Position + Vector3.new(0, 0.9, 0)
+	local bot = foot.Position - Vector3.new(0, 0.1, 0)
+
+	local sTop = camera:WorldToViewportPoint(top)
+	local sBot = camera:WorldToViewportPoint(bot)
+	-- Z <= 0 is BEHIND the camera; the X/Y reported there is mirrored nonsense
+	if sTop.Z <= 0 or sBot.Z <= 0 then return nil end
+
+	local h = math.abs(sBot.Y - sTop.Y)
+	if h < 1 then return nil end
+	local w = h * 0.52
+	local cx = (sTop.X + sBot.X) / 2
+	return cx - w / 2, math.min(sTop.Y, sBot.Y), w, h
+end
+
+--------------------------------------------------------------------------------
+-- the render pass
+--------------------------------------------------------------------------------
+
+local function centre()
+	local vp = camera.ViewportSize
+	return Vector2.new(vp.X / 2, vp.Y / 2)
+end
+
+local function renderPass()
+	if _G.__SELPF ~= GEN then return end
+	refreshFilter()
+	evaluateTeams()
+	hookChurn()
+
+	local now = os.clock()
+	if now - churnAt >= 1 then
+		STATE.churn = math.floor(churnCount / (now - churnAt) + 0.5)
+		churnCount, churnAt = 0, now
+	end
+
+	local mid = centre()
+	if fovCircle then
+		fovCircle.Visible = CONFIG.aim and CONFIG.aimCircle
+		if fovCircle.Visible then
+			fovCircle.Position = mid
+			fovCircle.Radius = CONFIG.aimFov
+			fovCircle.Color = CONFIG.colFov
+		end
+	end
+
+	if not CONFIG.esp or not HAS_DRAWING then
+		hideAll()
+		hideAllChams()
+		STATE.targets = 0
+		return
+	end
+
+	local camPos = camera.CFrame.Position
+	local root = playersRoot()
+	local seen, live = 0, 0
+	local shownNames = {}
+
+	if root then
+		-- snapshot() is the deduped list: one entry per name, newest model wins.
+		-- Reading the folders directly here is what made the box flicker.
+		for _, info in ipairs(snapshot()) do
+			if info.head.Parent then
+					live = live + 1
+					if isTarget(info.folder, info) then
+						local set = objectsFor(info.name)
+						local dist = (camPos - info.head.Position).Magnitude
+						if dist <= CONFIG.maxDist then
+							local vis = visible(info.head.Position)
+							if vis or not CONFIG.espVisOnly then
+								local x, y, w, h = screenBox(info)
+								if x then
+									seen = seen + 1
+									shownNames[info.name] = true
+									local col = vis and CONFIG.colVisible or CONFIG.colEnemy
+									local alpha = (vis or not CONFIG.espDimHidden) and 1 or 0.45
+									local txt = math.max(12, math.floor(CONFIG.espTextSize))
+
+									if CONFIG.chams then
+										local h = chamFor(info.name)
+										if h then
+											-- re-pointed every frame, because the
+											-- model under it is not the same one
+											-- it was a second ago
+											h.Adornee = info.head.Parent
+											h.FillColor = col
+											h.OutlineColor = col
+											h.FillTransparency = 1 - CONFIG.chamsFill
+											h.OutlineTransparency = CONFIG.chamsOutline
+											h.Enabled = true
+										end
+									else
+										hideCham(info.name)
+									end
+
+									if CONFIG.espBox then
+										set.outline.Position = Vector2.new(x, y)
+										set.outline.Size = Vector2.new(w, h)
+										set.outline.Transparency = 0.6 * alpha
+										set.outline.Visible = true
+										set.box.Position = Vector2.new(x, y)
+										set.box.Size = Vector2.new(w, h)
+										set.box.Color = col
+										set.box.Transparency = alpha
+										set.box.Visible = true
+									end
+									if CONFIG.espBoxFill then
+										set.fill.Position = Vector2.new(x, y)
+										set.fill.Size = Vector2.new(w, h)
+										set.fill.Color = col
+										set.fill.Transparency = 0.15 * alpha
+										set.fill.Visible = true
+									end
+									if CONFIG.espHealth then
+										local frac = healthOf(info)
+										if frac then
+											set.hpBg.Position = Vector2.new(x - 6, y)
+											set.hpBg.Size = Vector2.new(3, h)
+											set.hpBg.Visible = true
+											set.hp.Position = Vector2.new(x - 6, y + h * (1 - frac))
+											set.hp.Size = Vector2.new(3, h * frac)
+											set.hp.Color = Color3.fromRGB(255, 70, 70)
+												:Lerp(Color3.fromRGB(90, 235, 110), frac)
+											set.hp.Visible = true
+										end
+									end
+									if CONFIG.espName then
+										set.name.Text = info.name
+										set.name.Size = txt
+										set.name.Font = CONFIG.espFont
+										set.name.Position = Vector2.new(x + w / 2, y - txt - 2)
+										set.name.Color = CONFIG.colText
+										set.name.Transparency = alpha
+										set.name.Visible = true
+									end
+									if CONFIG.espInfo or CONFIG.espScore then
+										local line = ""
+										if CONFIG.espInfo then
+											line = math.floor(dist) .. "m"
+										end
+										if CONFIG.espScore then
+											local st = boardStat[info.name]
+											if st then
+												line = line .. (line ~= "" and "  " or "")
+													.. st.kills .. "/" .. st.deaths
+											end
+										end
+										set.info.Text = line
+										set.info.Size = math.max(12, txt - 1)
+										set.info.Font = CONFIG.espFont
+										set.info.Position = Vector2.new(x + w / 2, y + h + 1)
+										set.info.Color = CONFIG.colText
+										set.info.Transparency = alpha
+										set.info.Visible = true
+									end
+									if CONFIG.espTracer then
+										set.tracer.From = Vector2.new(mid.X, camera.ViewportSize.Y)
+										set.tracer.To = Vector2.new(x + w / 2, y + h)
+										set.tracer.Color = col
+										set.tracer.Transparency = alpha
+										set.tracer.Visible = true
+									end
+									if CONFIG.espHeadDot then
+										local sp = camera:WorldToViewportPoint(info.head.Position)
+										if sp.Z > 0 then
+											set.head.Position = Vector2.new(sp.X, sp.Y)
+											set.head.Radius = math.max(2, h * 0.075)
+											set.head.Color = col
+											set.head.Transparency = alpha
+											set.head.Visible = true
+										end
+									end
+									if CONFIG.espSkeleton and #info.parts >= 2 then
+										local pts = {}
+										for i, p in ipairs(info.parts) do
+											if p.Parent then
+												local sp = camera:WorldToViewportPoint(p.Position)
+												pts[i] = (sp.Z > 0)
+													and Vector2.new(sp.X, sp.Y) or nil
+											end
+										end
+										for i = 1, 5 do
+											local b = set.bones[i]
+											if b and pts[1] and pts[i + 1] then
+												b.From = pts[1]
+												b.To = pts[i + 1]
+												b.Color = col
+												b.Transparency = alpha
+												b.Visible = true
+											elseif b then
+												b.Visible = false
+											end
+										end
+									end
+								end
+							end
+						end
+					end
+			end
+		end
+	end
+
+	-- Hide whatever did not draw this frame, and retire a name nobody has used
+	-- for half a minute so a long session does not keep a set per player who left.
+	for name, set in pairs(drawn) do
+		if not shownNames[name] then
+			hideSet(set)
+			hideCham(name)
+			if now - (set.seen or now) > 30 then
+				removeSet(set)
+				local h = chams[name]
+				if h then pcall(function() h:Destroy() end) chams[name] = nil end
+				drawn[name] = nil
+			end
+		else
+			set.seen = now
+		end
+	end
+
+	STATE.targets = seen
+	STATE.alive = live
+end
+
+--------------------------------------------------------------------------------
+-- input: keys, and which click actually arrives
+--------------------------------------------------------------------------------
+
+local function keyFromName(name)
+	if type(name) ~= "string" then return nil end
+	-- Indexing an Enum with a name it does not have THROWS instead of returning
+	-- nil, so both lookups are wrapped.
+	local ok, k = pcall(function()
+		if name:sub(1, 11) == "MouseButton" then return Enum.UserInputType[name] end
+		return Enum.KeyCode[name]
+	end)
+	return ok and k or nil
+end
+
+local function hotkeyHeld(name)
+	local k = keyFromName(name)
+	if not k then return false end
+	local ok, held = pcall(function()
+		if typeof(k) == "EnumItem" and k.EnumType == Enum.UserInputType then
+			return UserInputService:IsMouseButtonPressed(k)
+		end
+		return UserInputService:IsKeyDown(k)
+	end)
+	return ok and held or false
+end
+
+local function firing()
+	return UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton1)
+end
+
+-- Probed, never assumed. Measured in Potassium: keypress exists and delivers
+-- NOTHING, and a trigger built on "prefer whatever is present" then counts shots
+-- it never fired. The probe sends one click through each transport in turn and
+-- asks UserInputService which one arrived.
+local clickFn = nil
+
+local function probeClick()
+	local arrived = 0
+	local conn = UserInputService.InputBegan:Connect(function(i)
+		if i.UserInputType == Enum.UserInputType.MouseButton1 then arrived = arrived + 1 end
+	end)
+
+	local function try(label, fn)
+		if clickFn then return end
+		if not fn then return end
+		local before = arrived
+		pcall(fn)
+		task.wait(0.25)
+		if arrived > before then
+			clickFn = fn
+			STATE.clickWay = label
+		end
+	end
+
+	try("mouse1click", clickOnce)
+	try("mouse1press/release", (clickDown and clickUp) and function()
+		clickDown() task.wait(0.03) clickUp()
+	end or nil)
+	try("VirtualInputManager", VIM and function()
+		local m = UserInputService:GetMouseLocation()
+		VIM:SendMouseButtonEvent(m.X, m.Y, 0, true, game, 0)
+		task.wait(0.03)
+		VIM:SendMouseButtonEvent(m.X, m.Y, 0, false, game, 0)
+	end or nil)
+
+	conn:Disconnect()
+	if not clickFn then STATE.clickWay = "NONE WORK - trigger cannot fire" end
+end
+
+--------------------------------------------------------------------------------
+-- aim assist
+--------------------------------------------------------------------------------
+
+local function aimActive()
+	if not CONFIG.aim then return false end
+	if CONFIG.hum and CONFIG.humPanelOff and STATE.panelOpen then return false end
+	if CONFIG.aimActive == "Always" then return true end
+	if CONFIG.aimActive == "While firing" then return firing() end
+	return hotkeyHeld(CONFIG.aimKey)
+end
+
+local function approach(smooth, dt)
+	local base = 1 / math.max(1, smooth)
+	return 1 - (1 - base) ^ math.max(dt * 60, 0.0001)
+end
+
+local function angleDelta(a, b)
+	local d = (b - a) % (math.pi * 2)
+	if d > math.pi then d = d - math.pi * 2 end
+	return d
+end
+
+local noiseX, noiseY, noiseTX, noiseTY, noiseAt = 0, 0, 0, 0, 0
+
+-- A smooth random walk, not per-frame randomness: white noise on a camera reads
+-- as a stutter, a walk reads as a hand.
+local function noiseStep(dt)
+	if not CONFIG.hum or CONFIG.humNoise <= 0 then
+		noiseX, noiseY = 0, 0
+		return 0, 0
+	end
+	local now = os.clock()
+	local period = 1 / math.max(0.1, CONFIG.humNoiseHz)
+	if now - noiseAt > period then
+		noiseAt = now
+		noiseTX, noiseTY = math.random() * 2 - 1, math.random() * 2 - 1
+	end
+	local k = math.clamp(dt / period, 0, 1) * 2
+	noiseX = noiseX + (noiseTX - noiseX) * k
+	noiseY = noiseY + (noiseTY - noiseY) * k
+	local amp = math.rad(CONFIG.humNoise)
+	return noiseX * amp, noiseY * amp
+end
+
+--------------------------------------------------------------------------------
+-- recoil control that measures itself
+--------------------------------------------------------------------------------
+--
+-- No pattern table is read and none is needed. Every frame the camera's own
+-- pitch/yaw change is compared against the RAW mouse movement the player made in
+-- that same frame:
+--
+--   while NOT firing, the ratio of the two IS the effective sensitivity, and it
+--   is averaged continuously - which also survives this game's per-weapon zoom
+--   multiplier, because the estimate simply follows it
+--   while firing, whatever pitch change is left after subtracting
+--   sensitivity x mouseDelta is not the player. That residual is the recoil.
+--
+-- The correction goes out through mousemoverel, not through the camera: a CFrame
+-- write is thrown away here within a frame (header 6), so a camera-side RCS in
+-- this game would do nothing at all.
+--
+-- The aim point measurement that goes with it: the head ANCHOR is exactly the
+-- centre of the visible head mesh (distance 0.00 on three players, mesh
+-- 1.61 x 1.93 x 1.61), so nothing is offset on top of it.
+
+local rawDX, rawDY = 0, 0
+
+UserInputService.InputChanged:Connect(function(i)
+	if _G.__SELPF ~= GEN then return end
+	if i.UserInputType == Enum.UserInputType.MouseMovement then
+		rawDX = rawDX + i.Delta.X
+		rawDY = rawDY + i.Delta.Y
+	end
+end)
+
+local lastPitch, lastYaw = nil, nil
+local sensY, sensP = 0, 0
+local scriptWroteMouse = false
+
+local function rcsPass(pitchNow, yawNow)
+	local dx, dy = rawDX, rawDY
+	rawDX, rawDY = 0, 0
+
+	if lastPitch == nil then
+		lastPitch, lastYaw = pitchNow, yawNow
+		return
+	end
+	local dYaw   = angleDelta(lastYaw, yawNow)
+	local dPitch = pitchNow - lastPitch
+	lastPitch, lastYaw = pitchNow, yawNow
+
+	local shooting = firing()
+
+	-- Learn only on frames the script did not write itself, or the estimate
+	-- learns from our own correction and runs away.
+	if not shooting and not scriptWroteMouse then
+		if math.abs(dx) >= 2 then
+			local s = -dYaw / dx
+			if s == s and s > 0 and s < 0.1 then
+				sensY = (sensY == 0) and s or (sensY * 0.9 + s * 0.1)
+			end
+		end
+		if math.abs(dy) >= 2 then
+			local s = -dPitch / dy
+			if s == s and s > 0 and s < 0.1 then
+				sensP = (sensP == 0) and s or (sensP * 0.9 + s * 0.1)
+			end
+		end
+	end
+	scriptWroteMouse = false
+	STATE.rcsSens = sensP
+
+	if not CONFIG.rcs or not moveMouse or sensP == 0 or not shooting then
+		STATE.rcsKick = 0
+		return
+	end
+
+	local residual = dPitch + sensP * dy
+	STATE.rcsKick = math.deg(residual)
+	-- Only an UPWARD kick is taken back. Pulling the view up when the recoil
+	-- happens to settle downwards is not compensation, it is a second recoil.
+	if residual <= 0 then return end
+
+	local take = math.clamp(residual * CONFIG.rcsPct / 100, 0,
+		math.rad(math.max(0.1, CONFIG.rcsMaxDeg)))
+	local move = take / sensP
+	if math.abs(move) >= 1 then
+		scriptWroteMouse = true
+		pcall(function() moveMouse(0, math.floor(move + 0.5)) end)
+	end
+end
+
+-- The aim point. There is no separate hitbox rig in this game - the six anchors
+-- ARE what replicates - so Head is the tag holder and Torso is the part below it.
+local function aimPointOf(info)
+	if CONFIG.aimPart == "Torso" then
+		return info.parts[2] or info.head
+	end
+	if CONFIG.aimPart == "Nearest" then
+		local mid = centre()
+		local best, bestD
+		for _, p in ipairs({ info.head, info.parts[2] }) do
+			if p and p.Parent then
+				local sp = camera:WorldToViewportPoint(p.Position)
+				if sp.Z > 0 then
+					local d = (Vector2.new(sp.X, sp.Y) - mid).Magnitude
+					if not bestD or d < bestD then best, bestD = p, d end
+				end
+			end
+		end
+		return best or info.head
+	end
+	return info.head
+end
+
+local function pickTarget()
+	local mid = centre()
+	local camPos = camera.CFrame.Position
+	local best, bestScore
+
+	eachTarget(function(info)
+		local part = aimPointOf(info)
+		if not part or not part.Parent then return end
+		local dist = (camPos - info.head.Position).Magnitude
+		if dist > CONFIG.aimMaxDist then return end
+		local sp = camera:WorldToViewportPoint(part.Position)
+		if sp.Z <= 0 then return end
+		local px = (Vector2.new(sp.X, sp.Y) - mid).Magnitude
+		if px > CONFIG.aimFov then return end
+		if CONFIG.aimVisible and not visible(part.Position) then return end
+		local score = px
+		if CONFIG.aimPick == "Closest" then score = dist end
+		if not bestScore or score < bestScore then
+			best, bestScore = { name = info.name, part = part, px = px, info = info }, score
+		end
+	end)
+	return best
+end
+
+--------------------------------------------------------------------------------
+-- delivery
+--------------------------------------------------------------------------------
+--
+-- MOUSE is the default here and it is not a guess: eight camera writes of 5 deg
+-- each were thrown back to the previous orientation within a frame (header 6).
+-- The probe still runs, so Auto is honest if the game ever changes, and the
+-- dropdown lets the CHECK page's reading be overruled.
+
+local leftYaw = nil
+local pendYaw, pendPitch = 0, 0       -- requested and not yet seen in the view
+local lastAimYaw, lastAimPitch = nil, nil
+local stickHits, stickMiss = 0, 0
+local mouseSensY, mouseSensP = 0, 0
+local askedX, askedY = 0, 0
+local preYaw, prePitch = nil, nil
+
+local function deliverMode()
+	if CONFIG.aimDeliver == "Mouse"  then return moveMouse and "Mouse" or "Camera" end
+	if CONFIG.aimDeliver == "Camera" then return "Camera" end
+	if not moveMouse then return "Camera" end
+	local n = stickHits + stickMiss
+	if n < 90 then return "Camera" end
+	STATE.stickPct = math.floor(stickHits / n * 100)
+	return (STATE.stickPct >= 50) and "Camera" or "Mouse"
+end
+
+local stickyName, lockedAt, reactUntil = nil, 0, 0
+local lastNX, lastNY = 0, 0
+
+local function aimPass(dt)
+	if _G.__SELPF ~= GEN then return end
+	STATE.engaged = false
+
+	local cf = camera.CFrame
+	local pitchNow, yawNow = cf:ToOrientation()
+
+	-- Runs every frame, aim or no aim: it has to keep learning the sensitivity
+	-- while the player is just walking around, or there is nothing to subtract
+	-- the recoil from when the shooting starts.
+	pcall(rcsPass, pitchNow, yawNow)
+
+	-- book-keeping for the dead-time compensation below
+	if lastAimYaw ~= nil then
+		pendYaw   = (pendYaw   - angleDelta(lastAimYaw, yawNow)) * 0.5
+		pendPitch = (pendPitch - (pitchNow - lastAimPitch)) * 0.5
+	end
+	lastAimYaw, lastAimPitch = yawNow, pitchNow
+
+	if leftYaw ~= nil then
+		local drift = math.abs(math.deg(angleDelta(leftYaw, yawNow)))
+		if drift < 0.12 then stickHits = stickHits + 1 else stickMiss = stickMiss + 1 end
+		if stickHits + stickMiss > 600 then
+			stickHits, stickMiss = math.floor(stickHits / 2), math.floor(stickMiss / 2)
+		end
+		leftYaw = nil
+	end
+
+	-- Learn what one mouse unit is worth from the request made last frame. The
+	-- player's sensitivity is unknowable from the client, and this game has a
+	-- per-weapon zoom multiplier on top, so it is measured continuously rather
+	-- than set once.
+	if preYaw ~= nil and (math.abs(askedX) >= 1 or math.abs(askedY) >= 1) then
+		if math.abs(askedX) >= 1 then
+			local s = -angleDelta(preYaw, yawNow) / askedX
+			if s == s and s > 0 and s < 0.1 then
+				mouseSensY = (mouseSensY == 0) and s or (mouseSensY * 0.85 + s * 0.15)
+			end
+		end
+		if math.abs(askedY) >= 1 then
+			local s = -(pitchNow - prePitch) / askedY
+			if s == s and s > 0 and s < 0.1 then
+				mouseSensP = (mouseSensP == 0) and s or (mouseSensP * 0.85 + s * 0.15)
+			end
+		end
+		STATE.mouseSens = mouseSensY
+	end
+	askedX, askedY = 0, 0
+	preYaw, prePitch = nil, nil
+
+	local prevNX, prevNY = lastNX, lastNY
+	lastNX, lastNY = 0, 0
+
+	if not aimActive() then
+		STATE.target, STATE.waitMs, stickyName = "-", 0, nil
+		return
+	end
+
+	local nowMs = os.clock() * 1000
+	local pick
+
+	-- Sticky is by NAME, because the model it was locked onto may have been
+	-- rebuilt since the last frame (header 3) - a model-keyed lock would break
+	-- several times a second on its own.
+	if CONFIG.aimSticky and stickyName then
+		eachTarget(function(info)
+			if pick or info.name ~= stickyName then return end
+			local part = aimPointOf(info)
+			if not part or not part.Parent then return end
+			local sp = camera:WorldToViewportPoint(part.Position)
+			if sp.Z <= 0 then return end
+			local px = (Vector2.new(sp.X, sp.Y) - centre()).Magnitude
+			if px > CONFIG.aimFov * 1.35 then return end
+			if CONFIG.aimVisible and not visible(part.Position) then return end
+			pick = { name = info.name, part = part, px = px, info = info }
+		end)
+	end
+
+	if not pick then
+		pick = pickTarget()
+		if pick and pick.name ~= stickyName then
+			local lo = math.min(CONFIG.humReactMin, CONFIG.humReactMax)
+			local hi = math.max(CONFIG.humReactMin, CONFIG.humReactMax)
+			reactUntil = (CONFIG.hum and hi > 0) and (nowMs + math.random(lo, hi)) or 0
+			lockedAt = nowMs
+		end
+	end
+
+	if not pick or not pick.part or not pick.part.Parent then
+		STATE.target, STATE.waitMs, stickyName = "-", 0, nil
+		return
+	end
+	stickyName = pick.name
+	STATE.target = pick.name
+
+	if reactUntil > nowMs then
+		STATE.waitMs = math.floor(reactUntil - nowMs)
+		return
+	end
+	STATE.waitMs = 0
+
+	local smoothH, smoothV = CONFIG.aimSmoothH, CONFIG.aimSmoothV
+	if CONFIG.hum and CONFIG.humRampMs > 0 then
+		local age = nowMs - lockedAt
+		if age < CONFIG.humRampMs then
+			local slow = 3 - 2 * (age / CONFIG.humRampMs)
+			smoothH, smoothV = smoothH * slow, smoothV * slow
+		end
+	end
+
+	local pos = cf.Position
+	local curPitch, curYaw = pitchNow - prevNY, yawNow - prevNX
+	local want = CFrame.lookAt(pos, pick.part.Position)
+	local wantPitch, wantYaw = want:ToOrientation()
+
+	local dYaw   = angleDelta(curYaw, wantYaw)
+	local dPitch = angleDelta(curPitch, wantPitch)
+
+	-- The honest self-measurement: a game that overrides the view leaves this
+	-- high however the sliders are set, and the CHECK page prints it rather than
+	-- claiming the assist works.
+	local errDeg = math.deg(math.sqrt(dYaw * dYaw + dPitch * dPitch))
+	STATE.aimErr = (STATE.aimErr == 0) and errDeg or (STATE.aimErr * 0.95 + errDeg * 0.05)
+
+	if CONFIG.hum and CONFIG.humDeadPx > 0 and pick.px <= CONFIG.humDeadPx then
+		dYaw, dPitch = 0, 0
+	end
+
+	local moveYaw   = dYaw   * approach(smoothH, dt)
+	local movePitch = dPitch * approach(smoothV, dt)
+
+	-- The degrees-per-second ceiling. A smoothing divisor is a FRACTION of the
+	-- remaining angle, so at point blank even a slow-looking divisor turns the
+	-- view at a few thousand degrees a second. Capped on yaw and pitch together
+	-- so a diagonal flick is capped like a flat one.
+	if CONFIG.hum and CONFIG.humMaxDegS > 0 then
+		local cap = math.rad(CONFIG.humMaxDegS) * dt
+		local mag = math.sqrt(moveYaw * moveYaw + movePitch * movePitch)
+		if mag > cap and mag > 0 then
+			local k = cap / mag
+			moveYaw, movePitch = moveYaw * k, movePitch * k
+		end
+	end
+
+	local nx, ny = noiseStep(dt)
+	local mode = deliverMode()
+	STATE.deliver = mode
+
+	if mode == "Mouse" then
+		-- WHICH sensitivity estimate to trust, and it is not the obvious one.
+		--
+		-- The assist can learn from its own requests (mouseSensY): ask for N
+		-- units, look at the view next frame, divide. In this game that reads
+		-- LOW - 0.00084 rad per unit against 0.00275 measured from the player's
+		-- own hand - because PF smooths mouse input, so the view is still
+		-- catching up when the sample is taken. Believing it makes every request
+		-- about three times too large, the aim overshoots, corrects back, and the
+		-- result is the crosshair sitting on nobody and twitching: reported as
+		-- "it flickers back and forth and never fully locks".
+		--
+		-- The RCS pass measures the same constant the honest way - the player's
+		-- RAW mouse delta against what the view then did - so that estimate wins
+		-- whenever it exists.
+		local sy = (sensY ~= 0) and sensY or ((mouseSensY ~= 0) and mouseSensY or 0.007)
+		local sp = (sensP ~= 0) and sensP or ((mouseSensP ~= 0) and mouseSensP or sy)
+
+		-- Dead-time compensation. PF does not turn the view in the same frame the
+		-- movement is sent, so asking for the whole remaining angle again on the
+		-- next frame asks twice for the same correction. What was requested and
+		-- has not shown up yet is subtracted, and decays so a request that never
+		-- lands cannot block the next one.
+		moveYaw   = moveYaw   - pendYaw
+		movePitch = movePitch - pendPitch
+		-- positive x turns right and LOWERS yaw; positive y looks down and
+		-- LOWERS pitch - hence the minus on both
+		local dx = -(moveYaw + nx) / sy
+		local dy = -(movePitch + ny) / sp
+		-- The OS rounds sub-pixel requests away, and learning from a move that
+		-- never happened poisons the estimate.
+		if math.abs(dx) >= 1 or math.abs(dy) >= 1 then
+			askedX, askedY = math.floor(dx + 0.5), math.floor(dy + 0.5)
+			preYaw, prePitch = yawNow, pitchNow
+			scriptWroteMouse = true      -- keeps the RCS estimate off this frame
+			pendYaw   = pendYaw   + (moveYaw + nx)
+			pendPitch = pendPitch + (movePitch + ny)
+			pcall(function() moveMouse(askedX, askedY) end)
+		end
+		lastNX, lastNY = 0, 0
+	else
+		lastNX, lastNY = nx, ny
+		camera.CFrame = CFrame.new(pos)
+			* CFrame.fromOrientation(curPitch + movePitch + ny, curYaw + moveYaw + nx, 0)
+		leftYaw = curYaw + moveYaw + nx
+	end
+
+	STATE.engaged = true
+end
+
+--------------------------------------------------------------------------------
+-- trigger
+--------------------------------------------------------------------------------
+--
+-- A real mouse click, so the game's own weapon code runs the shot exactly as it
+-- would for a human. Nothing is fabricated and no remote is fired.
+--
+-- The crosshair is NOT ViewportSize/2 blindly: this client reported the mouse at
+-- (763, 449) on a 1920x1080 viewport with a 58 px GUI inset, so the centre is
+-- taken from the camera's own viewport and the inset is added when the ray is
+-- built from a mouse position. In a locked first-person view the two agree; in
+-- the menu they do not, which is exactly when the trigger must not fire.
+
+local triggerParams = RaycastParams.new()
+triggerParams.FilterType = Enum.RaycastFilterType.Exclude
+triggerParams.IgnoreWater = true
+
+local function triggerActive()
+	if not CONFIG.trg then return false end
+	if CONFIG.hum and CONFIG.humPanelOff and STATE.panelOpen then return false end
+	if CONFIG.trgActive == "Always" then return true end
+	return hotkeyHeld(CONFIG.trgKey)
+end
+
+-- Is an enemy under the crosshair? A single centre ray only ever hits a
+-- stationary target, so the centre point is tested plus a ring of six at
+-- trgFovPx pixels.
+local function underCrosshair()
+	local mid = centre()
+	local camPos = camera.CFrame.Position
+	local best, bestD
+
+	local offsets = { Vector2.new(0, 0) }
+	local r = math.max(0, CONFIG.trgFovPx)
+	if r > 0 then
+		for i = 0, 5 do
+			local a = math.rad(i * 60)
+			offsets[#offsets + 1] = Vector2.new(math.cos(a) * r, math.sin(a) * r)
+		end
+	end
+
+	eachTarget(function(info)
+		local parts = CONFIG.trgHeadOnly and { info.head } or info.parts
+		for _, p in ipairs(parts) do
+			if p and p.Parent then
+				local dist = (camPos - p.Position).Magnitude
+				if dist <= CONFIG.trgMaxDist then
+					local sp = camera:WorldToViewportPoint(p.Position)
+					if sp.Z > 0 then
+						local sv = Vector2.new(sp.X, sp.Y)
+						for _, off in ipairs(offsets) do
+							if (sv - (mid + off)).Magnitude <= math.max(2, CONFIG.trgFovPx) then
+								if (not CONFIG.trgVisible) or visible(p.Position) then
+									if not bestD or dist < bestD then
+										best, bestD = info.name, dist
+									end
+								end
+								break
+							end
+						end
+					end
+				end
+			end
+		end
+	end)
+	return best
+end
+
+local function pullTrigger()
+	if not clickFn then return false end
+	local ok = pcall(clickFn)
+	if ok then STATE.shots = STATE.shots + 1 end
+	return ok
+end
+
+task.spawn(function()
+	-- Its own thread rather than a render bind: it has to task.wait for the
+	-- reaction delay, and a yield inside a render binding is a problem.
+	while _G.__SELPF == GEN do
+		local ok, err = pcall(function()
+			if not triggerActive() then return end
+			local who = underCrosshair()
+			if not who then return end
+			local lo = math.min(CONFIG.trgDelayMin, CONFIG.trgDelayMax)
+			local hi = math.max(CONFIG.trgDelayMin, CONFIG.trgDelayMax)
+			if hi > 0 then task.wait(math.random(lo, hi) / 1000) end
+			-- Re-check AFTER the delay. Without this the trigger fires at where
+			-- the enemy was 90 ms ago, which on a strafing player is a miss and a
+			-- give-away in equal measure.
+			if not triggerActive() then return end
+			if underCrosshair() ~= who then return end
+			if math.random(100) > CONFIG.trgChance then return end
+			pullTrigger()
+			task.wait(math.max(0, CONFIG.trgRefire) / 1000)
+		end)
+		if not ok then note("trigger: " .. tostring(err)) end
+		task.wait(0.01)
+	end
+end)
+
+--------------------------------------------------------------------------------
+-- the round, read off the HUD
+--------------------------------------------------------------------------------
+--
+-- There is no Status folder in this game: the round state is the HUD's own
+-- labels, and they are real names because the game's GUI templates use them.
+
+local function hudRead()
+	local gui = plr:FindFirstChild("PlayerGui")
+	gui = gui and gui:FindFirstChild("HudScreenGui")
+	local main = gui and gui:FindFirstChild("Main")
+	if not main then return nil end
+	local st = main:FindFirstChild("DisplayStatus")
+	local sc = main:FindFirstChild("DisplayRadarScore")
+	sc = sc and sc:FindFirstChild("DisplayMatchScore")
+	local function txt(parent, name)
+		local l = parent and parent:FindFirstChild(name, true)
+		return l and l.Text or "-"
+	end
+	local hp = st and st:FindFirstChild("DisplayHealth")
+	-- the firemode label is rich text: [<font>850 A</font>]
+	local fire = txt(st, "TextFiremode"):gsub("<[^>]->", "")
+	return {
+		hp    = txt(hp, "TextHealth"),
+		mag   = txt(st, "TextMagCount"),
+		spare = txt(st, "TextSpareCount"),
+		nade  = txt(st, "TextGrenadeCount"),
+		fire  = fire,
+		timer = txt(sc, "TextMatchTimer"),
+		mode  = txt(sc, "TextGameMode"),
+	}
+end
+
+--------------------------------------------------------------------------------
+-- panic key
+--------------------------------------------------------------------------------
+
+UserInputService.InputBegan:Connect(function(input, typing)
+	if _G.__SELPF ~= GEN or typing then return end
+	local k = keyFromName(CONFIG.panicKey)
+	if k and input.KeyCode == k then
+		CONFIG.aim = false
+		CONFIG.trg = false
+		note("PANIC - aim and trigger off")
+	end
+end)
+
+--------------------------------------------------------------------------------
+-- render binds
+--------------------------------------------------------------------------------
+--
+-- Camera + 1 and + 2, so both run AFTER whatever the game does to the camera
+-- this frame. Anything earlier is simply overwritten and the survival probe
+-- would read zero.
+
+for _, name in ipairs({ "SeluxPFAim", "SeluxPFESP" }) do
+	pcall(function() RunService:UnbindFromRenderStep(name) end)
+end
+
+RunService:BindToRenderStep("SeluxPFAim", Enum.RenderPriority.Camera.Value + 1,
+	function(dt)
+		if _G.__SELPF ~= GEN then
+			pcall(function() RunService:UnbindFromRenderStep("SeluxPFAim") end)
+			return
+		end
+		local ok, err = pcall(function() aimPass(dt) end)
+		if not ok then note("aim: " .. tostring(err)) end
+	end)
+
+RunService:BindToRenderStep("SeluxPFESP", Enum.RenderPriority.Camera.Value + 2,
+	function()
+		if _G.__SELPF ~= GEN then
+			pcall(function() RunService:UnbindFromRenderStep("SeluxPFESP") end)
+			hideAll()
+			hideAllChams()
+			return
+		end
+		local ok, err = pcall(renderPass)
+		if not ok then note("esp: " .. tostring(err)) end
+	end)
+
+--------------------------------------------------------------------------------
+-- panel
+--------------------------------------------------------------------------------
+
+local UI = (_G.__SEL and _G.__SEL.ui) or loadstring(readfile("ui-template.lua"))()
+
+-- The generation counter stops last run's LOOPS; it does not take last run's
+-- PANEL off the screen. Both halves are needed: the stored handle for the normal
+-- case, the sweep by name for a window whose handle was lost.
+if _G.__SELPF_WIN then pcall(function() _G.__SELPF_WIN:Destroy() end) end
+if UI.sweep then UI.sweep("SeluxPhantomPanel") end
+
+-- BEFORE the panel is built: the controls read their initial value out of CONFIG
+-- as they are created, so they come up on the saved state by themselves.
+UI.config("phantomforces", CONFIG)
+
+local win = UI.Window({
+	name = "SeluxPhantomPanel",
+	title = "SELUX", accentTitle = "PHANTOM", subtitle = "seltonmt",
+})
+_G.__SELPF_WIN = win
+
+local KEYS = { "MouseButton2", "MouseButton1", "LeftShift", "LeftAlt", "LeftControl",
+	"C", "E", "Q", "F", "V", "X", "CapsLock" }
+
+--------------------------------------------------------------- ESP
+local espPage = win:Page("ESP", UI.icon.eye or UI.icon.target)
+
+local espCard = espPage:Card("DRAW", 1):Accent()
+espCard:Toggle("ESP enabled", CONFIG.esp, function(v) CONFIG.esp = v end)
+espCard:Toggle("Box", CONFIG.espBox, function(v) CONFIG.espBox = v end)
+espCard:Toggle("Box fill", CONFIG.espBoxFill, function(v) CONFIG.espBoxFill = v end)
+espCard:Toggle("Name", CONFIG.espName, function(v) CONFIG.espName = v end)
+espCard:Toggle("Distance", CONFIG.espInfo, function(v) CONFIG.espInfo = v end)
+espCard:Toggle("Kills and deaths", CONFIG.espScore, function(v) CONFIG.espScore = v end,
+	"read off the scoreboard, so it works for every player")
+espCard:Toggle("Health bar", CONFIG.espHealth, function(v) CONFIG.espHealth = v end,
+	"only drawn when the game publishes a health value", UI.theme.warn)
+espCard:Toggle("Tracer", CONFIG.espTracer, function(v) CONFIG.espTracer = v end)
+espCard:Toggle("Head dot", CONFIG.espHeadDot, function(v) CONFIG.espHeadDot = v end)
+espCard:Toggle("Skeleton", CONFIG.espSkeleton, function(v) CONFIG.espSkeleton = v end,
+	"the six replicated anchors, joined to the head")
+
+local visCard = espPage:Card("VISIBILITY", 2)
+visCard:Toggle("Visible only", CONFIG.espVisOnly, function(v) CONFIG.espVisOnly = v end,
+	"hide anyone behind a wall completely", UI.theme.warn)
+visCard:Toggle("Dim hidden targets", CONFIG.espDimHidden,
+	function(v) CONFIG.espDimHidden = v end, "draw them faded instead", UI.theme.good)
+visCard:Slider("Max distance", 100, 5000, CONFIG.maxDist, function(v) CONFIG.maxDist = v end)
+visCard:Slider("Text size", 12, 20, CONFIG.espTextSize,
+	function(v) CONFIG.espTextSize = v end,
+	"floored at 12 - below that every Drawing face falls apart")
+
+local colCard = espPage:Card("COLOURS", 1)
+colCard:Colour("Enemy", CONFIG.colEnemy, function(c) CONFIG.colEnemy = c end,
+	"behind a wall")
+colCard:Colour("Visible", CONFIG.colVisible, function(c) CONFIG.colVisible = c end,
+	"line of sight is clear")
+colCard:Colour("Text", CONFIG.colText, function(c) CONFIG.colText = c end)
+colCard:Colour("FOV circle", CONFIG.colFov, function(c) CONFIG.colFov = c end)
+
+local chamCard = espPage:Card("CHAMS", 2)
+chamCard:Toggle("Chams", CONFIG.chams, function(v) CONFIG.chams = v end,
+	"a Highlight on the body, drawn through walls")
+chamCard:Slider("Fill", 0, 1, CONFIG.chamsFill, function(v) CONFIG.chamsFill = v end)
+chamCard:Slider("Outline", 0, 1, CONFIG.chamsOutline,
+	function(v) CONFIG.chamsOutline = v end, "0 is a hard edge, 1 is none")
+chamCard:Label("They take the ESP colour, so a body that goes green has line of "
+	.. "sight. The Highlight lives outside the game's tree and is re-pointed "
+	.. "every frame, because the model under it is rebuilt several times a second.")
+
+local teamCard = espPage:Card("TARGETS", 0)
+teamCard:Dropdown("Team filter", { "Auto", "Everyone" }, CONFIG.teamMode,
+	function(v) CONFIG.teamMode = v end,
+	"Auto reads the scoreboard: Player.Team is nil for everyone in this game")
+teamCard:Toggle("Invert targets", CONFIG.teamInvert, function(v) CONFIG.teamInvert = v end,
+	"use when the split is right but the sides are swapped", UI.theme.warn)
+local teamOut = teamCard:Readout(4)
+
+--------------------------------------------------------------- AIM
+local aimPage = win:Page("AIM", UI.icon.target)
+
+local aimCard = aimPage:Card("ACTIVATION", 1):Accent()
+aimCard:Toggle("Aim assist", CONFIG.aim, function(v) CONFIG.aim = v end)
+aimCard:Dropdown("Trigger", { "Hotkey", "Always", "While firing" }, CONFIG.aimActive,
+	function(v) CONFIG.aimActive = v end)
+aimCard:Dropdown("Aim key", KEYS, CONFIG.aimKey, function(v) CONFIG.aimKey = v end)
+aimCard:Dropdown("Aim at", { "Head", "Torso", "Nearest" }, CONFIG.aimPart,
+	function(v) CONFIG.aimPart = v end)
+aimCard:Dropdown("Pick target by", { "Crosshair", "Closest" }, CONFIG.aimPick,
+	function(v) CONFIG.aimPick = v end)
+aimCard:Dropdown("Delivery", { "Mouse", "Auto", "Camera" }, CONFIG.aimDeliver,
+	function(v) CONFIG.aimDeliver = v end,
+	"measured here: camera writes are thrown away within a frame")
+aimCard:Toggle("Sticky target", CONFIG.aimSticky, function(v) CONFIG.aimSticky = v end)
+aimCard:Toggle("Visible only", CONFIG.aimVisible, function(v) CONFIG.aimVisible = v end,
+	"never aim through a wall", UI.theme.good)
+aimCard:Toggle("Show FOV circle", CONFIG.aimCircle, function(v) CONFIG.aimCircle = v end)
+
+local tuneCard = aimPage:Card("TUNING", 2)
+tuneCard:Slider("FOV (pixels)", 5, 600, CONFIG.aimFov, function(v) CONFIG.aimFov = v end)
+tuneCard:Slider("Smooth H", 1, 100, CONFIG.aimSmoothH,
+	function(v) CONFIG.aimSmoothH = v end, "higher is slower")
+tuneCard:Slider("Smooth V", 1, 100, CONFIG.aimSmoothV, function(v) CONFIG.aimSmoothV = v end)
+tuneCard:Slider("Max distance", 50, 3000, CONFIG.aimMaxDist,
+	function(v) CONFIG.aimMaxDist = v end)
+local aimOut = tuneCard:Readout(3)
+
+--------------------------------------------------------------- TRIGGER
+local trgPage = win:Page("TRIGGER", UI.icon.bolt or UI.icon.target)
+
+local trgCard = trgPage:Card("TRIGGER", 1):Accent()
+trgCard:Toggle("Trigger", CONFIG.trg, function(v) CONFIG.trg = v end)
+trgCard:Dropdown("Activation", { "Hotkey", "Always" }, CONFIG.trgActive,
+	function(v) CONFIG.trgActive = v end)
+trgCard:Dropdown("Trigger key", KEYS, CONFIG.trgKey, function(v) CONFIG.trgKey = v end)
+trgCard:Toggle("Head only", CONFIG.trgHeadOnly, function(v) CONFIG.trgHeadOnly = v end)
+trgCard:Toggle("Visible only", CONFIG.trgVisible, function(v) CONFIG.trgVisible = v end,
+	"never shoot at a wall", UI.theme.good)
+
+local trgTune = trgPage:Card("TIMING", 2)
+trgTune:Slider("Reaction min (ms)", 0, 400, CONFIG.trgDelayMin,
+	function(v) CONFIG.trgDelayMin = v end)
+trgTune:Slider("Reaction max (ms)", 0, 400, CONFIG.trgDelayMax,
+	function(v) CONFIG.trgDelayMax = v end, "a fixed value is a pattern")
+trgTune:Slider("Refire lockout (ms)", 0, 1000, CONFIG.trgRefire,
+	function(v) CONFIG.trgRefire = v end)
+trgTune:Slider("Hit chance (%)", 10, 100, CONFIG.trgChance,
+	function(v) CONFIG.trgChance = v end)
+trgTune:Slider("Pixel FOV", 0, 30, CONFIG.trgFovPx, function(v) CONFIG.trgFovPx = v end,
+	"a single centre ray only ever hits a standing target")
+trgTune:Slider("Max distance", 50, 2000, CONFIG.trgMaxDist,
+	function(v) CONFIG.trgMaxDist = v end)
+local trgOut = trgTune:Readout(3)
+
+--------------------------------------------------------------- RECOIL
+local rcsPage = win:Page("RECOIL", UI.icon.wave or UI.icon.chart)
+local rcsCard = rcsPage:Card("RECOIL CONTROL", 1):Accent()
+rcsCard:Toggle("Recoil control", CONFIG.rcs, function(v) CONFIG.rcs = v end,
+	"pulls back the part of the kick that was not you")
+rcsCard:Slider("Compensation (%)", 0, 100, CONFIG.rcsPct,
+	function(v) CONFIG.rcsPct = v end)
+rcsCard:Slider("Max per frame (deg)", 1, 12, CONFIG.rcsMaxDeg,
+	function(v) CONFIG.rcsMaxDeg = v end, "a clamp, so nothing oscillates")
+rcsCard:Label("No spray pattern is read. Your sensitivity is measured from your "
+	.. "own mouse while you are NOT firing, and while you are, whatever pitch is "
+	.. "left after subtracting your hand is the recoil. Both numbers are below - "
+	.. "if the kick stays at 0.00 during a burst there is nothing to compensate "
+	.. "and this page cannot help.")
+local rcsOut = rcsPage:Card("MEASUREMENT", 2):Readout(4)
+
+--------------------------------------------------------------- HUMAN
+local humPage = win:Page("HUMAN", UI.icon.shield or UI.icon.user)
+local humCard = humPage:Card("HOW HUMAN IT LOOKS", 1):Accent()
+humCard:Label("Nothing in a client can hide where the crosshair was. These "
+	.. "numbers ARE the safety - not obscurity.")
+humCard:Dropdown("Preset", { "Legit", "Normal", "Raw" }, "Normal", function(v)
+	local set = PRESETS[v]
+	if not set then return end
+	for k, val in pairs(set) do CONFIG[k] = val end
+	note("preset " .. v .. " applied - reopen the panel to see the sliders move")
+end)
+humCard:Toggle("Humanisation", CONFIG.hum, function(v) CONFIG.hum = v end,
+	"reaction delay, wind-up, wander, deadzone and a speed ceiling", UI.theme.good)
+humCard:Toggle("Pause while the panel is open", CONFIG.humPanelOff,
+	function(v) CONFIG.humPanelOff = v end)
+humCard:Slider("Reaction min (ms)", 0, 500, CONFIG.humReactMin,
+	function(v) CONFIG.humReactMin = v end)
+humCard:Slider("Reaction max (ms)", 0, 500, CONFIG.humReactMax,
+	function(v) CONFIG.humReactMax = v end)
+humCard:Slider("Wind-up (ms)", 0, 800, CONFIG.humRampMs, function(v) CONFIG.humRampMs = v end)
+humCard:Slider("Wander (deg)", 0, 3, CONFIG.humNoise, function(v) CONFIG.humNoise = v end)
+humCard:Slider("Deadzone (px)", 0, 30, CONFIG.humDeadPx, function(v) CONFIG.humDeadPx = v end)
+humCard:Slider("Speed ceiling (deg/s)", 30, 1200, CONFIG.humMaxDegS,
+	function(v) CONFIG.humMaxDegS = v end, "the single most important number here",
+	UI.theme.warn)
+humCard:Dropdown("Panic key", { "F1", "F2", "F3", "F4" }, CONFIG.panicKey,
+	function(v) CONFIG.panicKey = v end)
+
+--------------------------------------------------------------- ROUND
+local roundPage = win:Page("ROUND", UI.icon.list or UI.icon.info)
+local roundCard = roundPage:Card("THE MATCH", 1):Accent()
+local roundOut = roundCard:Readout(6)
+local boardCard = roundPage:Card("SCOREBOARD", 2)
+local boardOut = boardCard:Readout(10)
+
+--------------------------------------------------------------- CHECK
+local diagPage = win:Page("CHECK", UI.icon.info or UI.icon.list)
+local diagCard = diagPage:Card("WHAT IS ACTUALLY MEASURED", 1):Accent()
+local diagOut = diagCard:Label("-")
+diagCard:Label("Phantom Forces randomises every instance name and rebuilds the "
+	.. "character models several times a second, so this page shows the things "
+	.. "that would silently stop working: how many models are being read, how "
+	.. "fast they churn, which click transport arrives, and how much of a camera "
+	.. "write survives.")
+
+win:Home()
+win:SetMaster(CONFIG.esp, "ESP running")
+win:OnMaster(function(on) CONFIG.esp = on end)
+win:Refresh()
+
+--------------------------------------------------------------------------------
+-- panel refresh
+--------------------------------------------------------------------------------
+
+task.spawn(function()
+	probeClick()
+	while _G.__SELPF == GEN do
+		local ok, err = pcall(function()
+			STATE.panelOpen = win.open == true
+
+			teamOut:set(table.concat({
+				"you       " .. STATE.myTeam,
+				"source    " .. STATE.teamNote,
+				"bodies    " .. STATE.alive .. " read, " .. STATE.targets .. " drawn",
+				"churn     " .. STATE.churn .. " models rebuilt per second",
+			}, "\n"))
+
+			aimOut:set(table.concat({
+				"target    " .. STATE.target
+					.. (STATE.waitMs > 0 and ("   reacting " .. STATE.waitMs .. "ms") or ""),
+				"delivery  " .. STATE.deliver
+					.. (STATE.mouseSens > 0
+						and string.format("   %.5f rad/unit", STATE.mouseSens) or ""),
+				string.format("aim err   %.2f deg", STATE.aimErr),
+			}, "\n"))
+
+			trgOut:set(table.concat({
+				"click     " .. STATE.clickWay,
+				"shots     " .. STATE.shots,
+				"armed     " .. (triggerActive() and "yes" or "no"),
+			}, "\n"))
+
+			rcsOut:set(table.concat({
+				string.format("sens      %.5f rad per mouse unit", STATE.rcsSens),
+				string.format("kick      %.2f deg left after your hand", STATE.rcsKick),
+				"firing    " .. (firing() and "yes" or "no"),
+				"taking    " .. (CONFIG.rcs and (CONFIG.rcsPct .. "%") or "off"),
+			}, "\n"))
+
+			local hud = hudRead()
+			STATE.hud = hud and (hud.hp .. " hp") or "-"
+			roundOut:set(table.concat({
+				"mode      " .. (hud and hud.mode or "-"),
+				"timer     " .. (hud and hud.timer or "-"),
+				"health    " .. (hud and hud.hp or "-"),
+				"ammo      " .. (hud and (hud.mag .. " / " .. hud.spare) or "-"),
+				"grenades  " .. (hud and hud.nade or "-"),
+				"firemode  " .. (hud and hud.fire or "-"),
+			}, "\n"))
+
+			-- Top of each board. The scoreboard replicates for every player, so
+			-- this is the one number a Phantom Forces player normally cannot see
+			-- without opening the leaderboard mid-firefight.
+			local rows = {}
+			local list = {}
+			for name, st in pairs(boardStat) do
+				list[#list + 1] = { name = name, st = st, team = boardOf[name] or "?" }
+			end
+			table.sort(list, function(a, b) return a.st.score > b.st.score end)
+			for i = 1, math.min(10, #list) do
+				local e = list[i]
+				rows[#rows + 1] = string.format("%-18s %-9s %3d/%-3d %6d",
+					e.name:sub(1, 18), e.team:sub(1, 9), e.st.kills, e.st.deaths, e.st.score)
+			end
+			if #rows == 0 then rows[1] = "scoreboard not readable yet" end
+			boardOut:set(table.concat(rows, "\n"))
+
+			local lines = {
+				"  place    Phantom Forces (" .. tostring(game.PlaceId) .. ")",
+				"  drawing  " .. (HAS_DRAWING and "available" or "MISSING - no ESP"),
+				"  mouse    " .. (moveMouse and "mousemoverel available"
+					or "MISSING - camera path only"),
+				"  click    " .. STATE.clickWay,
+				"  bodies   " .. STATE.alive .. " read, " .. STATE.targets .. " drawn",
+				"  churn    " .. STATE.churn .. " models/s rebuilt",
+				"  delivery " .. STATE.deliver
+					.. (STATE.stickPct >= 0
+						and ("   camera writes survive " .. STATE.stickPct .. "%") or ""),
+				string.format("  aim err  %.2f deg", STATE.aimErr),
+				"  TEAMS",
+			}
+			for _, line in ipairs(STATE.chain) do
+				lines[#lines + 1] = "    " .. line
+			end
+			if STATE.mouseSens > 0 then
+				lines[#lines + 1] = string.format("  mouse    %.5f rad per unit",
+					STATE.mouseSens)
+			end
+			if STATE.note ~= "" then lines[#lines + 1] = "  note     " .. STATE.note end
+			diagOut:set(table.concat(lines, "\n"))
+
+			win:SetStat(1, tostring(STATE.targets), "targets")
+			win:SetStat(2, string.format("%.1f", STATE.aimErr), "aim err")
+			win:SetStat(3, tostring(STATE.shots), "shots")
+			win:SetStatus("PHANTOM FORCES   " .. STATE.targets .. " targets   "
+				.. STATE.myTeam .. "   " .. (CONFIG.aim and ("aim " .. STATE.deliver)
+					or "aim off"))
+		end)
+		if not ok then note("panel: " .. tostring(err)) end
+		task.wait(0.35)
+	end
+end)
+
+--------------------------------------------------------------------------------
+-- debug handle
+--------------------------------------------------------------------------------
+
+_G.__SELPF_DBG = {
+	CONFIG = CONFIG, STATE = STATE, PRESETS = PRESETS,
+	modelInfo = modelInfo, healthOf = healthOf, footOf = footOf,
+	readBoards = readBoards, evaluateTeams = evaluateTeams, isTarget = isTarget,
+	eachTarget = eachTarget, pickTarget = pickTarget, aimPointOf = aimPointOf,
+	visible = visible, screenBox = screenBox, renderPass = renderPass,
+	aimPass = aimPass, deliverMode = deliverMode, underCrosshair = underCrosshair,
+	pullTrigger = pullTrigger, probeClick = probeClick, hudRead = hudRead,
+	boardOf = function() return boardOf end, folderTeam = function() return folderTeam end,
+	drawn = drawn,
+}
+
+print("[selux phantom] gen " .. GEN .. " ready - RightShift for the panel")
