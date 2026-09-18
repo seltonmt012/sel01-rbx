@@ -154,6 +154,7 @@ pcall(function() VIM = game:GetService("VirtualInputManager") end)
 local MODS = _G.__SELPF_MODS or {
 	noRecoil = false, noSpread = false, noSway = false, noEquipTime = false,
 	instantAds = false, rapidFire = false, fireRate = 1200,
+	noBob = false, noSuppression = false, noBolt = false, stability = false,
 }
 _G.__SELPF_MODS = MODS
 
@@ -260,6 +261,24 @@ local function refreshStatOverride()
 	if MODS.noSway then
 		for _, k in ipairs(SWAY_STATS) do o[k] = 0 end
 	end
+	if MODS.noBob then
+		-- the two the client asks for most often of anything: 4720 and 576
+		-- lookups in eight seconds of ordinary play
+		o.swingmod = 0
+		o.aimswingmod = 0
+	end
+	if MODS.noSuppression then
+		o.suppression = 0
+	end
+	if MODS.noBolt then
+		o.requirechamber = false
+		o.bolttime = 0.01
+		o.boltlock = false
+	end
+	if MODS.stability then
+		o.hipfirestability = 1
+		o.aimkickmult = 0
+	end
 	if MODS.noEquipTime then
 		o.equiptime = 0.01
 		o.unequiptime = 0.01
@@ -335,6 +354,7 @@ local CONFIG = {
 	infStamina = false,
 	fullbright = false,
 	noFog      = false,
+	noGrass    = false,
 
 	-- gun mods - these need the FFlag and a rejoin, see the header --------------
 	noRecoil   = false,
@@ -344,6 +364,10 @@ local CONFIG = {
 	instantAds = false,
 	rapidFire  = false,
 	fireRate   = 1200,
+	noBob      = false,
+	noSuppression = false,
+	noBolt     = false,
+	stability  = false,
 
 	-- trigger --------------------------------------------------------------------
 	trg        = false,
@@ -438,6 +462,10 @@ local function syncMods()
 	MODS.instantAds  = CONFIG.instantAds
 	MODS.rapidFire   = CONFIG.rapidFire
 	MODS.fireRate    = CONFIG.fireRate
+	MODS.noBob         = CONFIG.noBob
+	MODS.noSuppression = CONFIG.noSuppression
+	MODS.noBolt        = CONFIG.noBolt
+	MODS.stability     = CONFIG.stability
 	refreshStatOverride()
 end
 
@@ -2076,6 +2104,9 @@ local function worldPass()
 	if CONFIG.noFog then
 		L.FogEnd = 1e6
 	end
+	-- Terrain grass is a single property and costs nothing to flip back, so it is
+	-- not part of the saved-lighting bundle above.
+	pcall(function() workspace.Terrain.Decoration = not CONFIG.noGrass end)
 	if savedLight and not CONFIG.fullbright and not CONFIG.noFog then
 		for k, v in pairs(savedLight) do pcall(function() L[k] = v end) end
 		savedLight = nil
@@ -2487,6 +2518,19 @@ end, "UNVERIFIED - the server may pace shots regardless", UI.theme.warn)
 modCard:Slider("Rapid Fire rate", 200, 3000, CONFIG.fireRate,
 	function(v) CONFIG.fireRate = v syncMods() end)
 
+local modCard2 = modPage:Card("MORE GUN MODS", 1)
+modCard2:Toggle("No Camera Bob", CONFIG.noBob, function(v) CONFIG.noBob = v syncMods() end,
+	"swingmod and aimswingmod - the two values the gun asks for most often")
+modCard2:Toggle("No Suppression", CONFIG.noSuppression,
+	function(v) CONFIG.noSuppression = v syncMods() end,
+	"the screen effect when somebody shoots near you")
+modCard2:Toggle("No Bolt Re-chamber", CONFIG.noBolt,
+	function(v) CONFIG.noBolt = v syncMods() end,
+	"for bolt actions - drops requirechamber and the bolt time")
+modCard2:Toggle("Max Stability", CONFIG.stability,
+	function(v) CONFIG.stability = v syncMods() end,
+	"hipfire stability to 1 and the aim kick multiplier to 0")
+
 local modInfo = modPage:Card("REQUIREMENTS", 2)
 local modOut = modInfo:Readout(5)
 modInfo:Label("This game runs its client in an Actor VM, where nothing can be "
@@ -2526,6 +2570,10 @@ local moveOut = movePage:Card("MEASURED", 2):Readout(3)
 local worldCard = movePage:Card("WORLD", 2)
 worldCard:Toggle("Fullbright", CONFIG.fullbright, function(v) CONFIG.fullbright = v end)
 worldCard:Toggle("No Fog", CONFIG.noFog, function(v) CONFIG.noFog = v end)
+worldCard:Toggle("No Grass", CONFIG.noGrass, function(v) CONFIG.noGrass = v end)
+worldCard:Label("No custom FOV here on purpose: this game rewrites the field of "
+	.. "view every frame for scoping, so forcing a value either gets thrown away "
+	.. "or breaks the zoom.")
 
 --------------------------------------------------------------- RECOIL
 local rcsPage = win:Page("RECOIL", UI.icon.wave or UI.icon.chart)
