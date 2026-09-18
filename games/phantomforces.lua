@@ -237,6 +237,17 @@ local function installHooks()
 		return HOOKS
 	end
 
+	-- NOT INSTALLED, JUST NOT READY. On a fresh join the hub loader runs this
+	-- script before the game's own client has built its objects, so the sweep
+	-- finds nothing - and marking that as "installed" burns the only chance to
+	-- hook anything for the whole session. Measured exactly that way: a join came
+	-- up reading "stats false, recoil on 0 tables" and every gun mod was dead
+	-- with no error anywhere. Leave it retryable instead.
+	if not firearm then
+		HOOKS.note = "waiting for the game's client to finish loading"
+		return HOOKS
+	end
+
 	-- Every gun mod except the recoil is a STAT LOOKUP. The weapon asks
 	-- `getWeaponStat("hipfirespread")` and friends on every shot, so one hook on
 	-- that single method covers spread, sway, equip time and ADS speed at once,
@@ -2740,6 +2751,19 @@ UI.config("phantomforces", CONFIG)
 -- running its code in an Actor VM, which is the normal case on a first join.
 pcall(installHooks)
 pcall(syncMods)
+
+-- Keep trying. The client's objects appear a few seconds into a join, and the
+-- sweep is ~900 ms over half a million tables, so this is a handful of attempts
+-- and then silence - not a poll that runs forever.
+task.spawn(function()
+	local tries = 0
+	while _G.__SELPF == GEN and not HOOKS.installed and tries < 20 do
+		task.wait(3)
+		tries = tries + 1
+		pcall(installHooks)
+		if HOOKS.installed then pcall(syncMods) end
+	end
+end)
 
 local win = UI.Window({
 	name = "SeluxPhantomPanel",
