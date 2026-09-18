@@ -1189,36 +1189,77 @@ end
 local clickFn = nil
 
 local function probeClick()
-	local arrived = 0
-	local conn = UserInputService.InputBegan:Connect(function(i)
-		if i.UserInputType == Enum.UserInputType.MouseButton1 then arrived = arrived + 1 end
+	-- COUNT BULLETS, NOT INPUTS. The obvious probe watches
+	-- UserInputService.InputBegan, and in this game it picks a transport that
+	-- shoots nothing: three `mouse1click` calls arrived at InputBegan and
+	-- produced **0** bullets, while three VirtualInputManager pairs produced 3.
+	-- A trigger built on the input count then reports shots it never fired.
+	--
+	-- The server echoes our own bullets back in `newbullets`, so that is the
+	-- oracle. It costs a few real rounds, which is why it waits until there is a
+	-- gun to fire.
+	-- Both of these are resolved inline rather than through the file's own
+	-- helpers: this function sits ABOVE them, and a Lua local is invisible above
+	-- its own definition - the reference would silently find a nil global.
+	local fired = 0
+	local ev = game:GetService("ReplicatedStorage"):FindFirstChild("RemoteEvent")
+	local conn = ev and ev.OnClientEvent:Connect(function(cmd, a)
+		if cmd == "newbullets" and type(a) == "table" and a.player == plr then
+			fired = fired + 1
+		end
 	end)
+
+	local function ownHealth()
+		local gui = plr:FindFirstChild("PlayerGui")
+		gui = gui and gui:FindFirstChild("HudScreenGui")
+		local main = gui and gui:FindFirstChild("Main")
+		local st = main and main:FindFirstChild("DisplayStatus")
+		local l = st and st:FindFirstChild("TextHealth", true)
+		return l and tonumber(l.Text) or 0
+	end
+
+	local waited = 0
+	while waited < 60 and ownHealth() <= 0 do
+		task.wait(1)
+		waited = waited + 1
+	end
 
 	local function try(label, fn)
 		if clickFn then return end
 		if not fn then return end
-		local before = arrived
+		local before = fired
 		pcall(fn)
-		task.wait(0.25)
-		if arrived > before then
+		task.wait(0.45)
+		if fired > before then
 			clickFn = fn
 			STATE.clickWay = label
 		end
 	end
 
+	local viaVIM = VIM and function()
+		local m = UserInputService:GetMouseLocation()
+		VIM:SendMouseButtonEvent(m.X, m.Y, 0, true, game, 0)
+		task.wait(0.04)
+		VIM:SendMouseButtonEvent(m.X, m.Y, 0, false, game, 0)
+	end or nil
+
 	try("mouse1click", clickOnce)
 	try("mouse1press/release", (clickDown and clickUp) and function()
 		clickDown() task.wait(0.03) clickUp()
 	end or nil)
-	try("VirtualInputManager", VIM and function()
-		local m = UserInputService:GetMouseLocation()
-		VIM:SendMouseButtonEvent(m.X, m.Y, 0, true, game, 0)
-		task.wait(0.03)
-		VIM:SendMouseButtonEvent(m.X, m.Y, 0, false, game, 0)
-	end or nil)
+	try("VirtualInputManager", viaVIM)
 
-	conn:Disconnect()
-	if not clickFn then STATE.clickWay = "NONE WORK - trigger cannot fire" end
+	if conn then conn:Disconnect() end
+
+	if not clickFn then
+		-- Nothing produced a bullet: out of ammo, a knife in hand, or the window
+		-- was not focused. Fall back to the transport that has been measured to
+		-- work here rather than reporting "the trigger cannot fire", and say the
+		-- reading is unverified so nobody reads it as a proven answer.
+		clickFn = viaVIM
+		STATE.clickWay = viaVIM and "VirtualInputManager (unverified)"
+			or "NONE WORK - trigger cannot fire"
+	end
 end
 
 --------------------------------------------------------------------------------
