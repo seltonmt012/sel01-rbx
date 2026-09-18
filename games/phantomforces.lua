@@ -2309,6 +2309,16 @@ end)
 -- the rising edge rather than assumed to be 128 - it is a map property and a
 -- constant here would be wrong on the next one.
 
+-- The map's real gravity, read ONCE at load and never written. Capturing it on
+-- the rising edge of the toggle looked tidier and was a trap: if anything had
+-- already zeroed it - a crashed run, a test, a second copy of the script - then
+-- 0 is what gets "restored", and the player is left unable to jump or fall with
+-- the feature switched OFF. That shipped and had to be undone by hand.
+-- and NOT read once at load either: a fresh join starts on Roblox's default
+-- 196.2 and Phantom Forces sets its own 128 a moment later, so a value captured
+-- at load is simply the wrong one. This is observed continuously instead - the
+-- last non-zero gravity seen while flight was off is by definition the map's.
+local BASE_GRAVITY = (workspace.Gravity > 0) and workspace.Gravity or 128
 local flyGravity = nil
 local FLY_KEYS = {
 	{ Enum.KeyCode.W, "look" }, { Enum.KeyCode.S, "-look" },
@@ -2318,10 +2328,28 @@ local FLY_KEYS = {
 
 local function restoreGravity()
 	if flyGravity then
-		workspace.Gravity = flyGravity
+		workspace.Gravity = BASE_GRAVITY
 		flyGravity = nil
 	end
 end
+
+-- A safety net that does not depend on the toggle at all: if flight is off and
+-- something has left the map without gravity, put it back. Cheap, and it means a
+-- crashed or replaced run cannot strand the player.
+task.spawn(function()
+	while _G.__SELPF == GEN do
+		if not CONFIG.fly then
+			local g = workspace.Gravity
+			if g > 0 then
+				BASE_GRAVITY = g          -- the map's own value, seen live
+			else
+				workspace.Gravity = BASE_GRAVITY
+				note("gravity was 0 with fly off - restored")
+			end
+		end
+		task.wait(0.5)
+	end
+end)
 
 local function flyPass(dt)
 	if _G.__SELPF ~= GEN then restoreGravity() return end
@@ -2331,13 +2359,15 @@ local function flyPass(dt)
 	local root = obj and obj:getRootPart()
 	if not root or not root.Parent then restoreGravity() return end
 
-	if not flyGravity then flyGravity = workspace.Gravity end
+	flyGravity = true
 	workspace.Gravity = 0
 
 	local cf = camera.CFrame
 	local dir = Vector3.zero
+	local pressed = 0
 	for _, entry in ipairs(FLY_KEYS) do
 		if UserInputService:IsKeyDown(entry[1]) then
+			pressed = pressed + 1
 			local axis = entry[2]
 			local sign = 1
 			if axis:sub(1, 1) == "-" then sign, axis = -1, axis:sub(2) end
@@ -2346,10 +2376,30 @@ local function flyPass(dt)
 			else dir = dir + Vector3.new(0, sign, 0) end
 		end
 	end
-	if dir.Magnitude > 0.01 then
-		root.CFrame = root.CFrame + dir.Unit * (math.max(1, CONFIG.flySpeed) * dt)
+
+	-- HORIZONTAL COMES FROM THE GAME, VERTICAL FROM US. Walking is the movement
+	-- step's own job and it does it well; fighting it with a second offset makes
+	-- the character stutter between two ideas of where it is. What the step will
+	-- not do with gravity off is climb, so only the vertical is added here - and
+	-- it is added as an absolute rate rather than mixed into a normalised
+	-- direction, or holding W alone would drain most of the lift into the walk.
+	local vertical = dir.Y
+	local horizontal = Vector3.new(dir.X, 0, dir.Z)
+	local step = Vector3.zero
+	if math.abs(vertical) > 0.01 then
+		step = step + Vector3.new(0, vertical, 0)
 	end
+	if horizontal.Magnitude > 0.01 and not obj:isGrounded() then
+		-- only once airborne, so ordinary walking is left alone
+		step = step + horizontal.Unit
+	end
+	if step.Magnitude > 0.01 then
+		root.CFrame = root.CFrame + step * (math.max(1, CONFIG.flySpeed) * dt)
+	end
+
 	STATE.flyAlt = root.Position.Y
+	STATE.flyKeys = pressed
+	STATE.flyFrames = (STATE.flyFrames or 0) + 1
 end
 
 local flyConn = RunService.Heartbeat:Connect(function(dt)
@@ -3091,8 +3141,8 @@ task.spawn(function()
 				string.format("speed     %.1f studs/s", STATE.speed),
 				"multiplier " .. (CONFIG.speed and ("x" .. CONFIG.speedMult) or "off"),
 				"character " .. (characterObject() and "reachable" or "not reachable")
-					.. (CONFIG.fly and string.format("   flying at %.0f studs",
-						STATE.flyAlt or 0) or ""),
+					.. (CONFIG.fly and string.format("   fly %.0f studs up, %d keys, %d frames",
+						STATE.flyAlt or 0, STATE.flyKeys or 0, STATE.flyFrames or 0) or ""),
 			}, "\n"))
 
 			local hud = hudRead()
