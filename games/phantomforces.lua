@@ -481,6 +481,8 @@ local CONFIG = {
 	speed      = false,
 	speedMult  = 1.4,
 	infStamina = false,
+	fly        = false,
+	flySpeed   = 60,
 	fullbright = false,
 	noFog      = false,
 	noGrass    = false,
@@ -2290,6 +2292,78 @@ task.spawn(function()
 	end
 end)
 
+--------------------------------------------------------------------------------
+-- flight
+--------------------------------------------------------------------------------
+--
+-- The root part is ANCHORED and the game drives it by CFrame from its own
+-- movement step, so there is no velocity to set. Pushing the CFrame upward
+-- against that step barely works - measured 4.2 studs out of 27.5 asked for, and
+-- it fell straight back - because the step recomputes the fall every frame from
+-- `workspace.Gravity`, which CharacterObject reads live (`local v159 =
+-- -workspace.Gravity`).
+--
+-- Set that to 0 first and the same push holds: the same test went from 2.8 to
+-- 28.0 studs and stayed at 28.0 after letting go, with no correction from the
+-- server. Gravity is restored the moment flight is switched off, and captured on
+-- the rising edge rather than assumed to be 128 - it is a map property and a
+-- constant here would be wrong on the next one.
+
+local flyGravity = nil
+local FLY_KEYS = {
+	{ Enum.KeyCode.W, "look" }, { Enum.KeyCode.S, "-look" },
+	{ Enum.KeyCode.D, "right" }, { Enum.KeyCode.A, "-right" },
+	{ Enum.KeyCode.Space, "up" }, { Enum.KeyCode.LeftControl, "-up" },
+}
+
+local function restoreGravity()
+	if flyGravity then
+		workspace.Gravity = flyGravity
+		flyGravity = nil
+	end
+end
+
+local function flyPass(dt)
+	if _G.__SELPF ~= GEN then restoreGravity() return end
+	if not CONFIG.fly then restoreGravity() return end
+
+	local obj = characterObject()
+	local root = obj and obj:getRootPart()
+	if not root or not root.Parent then restoreGravity() return end
+
+	if not flyGravity then flyGravity = workspace.Gravity end
+	workspace.Gravity = 0
+
+	local cf = camera.CFrame
+	local dir = Vector3.zero
+	for _, entry in ipairs(FLY_KEYS) do
+		if UserInputService:IsKeyDown(entry[1]) then
+			local axis = entry[2]
+			local sign = 1
+			if axis:sub(1, 1) == "-" then sign, axis = -1, axis:sub(2) end
+			if axis == "look" then dir = dir + cf.LookVector * sign
+			elseif axis == "right" then dir = dir + cf.RightVector * sign
+			else dir = dir + Vector3.new(0, sign, 0) end
+		end
+	end
+	if dir.Magnitude > 0.01 then
+		root.CFrame = root.CFrame + dir.Unit * (math.max(1, CONFIG.flySpeed) * dt)
+	end
+	STATE.flyAlt = root.Position.Y
+end
+
+local flyConn = RunService.Heartbeat:Connect(function(dt)
+	local ok, err = pcall(flyPass, dt)
+	if not ok then note("fly: " .. tostring(err)) end
+end)
+
+task.spawn(function()
+	while _G.__SELPF == GEN do task.wait(1) end
+	-- a re-execute must not leave the map without gravity
+	restoreGravity()
+	pcall(function() flyConn:Disconnect() end)
+end)
+
 -- The world settings need no hooks at all and work on a first join. They are
 -- re-applied on a timer because the game writes Lighting itself on a round
 -- change, and captured on the rising edge so switching them off restores what
@@ -2592,6 +2666,16 @@ local KEYS = { "MouseButton2", "MouseButton1", "LeftShift", "LeftAlt", "LeftCont
 	"C", "E", "Q", "F", "V", "X", "CapsLock" }
 
 --------------------------------------------------------------- ESP
+-- Luau allows 200 locals per function and this chunk reached exactly that while
+-- the panel grew. The page and card handles below are only needed while their
+-- page is being built, so the whole section is wrapped in a do-block and their
+-- registers are released at the end of it; the readouts outlive it and are
+-- declared out here.
+local teamOut, aimOut, trgOut, modOut, silOut, moveOut, rcsOut
+local roundOut, boardOut, diagOut
+
+do
+
 local espPage = win:Page("ESP", UI.icon.eye or UI.icon.target)
 
 local espCard = espPage:Card("DRAW", 1):Accent()
@@ -2643,7 +2727,11 @@ teamCard:Dropdown("Team filter", { "Auto", "Everyone" }, CONFIG.teamMode,
 	"Auto reads the scoreboard: Player.Team is nil for everyone in this game")
 teamCard:Toggle("Invert targets", CONFIG.teamInvert, function(v) CONFIG.teamInvert = v end,
 	"use when the split is right but the sides are swapped", UI.theme.warn)
-local teamOut = teamCard:Readout(4)
+teamOut = teamCard:Readout(4)
+
+end
+
+do
 
 --------------------------------------------------------------- AIM
 local aimPage = win:Page("AIM", UI.icon.target)
@@ -2677,7 +2765,11 @@ tuneCard:Slider("Smooth H", 1, 100, CONFIG.aimSmoothH,
 tuneCard:Slider("Smooth V", 1, 100, CONFIG.aimSmoothV, function(v) CONFIG.aimSmoothV = v end)
 tuneCard:Slider("Max distance", 50, 3000, CONFIG.aimMaxDist,
 	function(v) CONFIG.aimMaxDist = v end)
-local aimOut = tuneCard:Readout(3)
+aimOut = tuneCard:Readout(3)
+
+end
+
+do
 
 --------------------------------------------------------------- TRIGGER
 local trgPage = win:Page("TRIGGER", UI.icon.bolt or UI.icon.target)
@@ -2704,7 +2796,11 @@ trgTune:Slider("Pixel FOV", 0, 30, CONFIG.trgFovPx, function(v) CONFIG.trgFovPx 
 	"a single centre ray only ever hits a standing target")
 trgTune:Slider("Max distance", 50, 2000, CONFIG.trgMaxDist,
 	function(v) CONFIG.trgMaxDist = v end)
-local trgOut = trgTune:Readout(3)
+trgOut = trgTune:Readout(3)
+
+end
+
+do
 
 --------------------------------------------------------------- GUN MODS
 local modPage = win:Page("GUN MODS", UI.icon.wrench or UI.icon.bolt)
@@ -2741,7 +2837,7 @@ modCard2:Toggle("Max Stability", CONFIG.stability,
 	"hipfire stability to 1 and the aim kick multiplier to 0")
 
 local modInfo = modPage:Card("REQUIREMENTS", 2)
-local modOut = modInfo:Readout(5)
+modOut = modInfo:Readout(5)
 modInfo:Label("This game runs its client in an Actor VM, where nothing can be "
 	.. "hooked from outside. One Roblox debug flag moves that code onto the main "
 	.. "thread, and then all of the above works. It only takes effect on a fresh "
@@ -2760,6 +2856,10 @@ modInfo:Button("Enable and rejoin this server", function()
 		end)
 	end)
 end, UI.theme.warn)
+
+end
+
+do
 
 --------------------------------------------------------------- SILENT
 local silPage = win:Page("SILENT", UI.icon.sword or UI.icon.target)
@@ -2788,7 +2888,7 @@ silCard:Toggle("Show FOV circle", CONFIG.silentCircle,
 silCard:Colour("FOV colour", CONFIG.colSilentFov,
 	function(c) CONFIG.colSilentFov = c end)
 
-local silOut = silPage:Card("WHAT THE SERVER SEES", 2):Readout(6)
+silOut = silPage:Card("WHAT THE SERVER SEES", 2):Readout(6)
 silPage:Card("HOW THIS ONE WORKS", 2):Label(
 	"It bends the BULLET, it does not claim a hit. The first version replaced the "
 	.. "game's answer to 'what did I hit' - the packets went out correctly and the "
@@ -2798,6 +2898,10 @@ silPage:Card("HOW THIS ONE WORKS", 2):Label(
 	.. "to disagree with. The cost is the opposite of the aimbot's: your camera "
 	.. "never moves, so a killcam shows nothing, but the shot itself sits in the "
 	.. "server's log leaving the barrel at an angle your view never had.")
+
+end
+
+do
 
 --------------------------------------------------------------- MOVEMENT
 local movePage = win:Page("MOVEMENT", UI.icon.run or UI.icon.user)
@@ -2809,10 +2913,15 @@ moveCard:Slider("Speed multiplier", 1, 3, CONFIG.speedMult,
 	"measured: x2.5 asked gives about x1.8 on the ground")
 moveCard:Toggle("Infinite Stamina", CONFIG.infStamina,
 	function(v) CONFIG.infStamina = v end)
+moveCard:Toggle("Fly", CONFIG.fly, function(v) CONFIG.fly = v end,
+	"WASD to move, Space up, Left Ctrl down - sets map gravity to 0 while on",
+	UI.theme.warn)
+moveCard:Slider("Fly speed", 10, 200, CONFIG.flySpeed,
+	function(v) CONFIG.flySpeed = v end)
 moveCard:Label("No super jump: the jump height lives in a config the character "
 	.. "reads once when it spawns, so writing it afterwards changes nothing - "
 	.. "3.3 raised to 14 still measured a 2.9 stud jump.")
-local moveOut = movePage:Card("MEASURED", 2):Readout(3)
+moveOut = movePage:Card("MEASURED", 2):Readout(3)
 
 local worldCard = movePage:Card("WORLD", 2)
 worldCard:Toggle("Fullbright", CONFIG.fullbright, function(v) CONFIG.fullbright = v end)
@@ -2821,6 +2930,10 @@ worldCard:Toggle("No Grass", CONFIG.noGrass, function(v) CONFIG.noGrass = v end)
 worldCard:Label("No custom FOV here on purpose: this game rewrites the field of "
 	.. "view every frame for scoping, so forcing a value either gets thrown away "
 	.. "or breaks the zoom.")
+
+end
+
+do
 
 --------------------------------------------------------------- RECOIL
 local rcsPage = win:Page("RECOIL", UI.icon.wave or UI.icon.chart)
@@ -2836,7 +2949,11 @@ rcsCard:Label("No spray pattern is read. Your sensitivity is measured from your 
 	.. "left after subtracting your hand is the recoil. Both numbers are below - "
 	.. "if the kick stays at 0.00 during a burst there is nothing to compensate "
 	.. "and this page cannot help.")
-local rcsOut = rcsPage:Card("MEASUREMENT", 2):Readout(4)
+rcsOut = rcsPage:Card("MEASUREMENT", 2):Readout(4)
+
+end
+
+do
 
 --------------------------------------------------------------- HUMAN
 local humPage = win:Page("HUMAN", UI.icon.shield or UI.icon.user)
@@ -2866,22 +2983,32 @@ humCard:Slider("Speed ceiling (deg/s)", 30, 1200, CONFIG.humMaxDegS,
 humCard:Dropdown("Panic key", { "F1", "F2", "F3", "F4" }, CONFIG.panicKey,
 	function(v) CONFIG.panicKey = v end)
 
+end
+
+do
+
 --------------------------------------------------------------- ROUND
 local roundPage = win:Page("ROUND", UI.icon.list or UI.icon.info)
 local roundCard = roundPage:Card("THE MATCH", 1):Accent()
-local roundOut = roundCard:Readout(6)
+roundOut = roundCard:Readout(6)
 local boardCard = roundPage:Card("SCOREBOARD", 2)
-local boardOut = boardCard:Readout(10)
+boardOut = boardCard:Readout(10)
+
+end
+
+do
 
 --------------------------------------------------------------- CHECK
 local diagPage = win:Page("CHECK", UI.icon.info or UI.icon.list)
 local diagCard = diagPage:Card("WHAT IS ACTUALLY MEASURED", 1):Accent()
-local diagOut = diagCard:Label("-")
+diagOut = diagCard:Label("-")
 diagCard:Label("Phantom Forces randomises every instance name and rebuilds the "
 	.. "character models several times a second, so this page shows the things "
 	.. "that would silently stop working: how many models are being read, how "
 	.. "fast they churn, which click transport arrives, and how much of a camera "
 	.. "write survives.")
+
+end
 
 win:Home()
 win:SetMaster(CONFIG.esp, "ESP running")
@@ -2963,7 +3090,9 @@ task.spawn(function()
 			moveOut:set(table.concat({
 				string.format("speed     %.1f studs/s", STATE.speed),
 				"multiplier " .. (CONFIG.speed and ("x" .. CONFIG.speedMult) or "off"),
-				"character " .. (characterObject() and "reachable" or "not reachable"),
+				"character " .. (characterObject() and "reachable" or "not reachable")
+					.. (CONFIG.fly and string.format("   flying at %.0f studs",
+						STATE.flyAlt or 0) or ""),
 			}, "\n"))
 
 			local hud = hudRead()

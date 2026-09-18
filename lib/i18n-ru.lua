@@ -8,7 +8,7 @@
 -- they are - they keep passing "Auto rebirth" and only this file decides what
 -- the player reads.
 --
--- 1795 entries.
+-- 1805 entries.
 
 return {
 	["$%s   %s/s   slots %d/%d   R%d   endurance %s"] = "%s$   %s/с   слоты %d/%d   R%d   выносливость %s",
@@ -459,6 +459,7 @@ return {
 	["FOV (pixels)"] = "FOV (пиксели)",
 	["FOV (px)"] = "Поле зрения (px)",
 	["FOV circle"] = "Круг FOV",
+	["FOV colour"] = "Цвет FOV",
 	["FOV mode is the one most people mean by silent aim: the same pixel circle an aim assist uses, and whoever is inside it dies - it plays like an aimbot without the camera moving. Any target drops the circle, the angle and the wall check entirely."] = "FOV - это то, что большинство и называет silent aim: тот же круг в пикселях, что у помощи прицеливания, и кто внутри - умирает. Играется как аимбот, только камера не двигается. Any target убирает круг, угол и проверку стен полностью.",
 	["FOV mode only - the circle around the crosshair a target has to be inside"] = "только в режиме FOV - круг вокруг прицела, внутри которого должна быть цель",
 	["FOV while moving %"] = "FOV в движении %",
@@ -485,6 +486,7 @@ return {
 	["Fixed zone"] = "Фикс. зона",
 	["Flame x1.2 @100K up to Electric x4 @25B"] = "Flame x1.2 @100K до Electric x4 @25B",
 	["Flight wait (s)"] = "Пауза полёта (с)",
+	["Fly speed"] = "Fly Speed",
 	["Follow the plot"] = "Следовать за базой",
 	["Follow world unlocks"] = "Переходить в новые миры",
 	["Font"] = "Шрифт",
@@ -527,6 +529,7 @@ return {
 	["HITBOX"] = "ХИТБОКС",
 	["HITBOX EXPANDER"] = "УВЕЛИЧЕНИЕ ХИТБОКСА",
 	["HOW HUMAN IT LOOKS"] = "НАСКОЛЬКО ЭТО ПОХОЖЕ НА ЧЕЛОВЕКА",
+	["HOW THIS ONE WORKS"] = "КАК ЭТО РАБОТАЕТ",
 	["HUMAN"] = "ЧЕЛОВЕК",
 	["HUMANISE"] = "ОЧЕЛОВЕЧИВАНИЕ",
 	["HUMANISER"] = "ОЧЕЛОВЕЧИВАНИЕ",
@@ -1099,6 +1102,7 @@ return {
 	["Von dieser Verbindung kamen zuletzt zu viele Meldungen, diese wurde NICHT zugestellt. Sie liegt in der Zwischenablage - füg sie im Discord unter #support ein, oder probier es gleich nochmal."] = "С этого соединения недавно пришло слишком много сообщений, это НЕ доставлено. Оно в буфере обмена - вставьте его в #support в Discord или попробуйте снова чуть позже.",
 	["W2 at 5 rebirths + upgrade 10 - this LEAVES the place"] = "W2 на 5 ребёрнах + улучшение 10 - это ПОКИДАЕТ место",
 	["WALLET"] = "КОШЕЛЁК",
+	["WASD to move, Space up, Left Ctrl down - sets map gravity to 0 while on"] = "WASD для движения, пробел вверх, левый Ctrl вниз - пока включено, гравитация карты равна 0",
 	["WEAPON"] = "ОРУЖИЕ",
 	["WEAPONS"] = "ОРУЖИЕ",
 	["WHAT IS ACTUALLY MEASURED"] = "ЧТО ДЕЙСТВИТЕЛЬНО ИЗМЕРЕНО",
@@ -1170,6 +1174,7 @@ return {
 	["a smooth random walk, not per-frame noise - noise reads as a stutter"] = "плавное случайное блуждание, а не шум на кадр - шум выглядит как дёрганье",
 	["a smooth wander, not per-frame randomness - white noise reads as a stutter"] = "плавное блуждание, а не случайность каждый кадр - белый шум выглядит как рывки",
 	["a vote naming you switches every assist off"] = "голосование с твоим именем выключает всю помощь",
+	["a wall still stops the bullet, so bending it into one wastes the shot"] = "стена всё равно останавливает пулю, направлять её туда - потерянный выстрел",
 	["above 15 the server throws the rest away"] = "свыше 15 сервер отбрасывает остаток",
 	["accepts the deal calls"] = "принимает звонки со сделками",
 	["adds velocity to the aim point - most Arsenal guns are hitscan, so off"] = "добавляет скорость к точке прицеливания - большинство пушек Arsenal хитскан, поэтому выкл",
@@ -1368,6 +1373,7 @@ return {
 	["holds one target instead of flicking to whoever is a pixel closer"] = "держит одну цель, а не прыгает на того, кто на пиксель ближе",
 	["holds the body on the win plate and keeps it moving"] = "держит тело на плите побед и в движении",
 	["horizontal; 1 = instant, 50 = about a second, frame rate independent"] = "по горизонтали; 1 = мгновенно, 50 = около секунды, независимо от FPS",
+	["how far from your crosshair a target may be"] = "насколько далеко от прицела может быть цель",
 	["how far off the centre of the hitbox to sit, per engagement"] = "насколько в стороне от центра хитбокса, на каждый бой",
 	["how far the ESP DRAWS - not the weapon range, which is 600"] = "насколько далеко РИСУЕТ ESP - это не дальность оружия, она 600",
 	["how many of the strongest pets survive the cull"] = "сколько сильнейших питомцев переживут чистку",
@@ -1469,6 +1475,7 @@ return {
 	["oben rein, was nicht geht, dann geht es sofort."] = "впишите выше, что не работает - и отправится сразу.",
 	["of the target part's own size - nobody hits the same millimetre twice"] = "от размера самой части цели - никто не попадает дважды в один миллиметр",
 	["off = separate numbers for the rest of the magazine"] = "выкл = свои значения для остального магазина",
+	["off by default - a bad velocity estimate throws the shot further than the lead ever gains"] = "по умолчанию выключено - плохая оценка скорости уводит выстрел сильнее, чем даёт упреждение",
 	["off by default - selling is destructive"] = "по умолчанию выкл - продажа необратима",
 	["off by default because walls were measured NOT to matter to the server"] = "по умолчанию выключено, потому что измерено: серверу стены БЕЗРАЗЛИЧНЫ",
 	["off for knife, grenade and C4 - detected from Ammo/FireRate, not the name"] = "выкл для ножа, гранаты и C4 - определяется по Ammo/FireRate, не по имени",
@@ -1608,6 +1615,7 @@ return {
 	["share of the balance one result may cost"] = "доля баланса, которую может стоить один результат",
 	["share of the measured vertical kick that is taken back out"] = "доля измеренного подброса, которая снимается",
 	["share of the vertical kick that is taken back out"] = "доля вертикальной отдачи, которая компенсируется",
+	["shoot normally, the bullet goes to the target"] = "стреляй как обычно, пуля идёт в цель",
 	["short line showing where that player is actually looking"] = "короткая линия туда, куда игрок реально смотрит",
 	["shows in the readout what it WOULD hit and leaves your shot alone"] = "показывает в панели, во что бы попало, и не трогает твой выстрел",
 	["silent aim off"] = "Сайлент-эйм выключен",

@@ -8,7 +8,7 @@
 -- they are - they keep passing "Auto rebirth" and only this file decides what
 -- the player reads.
 --
--- 1795 entries.
+-- 1805 entries.
 
 return {
 	["$%s   %s/s   slots %d/%d   R%d   endurance %s"] = "%s$   %s/s   Plaetze %d/%d   R%d   Ausdauer %s",
@@ -392,6 +392,7 @@ return {
 	["FOV (pixels)"] = "FOV (Pixel)",
 	["FOV (px)"] = "Sichtfeld (px)",
 	["FOV circle"] = "FOV-Kreis",
+	["FOV colour"] = "FOV-Farbe",
 	["FOV mode is the one most people mean by silent aim: the same pixel circle an aim assist uses, and whoever is inside it dies - it plays like an aimbot without the camera moving. Any target drops the circle, the angle and the wall check entirely."] = "FOV ist das, was die meisten mit Silent Aim meinen: derselbe Pixelkreis, den eine Zielhilfe benutzt, und wer drin ist stirbt - es spielt sich wie ein Aimbot, nur ohne dass die Kamera sich bewegt. Any target lässt Kreis, Winkel und Wandprüfung komplett weg.",
 	["FOV mode only - the circle around the crosshair a target has to be inside"] = "nur im FOV-Modus - der Kreis um das Fadenkreuz, in dem ein Ziel liegen muss",
 	["FOV while moving %"] = "FOV in Bewegung %",
@@ -418,6 +419,7 @@ return {
 	["Fixed zone"] = "Feste Zone",
 	["Flame x1.2 @100K up to Electric x4 @25B"] = "Flame x1.2 @100K bis Electric x4 @25B",
 	["Flight wait (s)"] = "Flugpause (s)",
+	["Fly speed"] = "Fly Speed",
 	["Follow the plot"] = "Dem Plot folgen",
 	["Follow world unlocks"] = "Neuen Welten folgen",
 	["Font"] = "Schrift",
@@ -452,6 +454,7 @@ return {
 	["HATCH & PLACE"] = "BRUETEN & SETZEN",
 	["HITBOX EXPANDER"] = "HITBOX VERGRÖSSERN",
 	["HOW HUMAN IT LOOKS"] = "WIE MENSCHLICH ES AUSSIEHT",
+	["HOW THIS ONE WORKS"] = "WIE DAS HIER FUNKTIONIERT",
 	["HUMAN"] = "MENSCH",
 	["HUMANISE"] = "HUMANISIEREN",
 	["HUMANISER"] = "VERMENSCHLICHUNG",
@@ -945,6 +948,7 @@ return {
 	["Visible only"] = "Nur sichtbare",
 	["W2 at 5 rebirths + upgrade 10 - this LEAVES the place"] = "W2 bei 5 Rebirths + Upgrade 10 - das VERLÄSST den Ort",
 	["WALLET"] = "GELDBEUTEL",
+	["WASD to move, Space up, Left Ctrl down - sets map gravity to 0 while on"] = "WASD zum Bewegen, Leertaste hoch, Strg links runter - setzt die Schwerkraft der Map auf 0 solange es an ist",
 	["WEAPON"] = "WAFFE",
 	["WEAPONS"] = "WAFFEN",
 	["WHAT IS ACTUALLY MEASURED"] = "WAS TATSAECHLICH GEMESSEN WIRD",
@@ -1009,6 +1013,7 @@ return {
 	["a smooth random walk, not per-frame noise - noise reads as a stutter"] = "ein weicher Zufallslauf, kein Rauschen pro Bild - Rauschen wirkt wie ein Zittern",
 	["a smooth wander, not per-frame randomness - white noise reads as a stutter"] = "ein weiches Wandern, kein Zufall pro Frame - weißes Rauschen wirkt wie ein Ruckeln",
 	["a vote naming you switches every assist off"] = "eine Abstimmung die dich nennt schaltet jede Hilfe ab",
+	["a wall still stops the bullet, so bending it into one wastes the shot"] = "eine Wand stoppt die Kugel weiterhin, sie dorthin zu biegen verschenkt den Schuss",
 	["above 15 the server throws the rest away"] = "über 15 wirft der Server den Rest weg",
 	["accepts the deal calls"] = "nimmt die Deal-Anrufe an",
 	["adds velocity to the aim point - most Arsenal guns are hitscan, so off"] = "addiert die Geschwindigkeit auf den Zielpunkt - die meisten Arsenal-Waffen sind Hitscan, also aus",
@@ -1205,6 +1210,7 @@ return {
 	["holds one target instead of flicking to whoever is a pixel closer"] = "hält ein Ziel, statt zu dem zu springen, der einen Pixel näher ist",
 	["holds the body on the win plate and keeps it moving"] = "hält den Körper auf der Win-Platte und in Bewegung",
 	["horizontal; 1 = instant, 50 = about a second, frame rate independent"] = "waagerecht; 1 = sofort, 50 = etwa eine Sekunde, framerate-unabhängig",
+	["how far from your crosshair a target may be"] = "wie weit ein Ziel vom Fadenkreuz entfernt sein darf",
 	["how far off the centre of the hitbox to sit, per engagement"] = "wie weit neben der Mitte der Trefferzone, pro Gefecht",
 	["how far the ESP DRAWS - not the weapon range, which is 600"] = "wie weit das ESP ZEICHNET - nicht die Waffenreichweite, die liegt bei 600",
 	["how many of the strongest pets survive the cull"] = "wie viele der stärksten Pets die Säuberung überleben",
@@ -1302,6 +1308,7 @@ return {
 	["nothing ticks while it is off - this is the whole engine"] = "nichts läuft wenn das aus ist - das ist der ganze Motor",
 	["of the target part's own size - nobody hits the same millimetre twice"] = "von der Größe des Zielteils - niemand trifft zweimal denselben Millimeter",
 	["off = separate numbers for the rest of the magazine"] = "aus = eigene Werte für den Rest des Magazins",
+	["off by default - a bad velocity estimate throws the shot further than the lead ever gains"] = "standardmaessig aus - eine schlechte Geschwindigkeitsschaetzung verreisst den Schuss weiter als das Vorhalten je einbringt",
 	["off by default - selling is destructive"] = "standardmäßig aus - Verkaufen ist endgültig",
 	["off by default because walls were measured NOT to matter to the server"] = "ab Werk aus, weil gemessen wurde, dass Wände dem Server EGAL sind",
 	["off for knife, grenade and C4 - detected from Ammo/FireRate, not the name"] = "aus bei Messer, Granate und C4 - erkannt an Ammo/FireRate, nicht am Namen",
@@ -1440,6 +1447,7 @@ return {
 	["share of the balance one result may cost"] = "Anteil vom Guthaben, den ein Ergebnis kosten darf",
 	["share of the measured vertical kick that is taken back out"] = "Anteil des gemessenen Hochziehens der zurückgenommen wird",
 	["share of the vertical kick that is taken back out"] = "Anteil des vertikalen Rückstoßes, der herausgerechnet wird",
+	["shoot normally, the bullet goes to the target"] = "normal schiessen, die Kugel geht zum Ziel",
 	["short line showing where that player is actually looking"] = "kurze Linie, die zeigt wohin dieser Spieler wirklich schaut",
 	["shows in the readout what it WOULD hit and leaves your shot alone"] = "zeigt in der Anzeige, was es treffen WÜRDE, und lässt deinen Schuss in Ruhe",
 	["silent aim off"] = "Silent Aim aus",
