@@ -155,6 +155,7 @@ local MODS = _G.__SELPF_MODS or {
 	noRecoil = false, noSpread = false, noSway = false, noEquipTime = false,
 	instantAds = false, rapidFire = false, fireRate = 1200,
 	noBob = false, noSuppression = false, noBolt = false, stability = false,
+	silent = false,
 }
 _G.__SELPF_MODS = MODS
 
@@ -177,11 +178,27 @@ local function parallelOnMainThread()
 	return ok and n == 0
 end
 
+-- Forward declaration: the silent aim hook is installed long before the target
+-- picker exists, and a Lua local is invisible above its own definition.
+local silentAimPoint = nil
+
 -- Install once per VM. hookfunction cannot be undone and hooking twice stacks
 -- handlers permanently, so every hook here is installed exactly once and reads a
 -- live flag out of MODS instead of being added and removed.
+-- Bumped whenever a hook BODY changes. hookfunction cannot be undone, so a
+-- re-execute cannot replace an installed hook - it can only stack a second one,
+-- which is worse. The honest move is to detect that the live hooks are older
+-- than this file and say so, because the alternative is a panel whose switches
+-- quietly drive last version's code.
+local HOOK_VERSION = 2
+
 local function installHooks()
-	if HOOKS.installed then return HOOKS end
+	if HOOKS.installed then
+		if (HOOKS.version or 1) < HOOK_VERSION then
+			HOOKS.note = "hooks are from an older load - rejoin to update them"
+		end
+		return HOOKS
+	end
 	if not globalFn("hookfunction") then
 		HOOKS.note = "this executor has no hookfunction"
 		return HOOKS
@@ -192,13 +209,17 @@ local function installHooks()
 	end
 
 	local hookfn = globalFn("hookfunction")
-	local firearm, recoilTables = nil, {}
+	local firearm, bullets, recoilTables = nil, nil, {}
 	local ok = pcall(function()
 		for _, v in ipairs(getgc(true)) do
 			if type(v) == "table" then
 				if not firearm and type(rawget(v, "getWeaponStat")) == "function"
 					and type(rawget(v, "fireRound")) == "function" then
 					firearm = v
+				end
+				if not bullets and type(rawget(v, "newBullet")) == "function"
+					and type(rawget(v, "cleanBullets")) == "function" then
+					bullets = v
 				end
 				if type(rawget(v, "applyImpulse")) == "function" then
 					recoilTables[#recoilTables + 1] = v
@@ -228,6 +249,47 @@ local function installHooks()
 		HOOKS.weaponStat = true
 	end
 
+	-- SILENT AIM, and it is the bullet that is bent - not the hit that is
+	-- claimed. The first attempt replaced the answer of `playerHitCheck`, so the
+	-- client reported a hit while the bullet flew somewhere else entirely: the
+	-- packets went out on a valid key and the server confirmed **none** of them,
+	-- because it re-validates the trajectory.
+	--
+	-- Rewriting `newBullet`'s velocity instead means the shot genuinely travels
+	-- at the target. The game's own hit detection then finds the enemy the
+	-- ordinary way, reports it the ordinary way, and the `newbullets` packet the
+	-- client sends carries that same direction - there is nothing for the server
+	-- to disagree with. This is the shape every open-source silent aim uses,
+	-- usually by rewriting the direction argument of a raycast; Phantom Forces
+	-- simulates its bullets instead of raycasting them, so the velocity is the
+	-- equivalent place.
+	if bullets then
+		local old
+		old = hookfn(bullets.newBullet, function(props, ...)
+			-- Everything this hook touches is reached through HOOKS, which lives
+			-- in _G. hookfunction cannot be undone, so after a re-execute the
+			-- INSTALLED hook is still the first run's closure: a captured local
+			-- would keep pointing at the old run's target picker and the old
+			-- run's counters, and the panel would sit there reading zero while
+			-- bullets were being bent. Measured exactly that way once.
+			if MODS.silent and type(props) == "table"
+				and typeof(props.velocity) == "Vector3"
+				and typeof(props.position) == "Vector3" then
+				local pick = HOOKS.aimPoint
+				local aim = pick and pick(props.position, props.velocity.Magnitude)
+				if aim then
+					local dir = aim - props.position
+					if dir.Magnitude > 0.001 then
+						props.velocity = dir.Unit * props.velocity.Magnitude
+						HOOKS.silentShots = (HOOKS.silentShots or 0) + 1
+					end
+				end
+			end
+			return old(props, ...)
+		end)
+		HOOKS.silent = true
+	end
+
 	-- The camera kick. Measured over an eight round burst: 2.49 deg of climb
 	-- with it, 0.01 deg with it hooked out.
 	for _, t in ipairs(recoilTables) do
@@ -240,8 +302,10 @@ local function installHooks()
 	end
 
 	HOOKS.installed = true
+	HOOKS.version = HOOK_VERSION
 	HOOKS.note = "ok - stats " .. tostring(HOOKS.weaponStat)
 		.. ", recoil on " .. HOOKS.recoil .. " tables"
+		.. (HOOKS.silent and ", silent aim" or "")
 	return HOOKS
 end
 
@@ -348,6 +412,15 @@ local CONFIG = {
 	aimPredict = true,        -- aim where the bullet ARRIVES, not where the head is
 	aimLead    = true,        -- and lead a moving target
 
+	-- silent aim - bends the BULLET, needs the FFlag ----------------------------
+	silent     = false,
+	silentPart = "Head",
+	silentFov  = 250,          -- pixels from the crosshair
+	silentMaxDist = 1500,
+	silentVisible = true,
+	silentLead = false,       -- off until the lead is proven, it can throw a shot
+	silentCircle = true,
+
 	-- movement and world --------------------------------------------------------
 	speed      = false,
 	speedMult  = 1.4,
@@ -399,6 +472,7 @@ local CONFIG = {
 	colVisible = Color3.fromRGB(120, 235, 140),
 	colText    = Color3.fromRGB(240, 240, 240),
 	colFov     = Color3.fromRGB(255, 255, 255),
+	colSilentFov = Color3.fromRGB(255, 120, 60),
 }
 
 local PRESETS = {
@@ -438,6 +512,8 @@ local STATE = {
 	dropStuds = 0,        -- how far above the head the assist is aiming
 	bulletSpeed = 0,      -- measured off our own echoed shot, 0 until one is fired
 	weapon    = "-",
+	silentShots = 0,      -- bullets whose direction was actually rewritten
+	silentTarget = "-",
 	speed      = 0,       -- the character's own reading, live
 	snapFrames = 0,       -- frames the magnet actually held a part
 	snapHits   = 0,       -- bulletHitConfirm since the magnet was switched on
@@ -466,6 +542,7 @@ local function syncMods()
 	MODS.noSuppression = CONFIG.noSuppression
 	MODS.noBolt        = CONFIG.noBolt
 	MODS.stability     = CONFIG.stability
+	MODS.silent        = CONFIG.silent
 	refreshStatOverride()
 end
 
@@ -898,6 +975,11 @@ end
 local fovCircle = make("Circle", { Thickness = 1, NumSides = 48, Filled = false,
 	Transparency = 0.5, ZIndex = 1 })
 
+-- A second ring for the silent aim, because the two FOVs are different numbers
+-- and a page whose radius cannot be seen is a page tuned by guesswork.
+local silCircle = make("Circle", { Thickness = 1, NumSides = 48, Filled = false,
+	Transparency = 0.5, ZIndex = 1 })
+
 --------------------------------------------------------------------------------
 -- chams
 --------------------------------------------------------------------------------
@@ -1010,6 +1092,14 @@ local function renderPass()
 			fovCircle.Position = mid
 			fovCircle.Radius = CONFIG.aimFov
 			fovCircle.Color = CONFIG.colFov
+		end
+	end
+	if silCircle then
+		silCircle.Visible = CONFIG.silent and CONFIG.silentCircle
+		if silCircle.Visible then
+			silCircle.Position = mid
+			silCircle.Radius = CONFIG.silentFov
+			silCircle.Color = CONFIG.colSilentFov
 		end
 	end
 
@@ -1569,11 +1659,18 @@ local function trackVelocity(name, pos)
 	end
 	local dt = now - e.t
 	if dt > 0.015 then
+		local step = (pos - e.pos).Magnitude
 		local raw = (pos - e.pos) / dt
-		-- a rebuilt model can jump; anything faster than a sprinting player is
-		-- replication noise, not movement
-		if raw.Magnitude < 120 then
-			e.vel = e.vel * 0.6 + raw * 0.4
+		-- The models here are destroyed and rebuilt several times a second, so
+		-- two samples under the same NAME can belong to different instances and
+		-- the difference between them is a teleport, not movement. Two gates:
+		-- the sample must be recent, and the step must be small enough that a
+		-- human could have walked it. Without them a single jump became a 45
+		-- stud lead on a 0.38 s flight and the bullet left the map.
+		if dt < 0.5 and step < 12 and raw.Magnitude < 60 then
+			e.vel = e.vel * 0.7 + raw * 0.3
+		elseif step >= 12 then
+			e.vel = Vector3.zero          -- a jump means we know nothing again
 		end
 		e.pos, e.t = pos, now
 	end
@@ -1745,6 +1842,62 @@ local function pickTarget()
 	end)
 	return best
 end
+
+--------------------------------------------------------------------------------
+-- where a silent-aimed bullet should be sent
+--------------------------------------------------------------------------------
+--
+-- Called from inside the newBullet hook, so it runs only when a shot is fired
+-- and it sees the bullet's OWN origin and speed rather than the camera's. That
+-- matters: the muzzle is not the eye, and the flight time is what decides how
+-- far above the head the arc has to start.
+
+local function ballisticAim(origin, targetPos, speed, targetVel)
+	local g = measuredGravity or GRAVITY
+	local aim = targetPos
+	for _ = 1, 3 do
+		local t = (aim - origin).Magnitude / speed
+		aim = targetPos + targetVel * t + Vector3.new(0, g * t * t / 2, 0)
+	end
+	return aim
+end
+
+-- Published into HOOKS at the bottom of this block, so the installed hook always
+-- calls the CURRENT run's picker rather than the one it captured.
+silentAimPoint = function(origin, speed)
+	if not CONFIG.silent or speed <= 0 then return nil end
+
+	local mid = centre()
+	local best, bestPx
+	eachTarget(function(info)
+		local part = (CONFIG.silentPart == "Torso") and (info.parts[2] or info.head)
+			or info.head
+		if not part or not part.Parent then return end
+		local dist = (origin - part.Position).Magnitude
+		if dist > CONFIG.silentMaxDist then return end
+		local sp = camera:WorldToViewportPoint(part.Position)
+		if sp.Z <= 0 then return end
+		local px = (Vector2.new(sp.X, sp.Y) - mid).Magnitude
+		if px > CONFIG.silentFov then return end
+		-- The game itself refuses a hit on a teammate, so bending a bullet at one
+		-- only throws the shot away.
+		local who = Players:FindFirstChild(info.name)
+		if who and tostring(who.TeamColor) == tostring(plr.TeamColor) then return end
+		if CONFIG.silentVisible and not visible(part.Position) then return end
+		if not bestPx or px < bestPx then best, bestPx = info, px end
+	end)
+	if not best then return nil end
+
+	local part = (CONFIG.silentPart == "Torso") and (best.parts[2] or best.head)
+		or best.head
+	STATE.silentTarget = best.name
+	HOOKS.silentTarget = best.name
+	local vel = CONFIG.silentLead and trackVelocity(best.name, part.Position)
+		or Vector3.zero
+	return ballisticAim(origin, part.Position, speed, vel)
+end
+
+HOOKS.aimPoint = silentAimPoint
 
 --------------------------------------------------------------------------------
 -- delivery
@@ -2552,6 +2705,44 @@ modInfo:Button("Enable and rejoin this server", function()
 	end)
 end, UI.theme.warn)
 
+--------------------------------------------------------------- SILENT
+local silPage = win:Page("SILENT", UI.icon.sword or UI.icon.target)
+local silCard = silPage:Card("SILENT AIM", 1):Accent()
+silCard:Toggle("Silent Aim", CONFIG.silent, function(v)
+	CONFIG.silent = v syncMods()
+	HOOKS.silentShots = 0
+end, "shoot normally, the bullet goes to the target", UI.theme.bad)
+silCard:Dropdown("Hit part", { "Head", "Torso" }, CONFIG.silentPart,
+	function(v) CONFIG.silentPart = v end)
+silCard:Slider("FOV (pixels)", 20, 800, CONFIG.silentFov,
+	function(v) CONFIG.silentFov = v end,
+	"how far from your crosshair a target may be")
+silCard:Slider("Max distance", 100, 3000, CONFIG.silentMaxDist,
+	function(v) CONFIG.silentMaxDist = v end)
+silCard:Toggle("Visible only", CONFIG.silentVisible,
+	function(v) CONFIG.silentVisible = v end,
+	"a wall still stops the bullet, so bending it into one wastes the shot",
+	UI.theme.good)
+silCard:Toggle("Lead moving targets", CONFIG.silentLead,
+	function(v) CONFIG.silentLead = v end,
+	"off by default - a bad velocity estimate throws the shot further than the "
+	.. "lead ever gains", UI.theme.warn)
+silCard:Toggle("Show FOV circle", CONFIG.silentCircle,
+	function(v) CONFIG.silentCircle = v end)
+silCard:Colour("FOV colour", CONFIG.colSilentFov,
+	function(c) CONFIG.colSilentFov = c end)
+
+local silOut = silPage:Card("WHAT THE SERVER SEES", 2):Readout(5)
+silPage:Card("HOW THIS ONE WORKS", 2):Label(
+	"It bends the BULLET, it does not claim a hit. The first version replaced the "
+	.. "game's answer to 'what did I hit' - the packets went out correctly and the "
+	.. "server confirmed none of them, because it re-checks the trajectory. "
+	.. "Rewriting the bullet's velocity instead means the shot really travels at "
+	.. "the target, so the game reports it the ordinary way and there is nothing "
+	.. "to disagree with. The cost is the opposite of the aimbot's: your camera "
+	.. "never moves, so a killcam shows nothing, but the shot itself sits in the "
+	.. "server's log leaving the barrel at an angle your view never had.")
+
 --------------------------------------------------------------- MOVEMENT
 local movePage = win:Page("MOVEMENT", UI.icon.run or UI.icon.user)
 local moveCard = movePage:Card("MOVEMENT", 1):Accent()
@@ -2700,6 +2891,16 @@ task.spawn(function()
 				string.format("kick      %.2f deg left after your hand", STATE.rcsKick),
 				"firing    " .. (firing() and "yes" or "no"),
 				"taking    " .. (CONFIG.rcs and (CONFIG.rcsPct .. "%") or "off"),
+			}, "\n"))
+
+			STATE.silentShots = HOOKS.silentShots or 0
+			STATE.silentTarget = HOOKS.silentTarget or "-"
+			silOut:set(table.concat({
+				"hook      " .. (HOOKS.silent and "installed" or "NOT installed - needs the FFlag"),
+				"target    " .. STATE.silentTarget,
+				"bent      " .. STATE.silentShots .. " bullets redirected",
+				"confirms  " .. STATE.snapHits .. " hits the server accepted",
+				"of those  " .. STATE.snapPartHits .. " counted as headshots",
 			}, "\n"))
 
 			moveOut:set(table.concat({
