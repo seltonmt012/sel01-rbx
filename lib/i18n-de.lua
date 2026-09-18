@@ -8,7 +8,7 @@
 -- they are - they keep passing "Auto rebirth" and only this file decides what
 -- the player reads.
 --
--- 1775 entries.
+-- 1795 entries.
 
 return {
 	["$%s   %s/s   slots %d/%d   R%d   endurance %s"] = "%s$   %s/s   Plaetze %d/%d   R%d   Ausdauer %s",
@@ -557,9 +557,11 @@ return {
 	["Lowest level"] = "Niedrigstes Level",
 	["Lowest rarity"] = "Mindest-Seltenheit",
 	["MANUAL"] = "MANUELL",
+	["MEASURED"] = "GEMESSEN",
 	["MEASUREMENT"] = "MESSUNG",
 	["MELEE AURA"] = "NAHKAMPF-AURA",
 	["MONEY"] = "GELD",
+	["MORE GUN MODS"] = "WEITERE GUN MODS",
 	["MOVE"] = "BEWEGUNG",
 	["MOVEMENT"] = "BEWEGUNG",
 	["MOVEMENT & MISTAKES"] = "BEWEGUNG & FEHLER",
@@ -617,7 +619,9 @@ return {
 	["Needs money plus N copies of one brainrot"] = "Braucht Geld plus N Exemplare eines Brainrots",
 	["Network module missing"] = "Network-Modul fehlt",
 	["Never below"] = "Nie unter",
+	["No custom FOV here on purpose: this game rewrites the field of view every frame for scoping, so forcing a value either gets thrown away or breaks the zoom."] = "Absichtlich kein Custom FOV: dieses Spiel schreibt das Sichtfeld fuer das Zielen jeden Frame neu, ein erzwungener Wert wird also entweder verworfen oder zerstoert den Zoom.",
 	["No spray pattern is read. Your sensitivity is measured from your own mouse while you are NOT firing, and while you are, whatever pitch is left after subtracting your hand is the recoil. Both numbers are below - if the kick stays at 0.00 during a burst there is nothing to compensate and this page cannot help."] = "Es wird kein Spray-Pattern gelesen. Deine Sensitivity wird aus deiner eigenen Maus gemessen, waehrend du NICHT feuerst; waehrend du feuerst, ist alles was nach Abzug deiner Hand an Neigung uebrig bleibt der Recoil. Beide Zahlen stehen unten - bleibt der Kick waehrend einer Salve bei 0.00, gibt es nichts auszugleichen und diese Seite kann nicht helfen.",
+	["No super jump: the jump height lives in a config the character reads once when it spawns, so writing it afterwards changes nothing - 3.3 raised to 14 still measured a 2.9 stud jump."] = "Kein Super Jump: die Sprunghoehe steht in einer Config, die der Charakter beim Spawn einmal liest - spaeter zu schreiben aendert nichts, 3,3 auf 14 gesetzt ergab weiterhin einen Sprung von 2,9 Studs.",
 	["Noise (1/10 deg)"] = "Rauschen (1/10 Grad)",
 	["Noise speed (1/10 Hz)"] = "Rauschtempo (1/10 Hz)",
 	["Not scoped"] = "Ohne Zoom",
@@ -825,6 +829,7 @@ return {
 	["Spectators: the server says how many people are watching YOU"] = "Zuschauer: der Server sagt wie viele Leute DIR zuschauen",
 	["Speed ceiling (deg/s)"] = "Geschwindigkeitsdeckel (Grad/s)",
 	["Speed ladders"] = "Speed-Leitern",
+	["Speed multiplier"] = "Speed-Multiplikator",
 	["Spend prestige points"] = "Prestige-Punkte ausgeben",
 	["Spend ruby"] = "Rubine ausgeben",
 	["Spin for a class"] = "Klasse drehen",
@@ -1163,6 +1168,7 @@ return {
 	["flips on and off the plate - holding still pays once"] = "geht auf und von der Platte - Stillstehen zahlt nur einmal",
 	["floored at 12 - below that every Drawing face falls apart"] = "nach unten auf 12 begrenzt - darunter zerfaellt jede Drawing-Schrift",
 	["fly out, pick up, carry home, place"] = "rausfliegen, aufheben, heimtragen, platzieren",
+	["for bolt actions - drops requirechamber and the bolt time"] = "fuer Repetierer - entfernt requirechamber und die Bolt-Zeit",
 	["forced pause between two engagements"] = "erzwungene Pause zwischen zwei Gefechten",
 	["free and wins-free; fires the moment the level bar is full"] = "gratis und ohne Wins; feuert sobald die Level-Leiste voll ist",
 	["free spin, group reward, offline earnings, leave gift"] = "Gratis-Spin, Gruppenbelohnung, Offline-Einnahmen, Abschiedsgeschenk",
@@ -1192,6 +1198,7 @@ return {
 	["hide anyone behind a wall"] = "blendet alle hinter einer Wand aus",
 	["hide anyone behind a wall completely"] = "alle hinter einer Wand ganz ausblenden",
 	["higher is slower"] = "hoeher ist langsamer",
+	["hipfire stability to 1 and the aim kick multiplier to 0"] = "Hipfire-Stabilitaet auf 1 und den Aim-Kick-Multiplikator auf 0",
 	["holding the same millimetre for six seconds is as readable as dead centre"] = "sechs Sekunden denselben Millimeter zu halten fällt genauso auf wie die exakte Mitte",
 	["holds gold back once the next island is within reach of income"] = "hält Gold zurück sobald die nächste Insel in Reichweite ist",
 	["holds one enemy instead of flicking to whoever is a pixel closer"] = "bleibt auf einem Gegner statt zum nächsten Pixel zu springen",
@@ -1252,6 +1259,7 @@ return {
 	["measured: 1.02 deg of bloom becomes 0.06"] = "gemessen: 1,02 Grad Streuung werden 0,06",
 	["measured: 2.49 deg of climb over a burst becomes 0.01"] = "gemessen: 2,49 Grad Anstieg pro Salve werden 0,01",
 	["measured: Basic -21%, Rebirth1 -2%, Rebirth3 +8% - and no wins at all"] = "gemessen: Basic -21%, Rebirth1 -2%, Rebirth3 +8% - und gar keine Wins",
+	["measured: x2.5 asked gives about x1.8 on the ground"] = "gemessen: x2,5 angefordert ergibt am Boden etwa x1,8",
 	["measures itself against your own mouse - no calibration step"] = "misst sich an der eigenen Maus ein - keine Kalibrierung nötig",
 	["money"] = "Geld",
 	["money priced, x1.2 up to x300 strength - RobuxPrice is only the other way to pay"] = "in Geld bezahlt, x1,2 bis x300 Stärke - RobuxPrice ist nur der andere Zahlweg",
@@ -1468,6 +1476,7 @@ return {
 	["swap refused, put the old exhibit back"] = "Tausch abgelehnt, altes Exponat zurück",
 	["sweeps the area first so there is a choice of nodes instead of one underfoot"] = "sucht erst die Umgebung ab, damit es eine Auswahl gibt statt nur einer Stelle",
 	["swim / throw / roll"] = "schwimmen / werfen / rollen",
+	["swingmod and aimswingmod - the two values the gun asks for most often"] = "swingmod und aimswingmod - die beiden Werte, die die Waffe am haeufigsten abfragt",
 	["switches on the game's own server-side equip best"] = "schaltet die spieleigene Server-Funktion ein",
 	["taps the jump key on a timer"] = "tippt die Sprungtaste im Takt an",
 	["targets"] = "Ziele",
@@ -1512,10 +1521,12 @@ return {
 	["the rest of the engagements go for the torso - a 100% headshot rate is the one number a review looks at"] = "der Rest der Gefechte zielt auf den Körper - eine 100% Kopfschussquote ist die eine Zahl die geprüft wird",
 	["the richest crystals are up there and the body dies mid-hold"] = "oben liegen die wertvollsten Kristalle, aber der Körper stirbt beim Halten",
 	["the same switch as on the HUMAN page - never touches a real player"] = "derselbe Schalter wie auf der MENSCH-Seite - fasst nie einen echten Spieler an",
+	["the screen effect when somebody shoots near you"] = "der Bildschirmeffekt, wenn jemand neben dir schiesst",
 	["the server credits ~3.75/s; firing faster credits LESS, not more"] = "der Server rechnet ~3.75/s an; schneller feuern bringt WENIGER",
 	["the server enforces the gun's own 0.9s - three shots 0.15s apart gave one kill"] = "der Server erzwingt die 0,9s der Waffe - drei Schüsse mit 0,15s Abstand ergaben einen Kill",
 	["the server only trickles gum here whatever is asked for; the collector is the real source"] = "Der Server gibt hier nur tröpfchenweise Gum, egal was angefragt wird; die echte Quelle ist der Sammler",
 	["the server ranks and seats the guns itself"] = "der Server sortiert und setzt die Waffen selbst",
+	["the server watches movement in this game - keep it modest"] = "der Server ueberwacht Bewegung in diesem Spiel - halte es moderat",
 	["the single most important number here"] = "die mit Abstand wichtigste Zahl hier",
 	["the six replicated anchors, joined to the head"] = "die sechs replizierten Ankerpunkte, mit dem Kopf verbunden",
 	["the weapon's own 30-point pattern, bright up to the shot you are on"] = "das 30-Punkte-Muster der Waffe, hell bis zum aktuellen Schuss",
