@@ -329,6 +329,13 @@ local CONFIG = {
 	aimPredict = true,        -- aim where the bullet ARRIVES, not where the head is
 	aimLead    = true,        -- and lead a moving target
 
+	-- movement and world --------------------------------------------------------
+	speed      = false,
+	speedMult  = 1.4,
+	infStamina = false,
+	fullbright = false,
+	noFog      = false,
+
 	-- gun mods - these need the FFlag and a rejoin, see the header --------------
 	noRecoil   = false,
 	noSpread   = false,
@@ -379,7 +386,10 @@ local PRESETS = {
 		humReactMax = 190, humRampMs = 220, humNoise = 0.4, humDeadPx = 3,
 		humMaxDegS = 360, hum = true, trgDelayMin = 90, trgDelayMax = 180,
 		trgChance = 92 },
-	Raw = { aimSmoothH = 8, aimSmoothV = 9, aimFov = 200, humReactMin = 0,
+	-- Raw means raw: smoothing 1 is a full correction every frame, which is what
+	-- the name promises. It used to set 8 and 9, so picking it still gave a soft
+	-- follow and read as "it never locks".
+	Raw = { aimSmoothH = 1, aimSmoothV = 1, aimFov = 200, humReactMin = 0,
 		humReactMax = 0, humRampMs = 0, humNoise = 0, humDeadPx = 0,
 		humMaxDegS = 1200, hum = false, trgDelayMin = 0, trgDelayMax = 0,
 		trgChance = 100 },
@@ -404,6 +414,7 @@ local STATE = {
 	dropStuds = 0,        -- how far above the head the assist is aiming
 	bulletSpeed = 0,      -- measured off our own echoed shot, 0 until one is fired
 	weapon    = "-",
+	speed      = 0,       -- the character's own reading, live
 	snapFrames = 0,       -- frames the magnet actually held a part
 	snapHits   = 0,       -- bulletHitConfirm since the magnet was switched on
 	snapPartHits = 0,     -- ...of which named the part the magnet was holding
@@ -1718,6 +1729,7 @@ end
 
 local leftYaw = nil
 local pendYaw, pendPitch = 0, 0       -- requested and not yet seen in the view
+local carryX, carryY = 0, 0           -- sub-unit remainder, see the Mouse branch
 local lastAimYaw, lastAimPitch = nil, nil
 local stickHits, stickMiss = 0, 0
 local mouseSensY, mouseSensP = 0, 0
@@ -1749,11 +1761,13 @@ local function aimPass(dt)
 	-- the recoil from when the shooting starts.
 	pcall(rcsPass, pitchNow, yawNow)
 
-	-- book-keeping for the dead-time compensation below
-	if lastAimYaw ~= nil then
-		pendYaw   = (pendYaw   - angleDelta(lastAimYaw, yawNow)) * 0.5
-		pendPitch = (pendPitch - (pitchNow - lastAimPitch)) * 0.5
-	end
+	-- Dead-time book-keeping: a PURE DECAY, not a subtraction of what the view
+	-- did. The first version subtracted the observed angle change, which
+	-- includes the player's own mouse - so moving your hand drove `pending`
+	-- negative, the next frame over-requested, and the crosshair sat next to the
+	-- target shaking instead of locking. A request lands within a frame or two,
+	-- so letting it fade is both simpler and correct.
+	pendYaw, pendPitch = pendYaw * 0.35, pendPitch * 0.35
 	lastAimYaw, lastAimPitch = yawNow, pitchNow
 
 	if leftYaw ~= nil then
@@ -1792,6 +1806,7 @@ local function aimPass(dt)
 
 	if not aimActive() then
 		STATE.target, STATE.waitMs, stickyName = "-", 0, nil
+		carryX, carryY = 0, 0       -- a stale remainder must not fire a stray move
 		return
 	end
 
@@ -1913,17 +1928,30 @@ local function aimPass(dt)
 		movePitch = movePitch - pendPitch
 		-- positive x turns right and LOWERS yaw; positive y looks down and
 		-- LOWERS pitch - hence the minus on both
-		local dx = -(moveYaw + nx) / sy
-		local dy = -(movePitch + ny) / sp
-		-- The OS rounds sub-pixel requests away, and learning from a move that
-		-- never happened poisons the estimate.
-		if math.abs(dx) >= 1 or math.abs(dy) >= 1 then
-			askedX, askedY = math.floor(dx + 0.5), math.floor(dy + 0.5)
+		local dx = -(moveYaw + nx) / sy + carryX
+		local dy = -(movePitch + ny) / sp + carryY
+
+		-- CARRY the sub-pixel remainder instead of dropping it. mousemoverel
+		-- moves whole units, and one unit is about 0.17 deg at the sensitivity
+		-- measured here - so a request smaller than that used to be thrown away
+		-- entirely, and the aim could never close the last fraction of a degree
+		-- however low the smoothing was set. That is what "it never fully locks
+		-- even on Raw" was. Accumulated, those fractions become a unit and the
+		-- aim converges properly.
+		local sendX = (dx >= 0) and math.floor(dx) or math.ceil(dx)
+		local sendY = (dy >= 0) and math.floor(dy) or math.ceil(dy)
+		carryX, carryY = dx - sendX, dy - sendY
+		-- never let the carry run away while the aim is idle
+		carryX = math.clamp(carryX, -1, 1)
+		carryY = math.clamp(carryY, -1, 1)
+
+		if sendX ~= 0 or sendY ~= 0 then
+			askedX, askedY = sendX, sendY
 			preYaw, prePitch = yawNow, pitchNow
 			scriptWroteMouse = true      -- keeps the RCS estimate off this frame
-			pendYaw   = pendYaw   + (moveYaw + nx)
-			pendPitch = pendPitch + (movePitch + ny)
-			pcall(function() moveMouse(askedX, askedY) end)
+			pendYaw   = pendYaw   + (-sendX * sy)
+			pendPitch = pendPitch + (-sendY * sp)
+			pcall(function() moveMouse(sendX, sendY) end)
 		end
 		lastNX, lastNY = 0, 0
 	else
@@ -1951,6 +1979,116 @@ end
 -- The same measurement closes hit-part spoofing: rewriting Torso to Head on a
 -- legitimate hit comes back from the server with the part echoed but the
 -- headshot flag set FALSE and the damage unchanged at 56.0. The server decides.
+
+--------------------------------------------------------------------------------
+-- movement and world
+--------------------------------------------------------------------------------
+--
+-- The character object is reachable once the client runs on the main thread, and
+-- it hands out the movement directly: `setWalkSpeedMult`, `setStamina`,
+-- `getSpeed`, `getRootPart`, `isGrounded`. Measured: setWalkSpeedMult(2.5) took
+-- the peak speed from 14 to 25.5 and the ground covered from 2.5 to 8.2 studs a
+-- second, so the multiplier is real and something clamps it below what is asked.
+--
+-- What does NOT work, measured: writing `CharacterConfig.adrenalineMovementConfig
+-- .*.jumpHeight` from 3.3 to 14 left the jump at 2.9 studs. The character reads
+-- that config when it is built, so changing it afterwards changes nothing - no
+-- super jump ships on the back of it.
+--
+-- Phantom Forces validates movement server side. Speed is therefore presented
+-- with the measured speed next to it rather than as a promise, and it is left to
+-- the player to decide how far to push a number the server is watching.
+
+local charIface = nil
+
+local function characterObject()
+	if not charIface then
+		if not parallelOnMainThread() then return nil end
+		local ok = pcall(function()
+			for _, v in ipairs(getgc(true)) do
+				if type(v) == "table" and type(rawget(v, "getCharacterObject")) == "function" then
+					charIface = v
+					return
+				end
+			end
+		end)
+		if not ok or not charIface then return nil end
+	end
+	local ok, obj = pcall(charIface.getCharacterObject)
+	return ok and obj or nil
+end
+
+local speedApplied = false
+
+local function movementPass()
+	local obj = characterObject()
+	if not obj then
+		STATE.speed = 0
+		return
+	end
+
+	local ok, s = pcall(obj.getSpeed, obj)
+	STATE.speed = (ok and tonumber(s)) or 0
+
+	if CONFIG.speed then
+		pcall(function() obj:setWalkSpeedMult(math.max(1, CONFIG.speedMult)) end)
+		speedApplied = true
+	elseif speedApplied then
+		-- put it back exactly once, not every tick: writing 1 continuously would
+		-- fight the game's own sprint and slide multipliers
+		pcall(function() obj:setWalkSpeedMult(1) end)
+		speedApplied = false
+	end
+
+	if CONFIG.infStamina then
+		pcall(function() obj:setStamina(1) end)
+	end
+end
+
+task.spawn(function()
+	while _G.__SELPF == GEN do
+		local ok, err = pcall(movementPass)
+		if not ok then note("movement: " .. tostring(err)) end
+		task.wait(0.1)
+	end
+end)
+
+-- The world settings need no hooks at all and work on a first join. They are
+-- re-applied on a timer because the game writes Lighting itself on a round
+-- change, and captured on the rising edge so switching them off restores what
+-- the game had rather than a constant.
+local savedLight = nil
+
+local function worldPass()
+	local L = game:GetService("Lighting")
+	if (CONFIG.fullbright or CONFIG.noFog) and not savedLight then
+		savedLight = { Brightness = L.Brightness, ClockTime = L.ClockTime,
+			Ambient = L.Ambient, OutdoorAmbient = L.OutdoorAmbient,
+			FogEnd = L.FogEnd, GlobalShadows = L.GlobalShadows }
+	end
+	if CONFIG.fullbright then
+		L.Brightness = 3
+		L.ClockTime = 14
+		L.Ambient = Color3.fromRGB(178, 178, 178)
+		L.OutdoorAmbient = Color3.fromRGB(178, 178, 178)
+		L.GlobalShadows = false
+	end
+	if CONFIG.noFog then
+		L.FogEnd = 1e6
+	end
+	if savedLight and not CONFIG.fullbright and not CONFIG.noFog then
+		for k, v in pairs(savedLight) do pcall(function() L[k] = v end) end
+		savedLight = nil
+	end
+end
+
+task.spawn(function()
+	while _G.__SELPF == GEN do
+		local ok, err = pcall(worldPass)
+		if not ok then note("world: " .. tostring(err)) end
+		task.wait(1)
+	end
+end)
 
 --------------------------------------------------------------------------------
 -- reading the wire, and only reading it
@@ -2370,6 +2508,25 @@ modInfo:Button("Enable and rejoin this server", function()
 	end)
 end, UI.theme.warn)
 
+--------------------------------------------------------------- MOVEMENT
+local movePage = win:Page("MOVEMENT", UI.icon.run or UI.icon.user)
+local moveCard = movePage:Card("MOVEMENT", 1):Accent()
+moveCard:Toggle("Speed", CONFIG.speed, function(v) CONFIG.speed = v end,
+	"the server watches movement in this game - keep it modest", UI.theme.warn)
+moveCard:Slider("Speed multiplier", 1, 3, CONFIG.speedMult,
+	function(v) CONFIG.speedMult = v end,
+	"measured: x2.5 asked gives about x1.8 on the ground")
+moveCard:Toggle("Infinite Stamina", CONFIG.infStamina,
+	function(v) CONFIG.infStamina = v end)
+moveCard:Label("No super jump: the jump height lives in a config the character "
+	.. "reads once when it spawns, so writing it afterwards changes nothing - "
+	.. "3.3 raised to 14 still measured a 2.9 stud jump.")
+local moveOut = movePage:Card("MEASURED", 2):Readout(3)
+
+local worldCard = movePage:Card("WORLD", 2)
+worldCard:Toggle("Fullbright", CONFIG.fullbright, function(v) CONFIG.fullbright = v end)
+worldCard:Toggle("No Fog", CONFIG.noFog, function(v) CONFIG.noFog = v end)
+
 --------------------------------------------------------------- RECOIL
 local rcsPage = win:Page("RECOIL", UI.icon.wave or UI.icon.chart)
 local rcsCard = rcsPage:Card("RECOIL CONTROL", 1):Accent()
@@ -2495,6 +2652,12 @@ task.spawn(function()
 				string.format("kick      %.2f deg left after your hand", STATE.rcsKick),
 				"firing    " .. (firing() and "yes" or "no"),
 				"taking    " .. (CONFIG.rcs and (CONFIG.rcsPct .. "%") or "off"),
+			}, "\n"))
+
+			moveOut:set(table.concat({
+				string.format("speed     %.1f studs/s", STATE.speed),
+				"multiplier " .. (CONFIG.speed and ("x" .. CONFIG.speedMult) or "off"),
+				"character " .. (characterObject() and "reachable" or "not reachable"),
 			}, "\n"))
 
 			local hud = hudRead()
