@@ -130,6 +130,153 @@ local VIM = nil
 pcall(function() VIM = game:GetService("VirtualInputManager") end)
 
 --------------------------------------------------------------------------------
+-- THE FFLAG, and why everything below depends on it
+--------------------------------------------------------------------------------
+--
+-- Phantom Forces runs its whole client in an Actor VM. From the main Lua state
+-- that is a wall: `getgc` cannot see its tables, `hookfunction` cannot bite on
+-- its methods, and every packet it sends carries a rolling key that lives in
+-- there as an upvalue. Measured before: getgc 388844 objects, getactors 1.
+--
+-- Roblox has a debug flag that puts parallel Lua on the main thread:
+--
+--     setfflag("DebugRunParallelLuaOnMainThread", "true")   -- then REJOIN
+--
+-- After the rejoin the same client reads getactors **0** and getgc **742648** -
+-- the game's own state is now in reach. Everything on the GUN MODS page exists
+-- only in that mode; the ESP, the aimbot, the triggerbot and the recoil
+-- compensation work either way, so the script does not insist on it.
+--
+-- The flag only takes effect on a fresh join, which is why this is offered as a
+-- button rather than done silently: it teleports the player back into the same
+-- server and that is not something a panel should do behind their back.
+
+local MODS = _G.__SELPF_MODS or {
+	noRecoil = false, noSpread = false, noSway = false, noEquipTime = false,
+	instantAds = false, rapidFire = false, fireRate = 1200,
+}
+_G.__SELPF_MODS = MODS
+
+local HOOKS = _G.__SELPF_HOOKS or { installed = false, note = "not installed",
+	statOverride = {}, weaponStat = false, recoil = 0 }
+_G.__SELPF_HOOKS = HOOKS
+
+local function fflagOn()
+	local get = globalFn("getfflag")
+	if not get then return nil end
+	local ok, v = pcall(get, "DebugRunParallelLuaOnMainThread")
+	if not ok then return nil end
+	return tostring(v) == "true"
+end
+
+local function parallelOnMainThread()
+	-- the flag being set is not the same as the client having rejoined with it;
+	-- the actor count is the fact, the flag is only the intent
+	local ok, n = pcall(function() return #getactors() end)
+	return ok and n == 0
+end
+
+-- Install once per VM. hookfunction cannot be undone and hooking twice stacks
+-- handlers permanently, so every hook here is installed exactly once and reads a
+-- live flag out of MODS instead of being added and removed.
+local function installHooks()
+	if HOOKS.installed then return HOOKS end
+	if not globalFn("hookfunction") then
+		HOOKS.note = "this executor has no hookfunction"
+		return HOOKS
+	end
+	if not parallelOnMainThread() then
+		HOOKS.note = "the client still runs its code in an Actor VM"
+		return HOOKS
+	end
+
+	local hookfn = globalFn("hookfunction")
+	local firearm, recoilTables = nil, {}
+	local ok = pcall(function()
+		for _, v in ipairs(getgc(true)) do
+			if type(v) == "table" then
+				if not firearm and type(rawget(v, "getWeaponStat")) == "function"
+					and type(rawget(v, "fireRound")) == "function" then
+					firearm = v
+				end
+				if type(rawget(v, "applyImpulse")) == "function" then
+					recoilTables[#recoilTables + 1] = v
+				end
+			end
+		end
+	end)
+	if not ok then
+		HOOKS.note = "the object sweep failed"
+		return HOOKS
+	end
+
+	-- Every gun mod except the recoil is a STAT LOOKUP. The weapon asks
+	-- `getWeaponStat("hipfirespread")` and friends on every shot, so one hook on
+	-- that single method covers spread, sway, equip time and ADS speed at once,
+	-- and adding another mod later is a table entry rather than a new hook.
+	if firearm then
+		local old
+		old = hookfn(firearm.getWeaponStat, function(self, name, ...)
+			local ovr = HOOKS.statOverride
+			if type(name) == "string" then
+				local v = ovr[name]
+				if v ~= nil then return v end
+			end
+			return old(self, name, ...)
+		end)
+		HOOKS.weaponStat = true
+	end
+
+	-- The camera kick. Measured over an eight round burst: 2.49 deg of climb
+	-- with it, 0.01 deg with it hooked out.
+	for _, t in ipairs(recoilTables) do
+		local old
+		old = hookfn(t.applyImpulse, function(...)
+			if MODS.noRecoil then return end
+			return old(...)
+		end)
+		HOOKS.recoil = HOOKS.recoil + 1
+	end
+
+	HOOKS.installed = true
+	HOOKS.note = "ok - stats " .. tostring(HOOKS.weaponStat)
+		.. ", recoil on " .. HOOKS.recoil .. " tables"
+	return HOOKS
+end
+
+-- The stat table is rebuilt from the toggles rather than patched in place, so a
+-- switch turning OFF really removes its entry instead of leaving the last value
+-- behind.
+local SWAY_STATS = { "idleswayampaimmult", "idleswayamphipmult", "idleswaycyclespeed",
+	"walkswayampaimmult", "walkswayamphipmult", "walkswayrotaimmult",
+	"walkswayrothipmult" }
+
+local function refreshStatOverride()
+	local o = {}
+	if MODS.noSpread then
+		o.hipfirespread = 0
+		o.hipfirespreadrecover = 100
+	end
+	if MODS.noSway then
+		for _, k in ipairs(SWAY_STATS) do o[k] = 0 end
+	end
+	if MODS.noEquipTime then
+		o.equiptime = 0.01
+		o.unequiptime = 0.01
+	end
+	if MODS.instantAds then
+		o.aimspeed = 60
+		o.unaimspeed = 60
+		o.magnifyspeed = 60
+		o.unmagnifyspeed = 60
+	end
+	if MODS.rapidFire then
+		o.firerate = math.max(60, MODS.fireRate)
+	end
+	HOOKS.statOverride = o
+end
+
+--------------------------------------------------------------------------------
 -- config
 --------------------------------------------------------------------------------
 
@@ -182,11 +329,14 @@ local CONFIG = {
 	aimPredict = true,        -- aim where the bullet ARRIVES, not where the head is
 	aimLead    = true,        -- and lead a moving target
 
-	-- hitbox magnet - measured, unproven against the server, ships OFF ---------
-	snap       = false,
-	snapFiring = true,        -- only while the mouse is down
-	snapMax    = 5,           -- studs; the game gates on a 6-stud sphere
-	snapPart   = "Head",
+	-- gun mods - these need the FFlag and a rejoin, see the header --------------
+	noRecoil   = false,
+	noSpread   = false,
+	noSway     = false,
+	noEquipTime = false,
+	instantAds = false,
+	rapidFire  = false,
+	fireRate   = 1200,
 
 	-- trigger --------------------------------------------------------------------
 	trg        = false,
@@ -265,6 +415,20 @@ local STATE = {
 }
 
 local function note(s) STATE.note = tostring(s) end
+
+-- CONFIG is what the panel saves; MODS is what the hooks read. Keeping them
+-- separate means a hook never has to know the panel exists, and one call puts
+-- the two back in step.
+local function syncMods()
+	MODS.noRecoil    = CONFIG.noRecoil
+	MODS.noSpread    = CONFIG.noSpread
+	MODS.noSway      = CONFIG.noSway
+	MODS.noEquipTime = CONFIG.noEquipTime
+	MODS.instantAds  = CONFIG.instantAds
+	MODS.rapidFire   = CONFIG.rapidFire
+	MODS.fireRate    = CONFIG.fireRate
+	refreshStatOverride()
+end
 
 --------------------------------------------------------------------------------
 -- the world layer: where Phantom Forces keeps its players
@@ -1732,62 +1896,20 @@ local function aimPass(dt)
 end
 
 --------------------------------------------------------------------------------
--- the hitbox magnet
+-- the hitbox magnet: removed, and why
 --------------------------------------------------------------------------------
 --
--- NOT a forged packet, and it cannot be one: every message carries a rolling key
--- that only exists inside the game's Actor VM. What this does instead is move
--- the GEOMETRY the client grades its own shots against, and then the client
--- sends the hit itself, with its own key, through its own code path.
+-- It worked exactly as designed and it still did nothing, so it is gone rather
+-- than sitting on a page pretending. Moving an enemy anchor onto the bullet
+-- line made this client grade its own shot against the moved box and send the
+-- hit itself - traced, with NetworkClient.send showing bullethit=3 going out on
+-- a valid key - and the server confirmed none of them. Phantom Forces
+-- re-validates the trajectory, so a hit claim that does not match where the
+-- bullet actually went is discarded.
 --
--- Why it is possible at all, measured on a live server:
---
---   ReplicationInterface.playerHitCheck sweeps the bullet against
---   `CharacterHash[partName].CFrame` with a box from DesktopHitBox
---   (Head 1x1x1 precedence 1, Torso 2x2x1, limbs 1x2x1, radius 0.1) - and that
---   CFrame belongs to one of the six 0.001-stud anchors sitting in
---   workspace.Players, which is an ordinary writable Instance.
---
---   A single write is undone before the next frame, but a write REPEATED every
---   frame holds: measured 0.00 studs of deviation both at RenderPriority.Last
---   and at Heartbeat, which is after the physics step and where the bullets are
---   walked.
---
--- Why it is capped, and why it is not "aim anywhere":
---
---   the same function gates on `Math.doesRayIntersectSphere(origin, ray,
---   entry:getPosition(), 6)` BEFORE any part is considered, and getPosition()
---   is the replicated body position rather than the part we moved. So a shot
---   still has to pass within about six studs of the real player. This turns
---   near misses into hits on the part you chose; it cannot hit somebody behind
---   you, and a panel that called it silent aim would be lying.
---
--- WHETHER THE SERVER ACCEPTS THE RESULT IS NOT PROVEN. The client will happily
--- report the hit; `bulletHitConfirm` coming back is the only evidence that it
--- counted, so the page counts those and prints them. It ships OFF, it is in no
--- preset, and the readout says "unverified" until that counter moves.
-
-local function snapPass()
-	if _G.__SELPF ~= GEN then return end
-	if not CONFIG.snap then return end
-	if CONFIG.snapFiring and not firing() then return end
-
-	local pick = pickTarget()
-	if not pick then return end
-	local info = pick.info
-	local part = (CONFIG.snapPart == "Torso") and (info.parts[2] or info.head) or info.head
-	if not part or not part.Parent then return end
-
-	local cf = camera.CFrame
-	local real = part.Position
-	local dist = (real - cf.Position).Magnitude
-	local onRay = cf.Position + cf.LookVector * dist
-	local delta = onRay - real
-	local cap = math.max(0, CONFIG.snapMax)
-	if delta.Magnitude > cap then delta = delta.Unit * cap end
-	part.CFrame = CFrame.new(real + delta)
-	STATE.snapFrames = STATE.snapFrames + 1
-end
+-- The same measurement closes hit-part spoofing: rewriting Torso to Head on a
+-- legitimate hit comes back from the server with the part echoed but the
+-- headshot flag set FALSE and the damage unchanged at 56.0. The server decides.
 
 --------------------------------------------------------------------------------
 -- reading the wire, and only reading it
@@ -1803,9 +1925,12 @@ local function tapNetwork()
 	ev.OnClientEvent:Connect(function(cmd, a, b, c)
 		if _G.__SELPF ~= GEN then return end
 		if cmd == "bulletHitConfirm" then
-			-- (victim, hitPart, position, damage, headshot, time)
+			-- (victim, hitPart, position, damage, headshot, time). The headshot
+			-- flag is the SERVER's own verdict, not an echo of what the client
+			-- claimed - proven by rewriting the part name and watching it come
+			-- back false anyway.
 			STATE.snapHits = STATE.snapHits + 1
-			if b == CONFIG.snapPart then
+			if b == "Head" then
 				STATE.snapPartHits = STATE.snapPartHits + 1
 			end
 		elseif cmd == "newbullets" and type(a) == "table" and a.player == plr then
@@ -2015,18 +2140,6 @@ RunService:BindToRenderStep("SeluxPFESP", Enum.RenderPriority.Camera.Value + 2,
 		if not ok then note("esp: " .. tostring(err)) end
 	end)
 
--- Camera + 3, AFTER the ESP pass on purpose: the boxes are then drawn from the
--- position the replication last wrote, so switching the magnet on does not make
--- the ESP jump around with it.
-RunService:BindToRenderStep("SeluxPFSnap", Enum.RenderPriority.Camera.Value + 3,
-	function()
-		if _G.__SELPF ~= GEN then
-			pcall(function() RunService:UnbindFromRenderStep("SeluxPFSnap") end)
-			return
-		end
-		local ok, err = pcall(snapPass)
-		if not ok then note("snap: " .. tostring(err)) end
-	end)
 
 --------------------------------------------------------------------------------
 -- panel
@@ -2043,6 +2156,12 @@ if UI.sweep then UI.sweep("SeluxPhantomPanel") end
 -- BEFORE the panel is built: the controls read their initial value out of CONFIG
 -- as they are created, so they come up on the saved state by themselves.
 UI.config("phantomforces", CONFIG)
+
+-- The saved switches are in CONFIG by now, so the hooks can be installed and
+-- pointed at them in one go. installHooks is a no-op when the client is still
+-- running its code in an Actor VM, which is the normal case on a first join.
+pcall(installHooks)
+pcall(syncMods)
 
 local win = UI.Window({
 	name = "SeluxPhantomPanel",
@@ -2111,25 +2230,25 @@ local teamOut = teamCard:Readout(4)
 local aimPage = win:Page("AIM", UI.icon.target)
 
 local aimCard = aimPage:Card("ACTIVATION", 1):Accent()
-aimCard:Toggle("Aim assist", CONFIG.aim, function(v) CONFIG.aim = v end)
-aimCard:Dropdown("Trigger", { "Hotkey", "Always", "While firing" }, CONFIG.aimActive,
+aimCard:Toggle("Aimbot", CONFIG.aim, function(v) CONFIG.aim = v end)
+aimCard:Dropdown("Mode", { "Hotkey", "Always", "While firing" }, CONFIG.aimActive,
 	function(v) CONFIG.aimActive = v end)
 aimCard:Dropdown("Aim key", KEYS, CONFIG.aimKey, function(v) CONFIG.aimKey = v end)
-aimCard:Dropdown("Aim at", { "Head", "Torso", "Nearest" }, CONFIG.aimPart,
+aimCard:Dropdown("Hit part", { "Head", "Torso", "Nearest" }, CONFIG.aimPart,
 	function(v) CONFIG.aimPart = v end)
-aimCard:Dropdown("Pick target by", { "Crosshair", "Closest" }, CONFIG.aimPick,
+aimCard:Dropdown("Target selection", { "Crosshair", "Closest" }, CONFIG.aimPick,
 	function(v) CONFIG.aimPick = v end)
-aimCard:Dropdown("Delivery", { "Mouse", "Auto", "Camera" }, CONFIG.aimDeliver,
+aimCard:Dropdown("Aim method", { "Mouse", "Auto", "Camera" }, CONFIG.aimDeliver,
 	function(v) CONFIG.aimDeliver = v end,
 	"measured here: camera writes are thrown away within a frame")
 aimCard:Toggle("Sticky target", CONFIG.aimSticky, function(v) CONFIG.aimSticky = v end)
 aimCard:Toggle("Visible only", CONFIG.aimVisible, function(v) CONFIG.aimVisible = v end,
 	"never aim through a wall", UI.theme.good)
 aimCard:Toggle("Show FOV circle", CONFIG.aimCircle, function(v) CONFIG.aimCircle = v end)
-aimCard:Toggle("Compensate bullet drop", CONFIG.aimPredict,
+aimCard:Toggle("Bullet drop prediction", CONFIG.aimPredict,
 	function(v) CONFIG.aimPredict = v end,
 	"bullets here fly 2800-2950 studs per second and fall at 196", UI.theme.good)
-aimCard:Toggle("Lead moving targets", CONFIG.aimLead, function(v) CONFIG.aimLead = v end,
+aimCard:Toggle("Target prediction", CONFIG.aimLead, function(v) CONFIG.aimLead = v end,
 	"aim where they will be when the bullet arrives", UI.theme.good)
 
 local tuneCard = aimPage:Card("TUNING", 2)
@@ -2168,35 +2287,53 @@ trgTune:Slider("Max distance", 50, 2000, CONFIG.trgMaxDist,
 	function(v) CONFIG.trgMaxDist = v end)
 local trgOut = trgTune:Readout(3)
 
---------------------------------------------------------------- HITBOX
-local snapPage = win:Page("HITBOX", UI.icon.target)
-local snapCard = snapPage:Card("HITBOX MAGNET", 1):Accent()
-snapCard:Toggle("Hitbox magnet", CONFIG.snap, function(v)
-	CONFIG.snap = v
-	STATE.snapFrames, STATE.snapHits, STATE.snapPartHits = 0, 0, 0
-end, "UNVERIFIED against the server - read the note below", UI.theme.bad)
-snapCard:Toggle("Only while firing", CONFIG.snapFiring,
-	function(v) CONFIG.snapFiring = v end,
-	"hold the mouse and it works; otherwise it runs all the time")
-snapCard:Dropdown("Pull towards", { "Head", "Torso" }, CONFIG.snapPart,
-	function(v) CONFIG.snapPart = v end)
-snapCard:Slider("Max pull (studs)", 0, 6, CONFIG.snapMax,
-	function(v) CONFIG.snapMax = v end,
-	"the game only considers a body the shot passed within six studs of")
-snapCard:Label("This is not silent aim and it cannot be: every packet this game "
-	.. "sends carries a rolling key that only exists inside its own Actor VM, so "
-	.. "nothing can be forged. What this moves is the GEOMETRY your own client "
-	.. "grades your shots against - the six 0.001-stud anchors in the enemy "
-	.. "model - and your client then reports the hit itself. It only works on "
-	.. "shots that already pass close to the real body, so it turns near misses "
-	.. "into head hits and nothing more.")
-local snapOut = snapPage:Card("DOES THE SERVER AGREE", 2):Readout(5)
+--------------------------------------------------------------- GUN MODS
+local modPage = win:Page("GUN MODS", UI.icon.wrench or UI.icon.bolt)
+
+local modCard = modPage:Card("GUN MODS", 1):Accent()
+modCard:Toggle("No Recoil", CONFIG.noRecoil, function(v)
+	CONFIG.noRecoil = v syncMods()
+end, "measured: 2.49 deg of climb over a burst becomes 0.01", UI.theme.good)
+modCard:Toggle("No Spread", CONFIG.noSpread, function(v)
+	CONFIG.noSpread = v syncMods()
+end, "measured: 1.02 deg of bloom becomes 0.06", UI.theme.good)
+modCard:Toggle("No Sway", CONFIG.noSway, function(v) CONFIG.noSway = v syncMods() end)
+modCard:Toggle("No Equip Time", CONFIG.noEquipTime,
+	function(v) CONFIG.noEquipTime = v syncMods() end)
+modCard:Toggle("Instant ADS", CONFIG.instantAds,
+	function(v) CONFIG.instantAds = v syncMods() end)
+modCard:Toggle("Rapid Fire", CONFIG.rapidFire, function(v)
+	CONFIG.rapidFire = v syncMods()
+end, "UNVERIFIED - the server may pace shots regardless", UI.theme.warn)
+modCard:Slider("Rapid Fire rate", 200, 3000, CONFIG.fireRate,
+	function(v) CONFIG.fireRate = v syncMods() end)
+
+local modInfo = modPage:Card("REQUIREMENTS", 2)
+local modOut = modInfo:Readout(5)
+modInfo:Label("This game runs its client in an Actor VM, where nothing can be "
+	.. "hooked from outside. One Roblox debug flag moves that code onto the main "
+	.. "thread, and then all of the above works. It only takes effect on a fresh "
+	.. "join, so the button below sets it and puts you back into the SAME server.")
+modInfo:Button("Enable and rejoin this server", function()
+	local setf = globalFn("setfflag")
+	if not setf then note("this executor has no setfflag") return end
+	local ok = pcall(setf, "DebugRunParallelLuaOnMainThread", "true")
+	if not ok then note("setfflag was refused") return end
+	note("flag set - rejoining")
+	task.spawn(function()
+		task.wait(0.6)
+		pcall(function()
+			game:GetService("TeleportService")
+				:TeleportToPlaceInstance(game.PlaceId, game.JobId, plr)
+		end)
+	end)
+end, UI.theme.warn)
 
 --------------------------------------------------------------- RECOIL
 local rcsPage = win:Page("RECOIL", UI.icon.wave or UI.icon.chart)
 local rcsCard = rcsPage:Card("RECOIL CONTROL", 1):Accent()
-rcsCard:Toggle("Recoil control", CONFIG.rcs, function(v) CONFIG.rcs = v end,
-	"pulls back the part of the kick that was not you")
+rcsCard:Toggle("Recoil Compensation", CONFIG.rcs, function(v) CONFIG.rcs = v end,
+	"works without the FFlag - No Recoil on the GUN MODS page is stronger")
 rcsCard:Slider("Compensation (%)", 0, 100, CONFIG.rcsPct,
 	function(v) CONFIG.rcsPct = v end)
 rcsCard:Slider("Max per frame (deg)", 1, 12, CONFIG.rcsMaxDeg,
@@ -2294,21 +2431,16 @@ task.spawn(function()
 				string.format("drop      aiming %.2f studs high", STATE.dropStuds),
 			}, "\n"))
 
-			local verdict
-			if not CONFIG.snap then
-				verdict = "off"
-			elseif STATE.snapHits == 0 then
-				verdict = "no confirm yet - UNPROVEN"
-			else
-				verdict = STATE.snapPartHits .. " of " .. STATE.snapHits
-					.. " named " .. CONFIG.snapPart
-			end
-			snapOut:set(table.concat({
-				"held      " .. STATE.snapFrames .. " frames",
-				"confirms  " .. STATE.snapHits .. " since switched on",
-				"of those  " .. STATE.snapPartHits .. " named " .. CONFIG.snapPart,
-				"verdict   " .. verdict,
-				"the server confirming a hit is the ONLY evidence this works",
+			local nOvr = 0
+			for _ in pairs(HOOKS.statOverride) do nOvr = nOvr + 1 end
+			modOut:set(table.concat({
+				"flag      " .. (fflagOn() == nil and "no setfflag here"
+					or (fflagOn() and "set" or "not set")),
+				"client    " .. (parallelOnMainThread()
+					and "main thread - hooks possible" or "Actor VM - hooks impossible"),
+				"hooks     " .. HOOKS.note,
+				"stats     " .. nOvr .. " overridden right now",
+				"hits      " .. STATE.snapHits .. " confirmed by the server",
 			}, "\n"))
 
 			trgOut:set(table.concat({
@@ -2400,6 +2532,8 @@ _G.__SELPF_DBG = {
 	visible = visible, screenBox = screenBox, renderPass = renderPass,
 	aimPass = aimPass, deliverMode = deliverMode, underCrosshair = underCrosshair,
 	pullTrigger = pullTrigger, probeClick = probeClick, hudRead = hudRead,
+	syncMods = syncMods, installHooks = installHooks, MODS = MODS, HOOKS = HOOKS,
+	heldWeapon = heldWeapon, predictPoint = predictPoint,
 	boardOf = function() return boardOf end, folderTeam = function() return folderTeam end,
 	drawn = drawn,
 }
