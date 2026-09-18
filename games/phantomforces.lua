@@ -160,7 +160,8 @@ local MODS = _G.__SELPF_MODS or {
 _G.__SELPF_MODS = MODS
 
 local HOOKS = _G.__SELPF_HOOKS or { installed = false, note = "not installed",
-	statOverride = {}, weaponStat = false, recoil = 0 }
+	statOverride = {}, weaponStat = false, recoil = 0, bent = {} }
+HOOKS.bent = HOOKS.bent or {}
 _G.__SELPF_HOOKS = HOOKS
 
 local function fflagOn()
@@ -190,7 +191,7 @@ local silentAimPoint = nil
 -- which is worse. The honest move is to detect that the live hooks are older
 -- than this file and say so, because the alternative is a panel whose switches
 -- quietly drive last version's code.
-local HOOK_VERSION = 2
+local HOOK_VERSION = 4
 
 local function installHooks()
 	if HOOKS.installed then
@@ -209,13 +210,17 @@ local function installHooks()
 	end
 
 	local hookfn = globalFn("hookfunction")
-	local firearm, bullets, recoilTables = nil, nil, {}
+	local firearm, bullets, net, recoilTables = nil, nil, nil, {}
 	local ok = pcall(function()
 		for _, v in ipairs(getgc(true)) do
 			if type(v) == "table" then
 				if not firearm and type(rawget(v, "getWeaponStat")) == "function"
 					and type(rawget(v, "fireRound")) == "function" then
 					firearm = v
+				end
+				if not net and type(rawget(v, "send")) == "function"
+					and type(rawget(v, "getPing")) == "function" then
+					net = v
 				end
 				if not bullets and type(rawget(v, "newBullet")) == "function"
 					and type(rawget(v, "cleanBullets")) == "function" then
@@ -272,7 +277,14 @@ local function installHooks()
 			-- would keep pointing at the old run's target picker and the old
 			-- run's counters, and the panel would sit there reading zero while
 			-- bullets were being bent. Measured exactly that way once.
-			if MODS.silent and type(props) == "table"
+			-- ONLY OUR OWN BULLETS. newBullet is called for every bullet in the
+			-- world, remote players' replicated ones included - 208 of them in
+			-- twelve seconds against a handful of our own - and bending those
+			-- redirects other people's tracers on our screen for no gain.
+			-- `extra.firearmObject` is set only by our own fireRound.
+			local ours = type(props) == "table" and type(props.extra) == "table"
+				and props.extra.firearmObject ~= nil
+			if MODS.silent and ours
 				and typeof(props.velocity) == "Vector3"
 				and typeof(props.position) == "Vector3" then
 				local pick = HOOKS.aimPoint
@@ -280,14 +292,58 @@ local function installHooks()
 				if aim then
 					local dir = aim - props.position
 					if dir.Magnitude > 0.001 then
-						props.velocity = dir.Unit * props.velocity.Magnitude
+						local unit = dir.Unit
+						props.velocity = unit * props.velocity.Magnitude
 						HOOKS.silentShots = (HOOKS.silentShots or 0) + 1
+						-- Remember it by TICKET, because the packet that tells the
+						-- server about this shot is built separately from the
+						-- bullet object and has to be given the same direction.
+						local ticket = props.extra.bulletTicket
+						if ticket then HOOKS.bent[ticket] = unit end
 					end
 				end
 			end
 			return old(props, ...)
 		end)
 		HOOKS.silent = true
+	end
+
+	-- THE OTHER HALF OF SILENT AIM, and without it the feature is a lie that the
+	-- client tells itself. `fireRound` does not build the network packet from the
+	-- bullet object - it collects `{ direction, ticket }` pairs from its own
+	-- local and sends those:
+	--
+	--     v225[#v225 + 1] = { v232, v230 }
+	--     NetworkClient:send("newbullets", uniqueId, v226, GameClock.getTime())
+	--
+	-- So bending the bullet alone makes the CLIENT hit - the hitmarker even
+	-- appears, because the hitmarker is drawn by the client's own hit detection -
+	-- while the server still sees a shot going the original way and refuses the
+	-- damage. Reported exactly like that: "hitmarker comes, no damage". Matching
+	-- the packet to the bullet by ticket is what closes it.
+	if net then
+		local old
+		old = hookfn(net.send, function(self, name, uid, list, ...)
+			-- The payload is a WRAPPER, not the list: `{ firepos = ..., index = ...,
+			-- bullets = { {direction, ticket}, ... } }`. Iterating the wrapper
+			-- finds no pairs at all and the rewrite silently does nothing, which
+			-- read as "the bullet is bent but the packet is not" for a while.
+			if name == "newbullets" and type(list) == "table" then
+				local entries = (type(list.bullets) == "table") and list.bullets or list
+				for _, entry in pairs(entries) do
+					if type(entry) == "table" and typeof(entry[1]) == "Vector3" then
+						local bent = entry[2] and HOOKS.bent[entry[2]]
+						if bent then
+							entry[1] = bent
+							HOOKS.bent[entry[2]] = nil
+							HOOKS.sentBent = (HOOKS.sentBent or 0) + 1
+						end
+					end
+				end
+			end
+			return old(self, name, uid, list, ...)
+		end)
+		HOOKS.send = true
 	end
 
 	-- The camera kick. Measured over an eight round burst: 2.49 deg of climb
@@ -2732,7 +2788,7 @@ silCard:Toggle("Show FOV circle", CONFIG.silentCircle,
 silCard:Colour("FOV colour", CONFIG.colSilentFov,
 	function(c) CONFIG.colSilentFov = c end)
 
-local silOut = silPage:Card("WHAT THE SERVER SEES", 2):Readout(5)
+local silOut = silPage:Card("WHAT THE SERVER SEES", 2):Readout(6)
 silPage:Card("HOW THIS ONE WORKS", 2):Label(
 	"It bends the BULLET, it does not claim a hit. The first version replaced the "
 	.. "game's answer to 'what did I hit' - the packets went out correctly and the "
@@ -2899,6 +2955,7 @@ task.spawn(function()
 				"hook      " .. (HOOKS.silent and "installed" or "NOT installed - needs the FFlag"),
 				"target    " .. STATE.silentTarget,
 				"bent      " .. STATE.silentShots .. " bullets redirected",
+				"packets   " .. (HOOKS.sentBent or 0) .. " sent with the new direction",
 				"confirms  " .. STATE.snapHits .. " hits the server accepted",
 				"of those  " .. STATE.snapPartHits .. " counted as headshots",
 			}, "\n"))
