@@ -155,7 +155,7 @@ local MODS = _G.__SELPF_MODS or {
 	noRecoil = false, noSpread = false, noSway = false, noEquipTime = false,
 	instantAds = false, rapidFire = false, fireRate = 1200,
 	noBob = false, noSuppression = false, noBolt = false, stability = false,
-	silent = false,
+	silent = false, fastReload = false, reloadFactor = 0.3,
 }
 _G.__SELPF_MODS = MODS
 
@@ -191,7 +191,7 @@ local silentAimPoint = nil
 -- which is worse. The honest move is to detect that the live hooks are older
 -- than this file and say so, because the alternative is a panel whose switches
 -- quietly drive last version's code.
-local HOOK_VERSION = 4
+local HOOK_VERSION = 5
 
 local function installHooks()
 	if HOOKS.installed then
@@ -252,6 +252,37 @@ local function installHooks()
 			return old(self, name, ...)
 		end)
 		HOOKS.weaponStat = true
+	end
+
+	-- FASTER RELOAD. There is no reload TIME in the weapon stats - the duration
+	-- IS the animation, and the state machine asks `getAnimLength(name)` for it
+	-- (`getCurrentReloadLength` is just that call with the current reload file's
+	-- name). Scaling the answer therefore shortens the reload state without
+	-- touching the animation system.
+	--
+	-- Scoped to the reload on purpose: the same function answers for equipping,
+	-- firing and bolt work, and shrinking all of it is how a script ends up
+	-- feeling broken in ways nobody can describe.
+	if firearm then
+		local old
+		old = hookfn(firearm.getAnimLength, function(self, name, ...)
+			local real = old(self, name, ...)
+			if not MODS.fastReload or type(real) ~= "number" or real <= 0 then
+				return real
+			end
+			local isReload = false
+			if type(name) == "string" and name:lower():find("reload", 1, true) then
+				isReload = true
+			else
+				local okf, file = pcall(function() return self:getCurrentReloadFile() end)
+				if okf and type(file) == "table" and file.reloadName == name then
+					isReload = true
+				end
+			end
+			if not isReload then return real end
+			return real * math.clamp(MODS.reloadFactor or 0.3, 0.05, 1)
+		end)
+		HOOKS.reload = true
 	end
 
 	-- SILENT AIM, and it is the bullet that is bent - not the hit that is
@@ -499,6 +530,8 @@ local CONFIG = {
 	noSuppression = false,
 	noBolt     = false,
 	stability  = false,
+	fastReload = false,
+	reloadFactor = 0.3,
 
 	-- trigger --------------------------------------------------------------------
 	trg        = false,
@@ -601,6 +634,8 @@ local function syncMods()
 	MODS.noBolt        = CONFIG.noBolt
 	MODS.stability     = CONFIG.stability
 	MODS.silent        = CONFIG.silent
+	MODS.fastReload    = CONFIG.fastReload
+	MODS.reloadFactor  = CONFIG.reloadFactor
 	refreshStatOverride()
 end
 
@@ -2885,6 +2920,12 @@ modCard2:Toggle("No Bolt Re-chamber", CONFIG.noBolt,
 modCard2:Toggle("Max Stability", CONFIG.stability,
 	function(v) CONFIG.stability = v syncMods() end,
 	"hipfire stability to 1 and the aim kick multiplier to 0")
+modCard2:Toggle("Fast Reload", CONFIG.fastReload,
+	function(v) CONFIG.fastReload = v syncMods() end,
+	"the reload time IS the animation length, so this shortens that")
+modCard2:Slider("Reload time left", 0.05, 1, CONFIG.reloadFactor,
+	function(v) CONFIG.reloadFactor = v syncMods() end,
+	"0.3 means it takes 30 percent as long; 0.05 is as close to instant as it goes")
 
 local modInfo = modPage:Card("REQUIREMENTS", 2)
 modOut = modInfo:Readout(5)
