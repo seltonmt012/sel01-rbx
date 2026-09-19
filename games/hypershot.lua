@@ -189,6 +189,8 @@ local CONFIG = {
 	silentPick   = "Crosshair",
 	silentFov    = 90,
 	silentCircle = true,
+	silentMode   = "FOV circle",   -- or "Whole screen"
+	silentLine   = true,           -- a line from the crosshair to the current silent target
 	silentSkipProt = true,
 	silentMaxDist = 500,
 	silentDuel   = false,   -- also in a duel, where every shot is recorded
@@ -794,6 +796,14 @@ local fovCircle = make("Circle", { Thickness = 1, NumSides = 48, Filled = false,
 local silentCircle = make("Circle", { Thickness = 1, NumSides = 48, Filled = false,
 	Transparency = 0.55, ZIndex = 1 })
 
+-- Forward-declared: the silent aim state is defined further down, and a local is
+-- invisible above its own definition. The silent section fills this in.
+local SIL_POINT = function() return nil end
+
+local silentLineObj = make("Line", { Thickness = 1.5, ZIndex = 4, Transparency = 0.9 })
+local silentDot = make("Circle", { Thickness = 1.5, NumSides = 16, Filled = false,
+	Radius = 6, ZIndex = 4 })
+
 local crossLines = {}
 for i = 1, 4 do crossLines[i] = make("Line", { Thickness = 1, ZIndex = 4 }) end
 local crossDot = make("Circle", { Filled = true, NumSides = 8, Radius = 1, ZIndex = 4 })
@@ -838,7 +848,26 @@ local function renderPass()
 		fovCircle.Radius = CONFIG.aimFov
 		fovCircle.Color = CONFIG.colFov
 	end
+	-- Where the next shot will go. Without it a target just outside the circle
+	-- and a broken silent aim look exactly the same.
+	local sp = nil
+	if STATE.silentOn and CONFIG.silentLine then sp = SIL_POINT() end
+	local spv = nil
+	if sp then spv = camera:WorldToViewportPoint(sp) end
+	local showLine = spv ~= nil and spv.Z > 0
+	silentLineObj.Visible = showLine
+	silentDot.Visible = showLine
+	if showLine then
+		local p2 = Vector2.new(spv.X, spv.Y)
+		silentLineObj.From = mid
+		silentLineObj.To = p2
+		silentLineObj.Color = CONFIG.colSilent
+		silentDot.Position = p2
+		silentDot.Color = CONFIG.colSilent
+	end
+
 	silentCircle.Visible = CONFIG.silent and CONFIG.silentCircle
+		and CONFIG.silentMode ~= "Whole screen"
 	if silentCircle.Visible then
 		silentCircle.Position = mid
 		silentCircle.Radius = CONFIG.silentFov
@@ -1671,6 +1700,7 @@ for U, orig in pairs(MP) do
 end
 
 local SIL = { point = nil, installedOn = nil }
+SIL_POINT = function() return SIL.point end
 
 local function silentUninstall()
 	for U, orig in pairs(MP) do
@@ -1693,9 +1723,22 @@ local function silentInstall()
 		-- Gun.Shoot is looked up LIVE: a respawn rebuilds the controller and with
 		-- it the Shoot function, and a captured one would never match again.
 		local gun = CTL.Gun
-		if pt and gun and _G.__HYPER == GEN and debug.info(2, "f") == gun.Shoot then
-			STATE.silentBent = STATE.silentBent + 1
-			return pt
+		if pt and gun then
+			-- The caller is searched a few levels up, NOT read at level 2. When the
+			-- GAME's own thread (the mouse handler) calls an executor closure,
+			-- Potassium puts a C frame in between, so level 2 reads "[C]" and Shoot
+			-- sits one level higher. A shot fired from the script's own thread has
+			-- no such frame. Measured: 70 real mouse shots, 0 bent, while every
+			-- script-fired shot bent - the whole "silent aim does nothing" report.
+			local shoot = gun.Shoot
+			for level = 2, 5 do
+				local f = debug.info(level, "f")
+				if f == nil then break end
+				if f == shoot then
+					STATE.silentBent = STATE.silentBent + 1
+					return pt
+				end
+			end
 		end
 		return orig(...)
 	end
@@ -1775,26 +1818,64 @@ local function silentPass()
 		return
 	end
 	STATE.silentOn = true
-	local pick = bestTarget(CONFIG.silentFov, CONFIG.silentPart, CONFIG.silentMaxDist,
-		true, CONFIG.silentSkipProt, CONFIG.silentPick)
-	if not pick then
+
+	-- The visibility test IS the landing test: a target counts when some point of
+	-- its body is reachable by the bullet's own ray, not only when the exact
+	-- centre of its head is. Testing the centre alone skipped everybody half
+	-- behind cover - the case silent aim is for. Cheap screen checks first, the
+	-- rays only for the ones that pass them.
+	local mid = crosshairPos()
+	local camPos = camera.CFrame.Position
+	local range = math.min(CONFIG.silentMaxDist, weaponRange())
+	local wholeScreen = CONFIG.silentMode == "Whole screen"
+	local vp = camera.ViewportSize
+	local cands = {}
+	for _, entry in ipairs(combatants()) do
+		if eligible(entry) then
+			local hp, _, root = aliveOf(entry.model)
+			if hp and not (CONFIG.silentSkipProt and protectedOf(entry.model)) then
+				local dist = (camPos - root.Position).Magnitude
+				if dist <= range then
+					local sp = camera:WorldToViewportPoint(root.Position)
+					local px = (Vector2.new(sp.X, sp.Y) - mid).Magnitude
+					local onScreen = sp.Z > 0 and sp.X >= 0 and sp.X <= vp.X and sp.Y >= 0 and sp.Y <= vp.Y
+					if onScreen and (wholeScreen or px <= CONFIG.silentFov + 40) then
+						local score
+						if CONFIG.silentPick == "Closest" then score = dist
+						elseif CONFIG.silentPick == "Lowest HP" then score = hp
+						else score = px end
+						cands[#cands + 1] = { entry = entry, score = score, px = px }
+					end
+				end
+			end
+		end
+	end
+	table.sort(cands, function(a, b) return a.score < b.score end)
+
+	local chosen, point, partName
+	for _, cand in ipairs(cands) do
+		local pos, name = landingPoint(cand.entry.model, CONFIG.silentPart)
+		if pos then
+			local sp = camera:WorldToViewportPoint(pos)
+			local px = (Vector2.new(sp.X, sp.Y) - mid).Magnitude
+			if wholeScreen or px <= CONFIG.silentFov then
+				chosen, point, partName = cand, pos, name
+				break
+			end
+		end
+	end
+	STATE.silentSeen = #cands
+
+	if not chosen then
 		SIL.point = nil
 		STATE.silentTarget = "-"
-		STATE.silentNote = "nobody visible in the circle"
-		STATE.silentSeen = 0
-		return
-	end
-	STATE.silentSeen = 1
-	local point, partName = landingPoint(pick.entry.model, CONFIG.silentPart)
-	if not point then
-		SIL.point = nil
-		STATE.silentTarget = pick.entry.name
-		STATE.silentNote = "a hat or an accessory covers every point - holding fire"
+		STATE.silentNote = (#cands > 0) and "enemies near the circle, but no body point a bullet can reach"
+			or (wholeScreen and "nobody on screen in range" or "nobody inside the circle")
 		return
 	end
 	SIL.point = point
-	STATE.silentTarget = pick.entry.name .. (pick.entry.bot and "  (bot)" or "  (player)")
-	STATE.silentNote = "shots go to " .. partName
+	STATE.silentTarget = chosen.entry.name .. (chosen.entry.bot and "  (bot)" or "  (player)")
+	STATE.silentNote = "shots go to " .. tostring(partName)
 end
 
 --------------------------------------------------------------------------------
@@ -2517,9 +2598,13 @@ reg("silent", sCard:Toggle("Silent aim", CONFIG.silent, function(v)
 	note(v and "silent aim ARMED" or "silent aim off")
 end, "the loudest thing in this panel - the kill feed shows hits your view never pointed at",
 	UI.theme.bad))
+reg("silentMode", sCard:Dropdown("Reach", { "FOV circle", "Whole screen" }, CONFIG.silentMode,
+	function(v) CONFIG.silentMode = v end))
 reg("silentFov", sCard:Slider("FOV (pixels)", 5, 600, CONFIG.silentFov, function(v)
 	CONFIG.silentFov = v
 end, "a target has to be inside this circle"))
+sCard:Toggle("Show the target", CONFIG.silentLine, function(v) CONFIG.silentLine = v end,
+	"a line from the crosshair to where the next shot will go", UI.theme.good)
 sCard:Toggle("Draw the circle", CONFIG.silentCircle, function(v)
 	CONFIG.silentCircle = v
 end, "the circle IS the reach of this feature", UI.theme.good)
