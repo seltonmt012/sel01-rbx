@@ -34,6 +34,25 @@
       "detect": "local rs = game:GetService('ReplicatedStorage') local c = rs:FindFirstChild('Content') local pc = c and c:FindFirstChild('ProductionContent') return rs:FindFirstChild('ReadyEvent') ~= nil and rs:FindFirstChild('PlayerDataEvent') ~= nil and pc ~= nil and pc:FindFirstChild('WeaponDatabase') ~= nil"
     },
     {
+      "alias": "hypershot",
+      "name": "Hypershot!",
+      "file": "games/hypershot.lua",
+      "places": [
+        17516596118,
+        131008473296170,
+        122181485177067,
+        100040622766961,
+        108428559529058,
+        86696142930150,
+        103420430505525,
+        134474332601640,
+        92980558919575
+      ],
+      "status": "ok",
+      "note": "FREE. Frosted Studio. The place list is the game's own Modules.GetPlaceType (Main, Mobile, GunGame, MainForNewPlayers, Duels, Beginner, GoldenOne/TwitchGauntlet, DuelHub, SniperOnly); detection is content based as well. Bots live in workspace.Mobs, the team is the Team attribute (-1 = free for all). The camera is Scriptable and keeps its own angles, so the aim writes ActionHandler:UpdateCamRot; firing goes through Shared.MouseDown + Controller:LeftClick at identity 2. The client reports its own hits: a shot bent 35.7 deg off the camera and a 3-shot burst with no gap both registered in full. ReplicatedFirst.LocalScript is a Luraph anticheat answering the Aishiteru RemoteFunction with a metamethod-hook probe, so nothing is hooked and VirtualInputManager is never used. Duels are recorded (KeyframeBuffer) - silent aim and the gun mods pause there by default",
+      "detect": "local rs = game:GetService('ReplicatedStorage') local m = rs:FindFirstChild('Modules') local n = rs:FindFirstChild('Network') local r = n and n:FindFirstChild('Remotes') return m ~= nil and m:FindFirstChild('GetPlaceType') ~= nil and m:FindFirstChild('WeaponIntegrityConstants') ~= nil and r ~= nil and r:FindFirstChild('Shoot') ~= nil"
+    },
+    {
       "alias": "islandescape",
       "name": "Mrbeast Island Escape",
       "file": "games/islandescape.lua",
