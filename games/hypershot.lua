@@ -203,6 +203,52 @@ local CONFIG = {
 	rapidMult  = 1.3,
 	modsDuel   = false,
 
+	-- more gun mods -------------------------------------------------------------
+	noSway     = false,
+	instantAds = false,
+	fastReload = false,
+	reloadMult = 2,
+	fastEquip  = false,
+	equipMult  = 3,
+	predict    = true,    -- lead moving targets with projectile weapons
+	silentHitPct = 100,
+
+	-- world & visuals -----------------------------------------------------------
+	pickupEsp  = false,
+	projEsp    = false,
+	tracers    = false,
+	tracerLife = 0.6,
+	colTracer  = Color3.fromRGB(255, 220, 90),
+	colPickup  = Color3.fromRGB(120, 255, 170),
+	vmColour   = false,
+	vmMaterial = "ForceField",
+	colVm      = Color3.fromRGB(140, 90, 255),
+	fovOn      = false,
+	fovValue   = 100,
+	fullbright = false,
+	noFog      = false,
+	noEffects  = false,
+	timeOn     = false,
+	timeValue  = 14,
+
+	-- more movement ---------------------------------------------------------------
+	jumpOn     = false,
+	jumpHeight = 18,
+	infJump    = false,
+	noSlideCd  = false,
+
+	-- misc ---------------------------------------------------------------------------
+	autoSpawn  = false,
+	antiAfk    = false,
+	staffAlert = true,
+	staffPanic = false,
+	streamer   = false,
+	streamerName = "Player",
+	skinOn     = false,
+	skinName   = "Army Camo",
+	killVfxOn  = false,
+	killVfx    = "",
+
 	-- movement -----------------------------------------------------------------
 	speed      = false,
 	speedAdd   = 8,       -- studs/s on top of the game's own speed (16, +9 sprinting)
@@ -800,6 +846,12 @@ local silentCircle = make("Circle", { Thickness = 1, NumSides = 48, Filled = fal
 -- invisible above its own definition. The silent section fills this in.
 local SIL_POINT = function() return nil end
 
+-- Everything the second feature round added lives in THIS one table, filled in
+-- by a single do-block further down. Luau allows 200 locals per function and the
+-- main chunk of this file is close to it; a table costs one register however
+-- many features it carries.
+local EXTRA = {}
+
 local silentLineObj = make("Line", { Thickness = 1.5, ZIndex = 4, Transparency = 0.9 })
 local silentDot = make("Circle", { Thickness = 1.5, NumSides = 16, Filled = false,
 	Radius = 6, ZIndex = 4 })
@@ -874,6 +926,10 @@ local function renderPass()
 		silentCircle.Color = CONFIG.colSilent
 	end
 	drawCrosshair(mid)
+	if EXTRA.render then
+		local ok, err = pcall(EXTRA.render, mid)
+		if not ok then note("world esp: " .. tostring(err)) end
+	end
 
 	if not anyDrawing() then
 		hideAll()
@@ -1235,6 +1291,7 @@ UserInputService.InputBegan:Connect(function(input, processed)
 	if input.UserInputType ~= Enum.UserInputType.Keyboard then return end
 	local spec = resolveKey(CONFIG.panicKey)
 	if not spec or not spec.key or input.KeyCode ~= spec.key then return end
+	if EXTRA.panic then EXTRA.panic("panic key") return end
 	CONFIG.aim, CONFIG.trig, CONFIG.aimFire, CONFIG.silent = false, false, false, false
 	CONFIG.rapid, CONFIG.fly, CONFIG.speed = false, false, false
 	for _, fn in ipairs(panicHandlers) do pcall(fn) end
@@ -1642,6 +1699,7 @@ local function aimPass(dt)
 	end
 	local dist = (pos - part.Position).Magnitude
 	local aimAt = humanAimPoint(part, dist)
+	if EXTRA.lead then aimAt = EXTRA.lead(pick.entry.model, aimAt) end
 	if CONFIG.hum and engagement.over
 		and (now - engagement.t0) < engagement.windup + 0.09 then
 		local side = (engagement.ox >= 0) and 1 or -1
@@ -1735,6 +1793,10 @@ local function silentInstall()
 				local f = debug.info(level, "f")
 				if f == nil then break end
 				if f == shoot then
+					-- Hit chance below 100 lets that one shot go where you aim.
+					if CONFIG.silentHitPct < 100 and math.random(100) > CONFIG.silentHitPct then
+						break
+					end
 					STATE.silentBent = STATE.silentBent + 1
 					return pt
 				end
@@ -1873,6 +1935,7 @@ local function silentPass()
 			or (wholeScreen and "nobody on screen in range" or "nobody inside the circle")
 		return
 	end
+	if EXTRA.lead then point = EXTRA.lead(chosen.entry.model, point) end
 	SIL.point = point
 	STATE.silentTarget = chosen.entry.name .. (chosen.entry.bot and "  (bot)" or "  (player)")
 	STATE.silentNote = "shots go to " .. tostring(partName)
@@ -1978,6 +2041,10 @@ local function applyMods()
 	local c = ctl()
 	if not c or type(c.Shared.Tools) ~= "table" then return end
 	pcall(applySpeed, c)
+	if EXTRA.applyGun then
+		local ok, err = pcall(EXTRA.applyGun, c)
+		if not ok then note("gun extras: " .. tostring(err)) end
+	end
 	local allowed = modsAllowed()
 	local active = {}
 	for _, tool in pairs(c.Shared.Tools) do
@@ -2259,6 +2326,708 @@ task.spawn(function()
 end)
 
 --------------------------------------------------------------------------------
+-- the second round: more gun mods, world, visuals, movement, misc
+--------------------------------------------------------------------------------
+--
+-- Every mechanism below was read out of THIS game's code - the comment on each
+-- names where. A technique that works in one game says nothing about the next.
+
+do
+	local Lighting = game:GetService("Lighting")
+	local TeleportService = game:GetService("TeleportService")
+	local HttpService = game:GetService("HttpService")
+
+	-- projectile lead --------------------------------------------------------------
+	-- ProjectileMod.new(origin, target, WSettings.ProjSpeed, ignore, width, ProjGravity):
+	-- pos(t) = origin + v*t - (0, g*t*t/2, 0), g = ProjGravity or workspace.Gravity.
+	-- Hitscan guns get no lead at all - their ray is instant.
+	function EXTRA.lead(model, pos)
+		if not CONFIG.predict then return pos end
+		local tool = currentTool()
+		local w = tool and tool.WSettings
+		local speed = w and w.Projectile and tonumber(w.ProjSpeed)
+		if not speed or speed <= 0 then return pos end
+		local g = tonumber(w.ProjGravity) or workspace.Gravity
+		local root = model and model:FindFirstChild("HumanoidRootPart")
+		local vel = root and root.AssemblyLinearVelocity or Vector3.new()
+		local origin = camera.CFrame.Position
+		local aim = pos
+		for _ = 1, 3 do
+			local t = (aim - origin).Magnitude / speed
+			aim = pos + vel * t + Vector3.new(0, 0.5 * g * t * t, 0)
+		end
+		return aim
+	end
+
+	-- sway, ADS, reload and equip speed ----------------------------------------------
+	-- ViewModel.UpdateViewModel skips the whole bob when Shared.NoSway is set (the
+	-- game's own flag, used while inspecting); the scope lerp runs at
+	-- 0.3 * WSettings.ScopeSpeed; reload and equip are ANIMATIONS whose speed is
+	-- the AnimSpeed attribute on IgnoreThese.MyArms.Anims.<name>, and the reload
+	-- ends on the animation's marker - so a faster animation is a faster reload.
+	local swayWas = false
+	local ANIMORIG = setmetatable({}, { __mode = "k" })
+
+	-- ANY animation whose name contains "reload", not a fixed list: the first build
+	-- matched Reload / ReloadStart / ReloadEnd only, and "fast reload works but not
+	-- every time" was the report that came back.
+	local function isReloadAnim(name)
+		return string.find(string.lower(name), "reload", 1, true) ~= nil
+	end
+
+	local function animSpeed(a)
+		local allowed = modsAllowed()
+		local mult = nil
+		if isReloadAnim(a.Name) and CONFIG.fastReload and allowed then mult = CONFIG.reloadMult
+		elseif a.Name == "Equip" and CONFIG.fastEquip and allowed then mult = CONFIG.equipMult end
+		local stored = ANIMORIG[a]
+		if mult then
+			if stored == nil then
+				stored = a:GetAttribute("AnimSpeed") or NILV
+				ANIMORIG[a] = stored
+			end
+			local want = ((stored == NILV) and 1 or stored) * mult
+			if a:GetAttribute("AnimSpeed") ~= want then a:SetAttribute("AnimSpeed", want) end
+		elseif stored ~= nil then
+			a:SetAttribute("AnimSpeed", (stored ~= NILV) and stored or nil)
+			ANIMORIG[a] = nil
+		end
+	end
+
+	local function myArms()
+		local ig = workspace:FindFirstChild("IgnoreThese")
+		return ig and ig:FindFirstChild("MyArms")
+	end
+
+	local function animSpeeds()
+		local arms = myArms()
+		local anims = arms and arms:FindFirstChild("Anims")
+		if not anims then return end
+		for _, a in ipairs(anims:GetChildren()) do pcall(animSpeed, a) end
+	end
+
+	-- An equip animation starts the moment the weapon is swapped, so a 0.25s loop
+	-- would miss it. New animations are caught as they are parented.
+	do
+		local ig = workspace:FindFirstChild("IgnoreThese")
+		if ig then
+			ig.DescendantAdded:Connect(function(d)
+				if _G.__HYPER ~= GEN then return end
+				if d:IsA("Animation") and (CONFIG.fastReload or CONFIG.fastEquip) then
+					local parent = d.Parent
+					if parent and parent.Name == "Anims" and parent.Parent and parent.Parent.Name == "MyArms" then
+						pcall(animSpeed, d)
+					end
+				end
+			end)
+		end
+	end
+
+	-- skins and kill effects - CLIENT SIDE ONLY ---------------------------------------
+	-- ViewModel.Equip applies tool.SkinData with SkinModule:ApplySkin; the server
+	-- builds SkinData from YOUR inventory (SpawnData), and other players read the
+	-- skin off the server's Tool attributes. So this changes what you see and
+	-- nothing anybody else sees. GunSkins is one global list: any skin fits any gun.
+	local skinFolder = ReplicatedStorage:FindFirstChild("Modules")
+		and ReplicatedStorage.Modules:FindFirstChild("SkinModules")
+	local skinModuleInst = skinFolder and skinFolder:FindFirstChild("SkinModule")
+	local SkinModule = tryRequire(skinModuleInst)
+	local GunSkins = tryRequire(skinModuleInst and skinModuleInst:FindFirstChild("GunSkins"))
+	EXTRA.skinList = {}
+	if type(GunSkins) == "table" then
+		for name in pairs(GunSkins) do EXTRA.skinList[#EXTRA.skinList + 1] = tostring(name) end
+		table.sort(EXTRA.skinList)
+	end
+	EXTRA.killList = {}
+	do
+		local kv = ReplicatedStorage:FindFirstChild("KillVFX")
+		local assets = kv and kv:FindFirstChild("Assets")
+		if assets then
+			for _, a in ipairs(assets:GetChildren()) do EXTRA.killList[#EXTRA.killList + 1] = a.Name end
+			table.sort(EXTRA.killList)
+		end
+	end
+	if CONFIG.killVfx == "" and EXTRA.killList[1] then CONFIG.killVfx = EXTRA.killList[1] end
+
+	local SKINORIG = setmetatable({}, { __mode = "k" })
+	local skinShown = { model = nil, name = nil }
+
+	local function applySkins(c)
+		local on = CONFIG.skinOn and CONFIG.skinName ~= ""
+		for _, tool in pairs(c.Shared.Tools) do
+			if type(tool) == "table" and type(tool.WSettings) == "table" then
+				if on then
+					if SKINORIG[tool] == nil then SKINORIG[tool] = tool.SkinData or false end
+					local cur = tool.SkinData
+					if not (type(cur) == "table" and cur.SkinName == CONFIG.skinName) then
+						tool.SkinData = { SkinName = CONFIG.skinName, IsCE = false }
+					end
+				elseif SKINORIG[tool] ~= nil then
+					tool.SkinData = SKINORIG[tool] or nil
+					SKINORIG[tool] = nil
+				end
+			end
+		end
+		-- The gun already in hand only gets SkinData on its NEXT equip; this paints
+		-- it now, once per model and skin.
+		local arms = myArms()
+		local wm = arms and arms:FindFirstChild("WModel")
+		local want = on and CONFIG.skinName or nil
+		if wm and SkinModule and want and (skinShown.model ~= wm or skinShown.name ~= want) then
+			skinShown.model, skinShown.name = wm, want
+			task.spawn(function()
+				gameIdentity()
+				local ok, err = pcall(function() SkinModule:ApplySkin(wm, { SkinName = want }) end)
+				if not ok then note("skin: " .. tostring(err)) end
+			end)
+		end
+		if not on then skinShown.model, skinShown.name = nil, nil end
+	end
+
+	-- GExtra.PredictKills plays MenuCoreData.EquippedKillVFX[weapon] for YOUR kills
+	-- (KillPredictor, gated on the ClientKillPredict attribute); everybody else sees
+	-- the server's DeathEffect attribute.
+	local KVORIG = setmetatable({}, { __mode = "k" })
+
+	local function applyKillVfx(c)
+		local data = c.Shared.MenuCoreData
+		if type(data) ~= "table" then return end
+		if type(data.EquippedKillVFX) ~= "table" then data.EquippedKillVFX = {} end
+		local eq = data.EquippedKillVFX
+		if CONFIG.killVfxOn and CONFIG.killVfx ~= "" then
+			if not KVORIG[eq] then KVORIG[eq] = table.clone(eq) end
+			for _, tool in pairs(c.Shared.Tools) do
+				if type(tool) == "table" and tool.Name and eq[tool.Name] ~= CONFIG.killVfx then
+					eq[tool.Name] = CONFIG.killVfx
+				end
+			end
+		elseif KVORIG[eq] then
+			local orig = KVORIG[eq]
+			table.clear(eq)
+			for k, v in pairs(orig) do eq[k] = v end
+			KVORIG[eq] = nil
+		end
+	end
+
+	function EXTRA.applyGun(c)
+		local allowed = modsAllowed()
+		if CONFIG.noSway and allowed then
+			c.Shared.NoSway = true
+			swayWas = true
+		elseif swayWas then
+			c.Shared.NoSway = false
+			swayWas = false
+		end
+		for _, tool in pairs(c.Shared.Tools) do
+			local W = type(tool) == "table" and tool.WSettings
+			if type(W) == "table" and not W.IsMelee then
+				if CONFIG.instantAds and allowed then
+					if W.ScopeSpeed ~= 60 then setField(W, "ScopeSpeed", 60) end
+				else
+					restoreField(W, "ScopeSpeed")
+				end
+			end
+		end
+		animSpeeds()
+		pcall(applySkins, c)
+		pcall(applyKillVfx, c)
+	end
+
+	-- world ---------------------------------------------------------------------------
+	-- The camera's field of view is the game's own setting (MenuCoreData.Settings
+	-- .FOV, 90 by default), so that is what is written - a camera.FieldOfView write
+	-- would be overwritten by the Scriptable camera every frame. Lighting is plain
+	-- Lighting, captured when a switch goes on and put back when it goes off.
+	local LIGHTORIG = {}
+	local was = {}
+	local fovOrig = nil
+	local EFFECT_CLASSES = { DepthOfFieldEffect = true, BloomEffect = true, SunRaysEffect = true }
+	local effOrig = setmetatable({}, { __mode = "k" })
+
+	local function capture(group, fields)
+		if LIGHTORIG[group] then return end
+		local t = {}
+		for _, f in ipairs(fields) do t[f] = Lighting[f] end
+		LIGHTORIG[group] = t
+	end
+
+	local function restore(group)
+		local t = LIGHTORIG[group]
+		if not t then return end
+		for f, v in pairs(t) do pcall(function() Lighting[f] = v end) end
+		LIGHTORIG[group] = nil
+	end
+
+	local function world()
+		if CONFIG.fullbright then
+			capture("bright", { "Brightness", "GlobalShadows", "Ambient", "OutdoorAmbient" })
+			Lighting.Brightness = 2
+			Lighting.GlobalShadows = false
+			Lighting.Ambient = Color3.new(1, 1, 1)
+			Lighting.OutdoorAmbient = Color3.new(1, 1, 1)
+		elseif was.bright then restore("bright") end
+		was.bright = CONFIG.fullbright
+
+		if CONFIG.timeOn then
+			capture("time", { "ClockTime" })
+			Lighting.ClockTime = CONFIG.timeValue
+		elseif was.time then restore("time") end
+		was.time = CONFIG.timeOn
+
+		local atm = Lighting:FindFirstChildOfClass("Atmosphere")
+		if CONFIG.noFog then
+			capture("fog", { "FogEnd", "FogStart" })
+			Lighting.FogEnd = 1e9
+			Lighting.FogStart = 1e9 - 1
+			if atm then
+				if not effOrig[atm] then effOrig[atm] = { atm.Density, atm.Haze } end
+				atm.Density, atm.Haze = 0, 0
+			end
+		elseif was.fog then
+			restore("fog")
+			if atm and effOrig[atm] then
+				atm.Density, atm.Haze = effOrig[atm][1], effOrig[atm][2]
+				effOrig[atm] = nil
+			end
+		end
+		was.fog = CONFIG.noFog
+
+		for _, e in ipairs(Lighting:GetChildren()) do
+			if EFFECT_CLASSES[e.ClassName] then
+				if CONFIG.noEffects then
+					if effOrig[e] == nil then effOrig[e] = e.Enabled end
+					e.Enabled = false
+				elseif effOrig[e] ~= nil then
+					e.Enabled = effOrig[e]
+					effOrig[e] = nil
+				end
+			end
+		end
+
+		local c = ctl()
+		local set = c and c.Shared.MenuCoreData and c.Shared.MenuCoreData.Settings
+		if type(set) == "table" then
+			if CONFIG.fovOn then
+				if fovOrig == nil then fovOrig = set.FOV end
+				set.FOV = CONFIG.fovValue
+			elseif fovOrig ~= nil then
+				set.FOV = fovOrig
+				fovOrig = nil
+			end
+		end
+	end
+
+	-- viewmodel colour - your own arms and gun in IgnoreThese.MyArms, local only ------
+	local VMORIG = setmetatable({}, { __mode = "k" })
+	local function viewmodel()
+		local arms = myArms()
+		if not arms then return end
+		local on = CONFIG.vmColour
+		if not on and next(VMORIG) == nil then return end
+		local mat = Enum.Material.ForceField
+		pcall(function() mat = Enum.Material[CONFIG.vmMaterial] end)
+		for _, p in ipairs(arms:GetDescendants()) do
+			if p:IsA("BasePart") then
+				if on and p.Transparency < 1 then
+					if not VMORIG[p] then VMORIG[p] = { p.Color, p.Material } end
+					p.Color = CONFIG.colVm
+					p.Material = mat
+				elseif not on and VMORIG[p] then
+					p.Color, p.Material = VMORIG[p][1], VMORIG[p][2]
+					VMORIG[p] = nil
+				end
+			end
+		end
+	end
+
+	task.spawn(function()
+		claimIdentity()
+		while _G.__HYPER == GEN do
+			local ok, err = pcall(world)
+			if not ok then note("world: " .. tostring(err)) end
+			pcall(viewmodel)
+			task.wait(0.3)
+		end
+		-- Unloaded: put the world back the way the game had it.
+		CONFIG.fullbright, CONFIG.timeOn, CONFIG.noFog, CONFIG.noEffects, CONFIG.fovOn =
+			false, false, false, false, false
+		CONFIG.vmColour = false
+		pcall(world)
+		pcall(viewmodel)
+	end)
+
+	-- pickups, projectiles and bullet tracers -----------------------------------------
+	-- IgnoreThese.Pickups.<Loot|Heals|Capsules|Ammo|event>.<item> and
+	-- IgnoreThese.Projectiles are the game's own folders.
+	local itemPool, tracerPool, tracers = {}, {}, {}
+
+	local function itemText(i)
+		local t = itemPool[i]
+		if not t then
+			t = make("Text", { Size = 13, Center = true, Outline = true, Font = 1, ZIndex = 3 })
+			itemPool[i] = t
+		end
+		return t
+	end
+
+	local function tracerLine(i)
+		local l = tracerPool[i]
+		if not l then
+			l = make("Line", { Thickness = 1.5, ZIndex = 3 })
+			tracerPool[i] = l
+		end
+		return l
+	end
+
+	local function posOf(inst)
+		if inst:IsA("BasePart") then return inst.Position end
+		if inst:IsA("Model") then
+			local ok, cf = pcall(inst.GetPivot, inst)
+			if ok then return cf.Position end
+		end
+		local p = inst:FindFirstChildWhichIsA("BasePart", true)
+		return p and p.Position
+	end
+
+	function EXTRA.render()
+		local used = 0
+		local camPos = camera.CFrame.Position
+		local face = fontId()
+		local function label(pos, text, col)
+			if used >= 80 then return end
+			local sp = camera:WorldToViewportPoint(pos)
+			if sp.Z <= 0 then return end
+			used = used + 1
+			local t = itemText(used)
+			t.Position = Vector2.new(sp.X, sp.Y)
+			t.Text = text
+			t.Color = col
+			t.Font = face
+			t.Size = math.max(12, CONFIG.textSize - 1)
+			t.Outline = CONFIG.textOutline
+			t.Visible = true
+		end
+		local ig = workspace:FindFirstChild("IgnoreThese")
+		if ig and CONFIG.pickupEsp then
+			local pick = ig:FindFirstChild("Pickups")
+			if pick then
+				for _, cat in ipairs(pick:GetChildren()) do
+					for _, item in ipairs(cat:GetChildren()) do
+						local pos = posOf(item)
+						if pos then
+							local d = (pos - camPos).Magnitude
+							if d <= CONFIG.maxDist then
+								label(pos, string.format("%s  %dm", cat.Name, d), CONFIG.colPickup)
+							end
+						end
+					end
+				end
+			end
+		end
+		if ig and CONFIG.projEsp then
+			local proj = ig:FindFirstChild("Projectiles")
+			if proj then
+				for _, p in ipairs(proj:GetChildren()) do
+					local pos = posOf(p)
+					if pos then
+						label(pos, string.format("! %s  %dm", p.Name, (pos - camPos).Magnitude),
+							Color3.fromRGB(255, 80, 80))
+					end
+				end
+			end
+		end
+		for i = used + 1, #itemPool do itemPool[i].Visible = false end
+
+		local now = os.clock()
+		for i = #tracers, 1, -1 do
+			if now - tracers[i].t0 > CONFIG.tracerLife then table.remove(tracers, i) end
+		end
+		local n = 0
+		if CONFIG.tracers then
+			for _, tr in ipairs(tracers) do
+				local a = camera:WorldToViewportPoint(tr.from)
+				local b = camera:WorldToViewportPoint(tr.to)
+				if a.Z > 0 and b.Z > 0 then
+					n = n + 1
+					local l = tracerLine(n)
+					l.From = Vector2.new(a.X, a.Y)
+					l.To = Vector2.new(b.X, b.Y)
+					l.Color = CONFIG.colTracer
+					l.Transparency = math.clamp(1 - (now - tr.t0) / CONFIG.tracerLife, 0.05, 1)
+					l.Visible = true
+				end
+			end
+		end
+		for i = n + 1, #tracerPool do tracerPool[i].Visible = false end
+	end
+
+	-- A shot is an ammo drop on the tool in hand; its line runs from the gun's own
+	-- Tip part to where the bullet's ray ends (the bent point while silent aim has
+	-- one, so the tracer shows where the shot really went).
+	do
+		local lastAmmo, lastTool = nil, nil
+		RunService.Heartbeat:Connect(function()
+			if _G.__HYPER ~= GEN then return end
+			if not CONFIG.tracers then lastAmmo = nil return end
+			local tool = currentTool()
+			local ammo = tool and tonumber(tool.Ammo)
+			if tool and tool == lastTool and lastAmmo and ammo and ammo < lastAmmo then
+				local shots = math.min(lastAmmo - ammo, 5)
+				local cf = camera.CFrame
+				local range = weaponRange()
+				local target = SIL.point or (cf.Position + cf.LookVector * range)
+				local dir = (target - cf.Position)
+				if dir.Magnitude > 0.05 then
+					rayParams.FilterDescendantsInstances = bulletIgnore()
+					local hit = workspace:Raycast(cf.Position, dir.Unit * range, rayParams)
+					local to = hit and hit.Position or (cf.Position + dir.Unit * range)
+					local from = cf.Position + cf.LookVector * 2 - cf.UpVector * 0.4 + cf.RightVector * 0.5
+					local arms = myArms()
+					local tip = arms and arms:FindFirstChild("Tip", true)
+					if tip and tip:IsA("BasePart") then from = tip.Position end
+					for _ = 1, shots do
+						tracers[#tracers + 1] = { from = from, to = to, t0 = os.clock() }
+					end
+					while #tracers > 40 do table.remove(tracers, 1) end
+				end
+			end
+			lastAmmo, lastTool = ammo, tool
+		end)
+	end
+
+	-- jump, air jump, slide cooldown ---------------------------------------------------
+	-- MovementController sets Humanoid.JumpHeight from GetJumpHeight() (7, +3
+	-- Lightweight, +10 Gravity coil) on its own events, so the height is held every
+	-- frame and handed back to GetJumpHeight() when switched off. CanSlide gates on
+	-- `tick() - lastSlide < cooldown` with both as upvalues (2 and 3); the cooldown
+	-- is re-set to 0.2-0.5s at the end of every slide, so it is held at 0.
+	local jumpWas, slideWas = false, false
+	local slideOrig = nil
+	RunService.Heartbeat:Connect(function()
+		if _G.__HYPER ~= GEN then return end
+		local char = plr.Character
+		local hum = char and char:FindFirstChildWhichIsA("Humanoid")
+		local c = ctl()
+		local allowed = moveAllowed()
+		if hum then
+			if CONFIG.jumpOn and allowed then
+				if hum.JumpHeight ~= CONFIG.jumpHeight then hum.JumpHeight = CONFIG.jumpHeight end
+				jumpWas = true
+			elseif jumpWas then
+				jumpWas = false
+				local h = 7
+				if c then
+					local ok, v = pcall(function() return c.Controller:GetJumpHeight() end)
+					if ok and tonumber(v) then h = v end
+				end
+				hum.JumpHeight = h
+			end
+		end
+		local f = c and c.Controller and c.Controller.CanSlide
+		if type(f) == "function" and debug.getupvalue and debug.setupvalue then
+			if CONFIG.noSlideCd and allowed then
+				local ok, last = pcall(debug.getupvalue, f, 2)
+				local ok2, cd = pcall(debug.getupvalue, f, 3)
+				if ok and ok2 and type(last) == "number" and type(cd) == "number" and cd <= 2 then
+					if not slideWas then slideOrig = cd end
+					if cd ~= 0 then pcall(debug.setupvalue, f, 3, 0) end
+					slideWas = true
+				end
+			elseif slideWas then
+				slideWas = false
+				pcall(debug.setupvalue, f, 3, slideOrig or 0.5)
+				slideOrig = nil
+			end
+		end
+	end)
+
+	UserInputService.JumpRequest:Connect(function()
+		if _G.__HYPER ~= GEN or not CONFIG.infJump or not moveAllowed() then return end
+		local char = plr.Character
+		local hum = char and char:FindFirstChildWhichIsA("Humanoid")
+		if hum and hum.Health > 0 and hum:GetState() == Enum.HumanoidStateType.Freefall then
+			hum:ChangeState(Enum.HumanoidStateType.Jumping)
+		end
+	end)
+
+	-- auto spawn -------------------------------------------------------------------
+	-- The Spawn button runs HomeFrame.TrySpawn(), which has its own debounce and
+	-- sends FireServer("Spawn", IS_MOBILE). Called directly, once every few
+	-- seconds - NEVER by firing the button's connections (three of those in a row
+	-- teleported the account into the Trading Plaza), and never TrySpawn(true),
+	-- which spends a paid instant revive.
+	STATE.spawns = 0
+	task.spawn(function()
+		claimIdentity()
+		gameIdentity()
+		local lastTry = 0
+		while _G.__HYPER == GEN do
+			pcall(function()
+				if not CONFIG.autoSpawn then return end
+				local char = plr.Character
+				if char and char:GetAttribute("LobbyCharacter") ~= true then return end
+				if not (GameInfo and GameInfo:GetAttribute("GameInProgress")) then return end
+				if not plr:GetAttribute("MenuLoaded") then return end
+				if os.clock() - lastTry < 5 then return end
+				local pg = plr:FindFirstChildOfClass("PlayerGui")
+				local menu = pg and pg:FindFirstChild("MenuUI")
+				local ml = menu and menu:FindFirstChild("MenuLocal")
+				local hf = ml and ml:FindFirstChild("HomeFrame")
+				local mod = tryRequire(hf)
+				if type(mod) == "table" and type(mod.TrySpawn) == "function" then
+					lastTry = os.clock()
+					mod:TrySpawn()
+					STATE.spawns = STATE.spawns + 1
+				end
+			end)
+			task.wait(1)
+		end
+	end)
+
+	-- anti-AFK -----------------------------------------------------------------------
+	-- A short step and a hop after 50s without input, so the game sees a moving
+	-- character. Roblox's own 20-minute idle kick only listens to real input, and
+	-- the usual fix for that - VirtualUser:CaptureController - is a string in this
+	-- game's anticheat, so it is deliberately not used.
+	STATE.afkNudges = 0
+	task.spawn(function()
+		claimIdentity()
+		local lastNudge = os.clock()
+		while _G.__HYPER == GEN do
+			pcall(function()
+				if not CONFIG.antiAfk then lastNudge = os.clock() return end
+				local c = ctl()
+				local lastInput = c and tonumber(c.Shared.LastMouseInput) or 0
+				local idle = math.min(tick() - lastInput, os.clock() - lastNudge)
+				if c == nil then idle = os.clock() - lastNudge end
+				if idle < 50 then return end
+				local hum = plr.Character and plr.Character:FindFirstChildWhichIsA("Humanoid")
+				if hum and hum.Health > 0 then
+					local a = math.random() * math.pi * 2
+					hum:Move(Vector3.new(math.cos(a), 0, math.sin(a)), false)
+					task.wait(0.2)
+					hum:Move(Vector3.new(), false)
+					hum.Jump = true
+				end
+				lastNudge = os.clock()
+				STATE.afkNudges = STATE.afkNudges + 1
+			end)
+			task.wait(5)
+		end
+	end)
+
+	-- staff ---------------------------------------------------------------------------
+	-- Every player carries the attribute CanAccessAdminPanel (false for the rest of
+	-- us), and the game belongs to a group, so a high rank in it is the second tell.
+	EXTRA.staff = {}
+	local rankCache = {}
+	local function checkStaff(p)
+		if p == plr then return end
+		local why = nil
+		if p:GetAttribute("CanAccessAdminPanel") == true then why = "admin panel" end
+		-- Frosted Studio's roles, read from GroupService: 1 Member/Fans, 2 Testers,
+		-- 3 Content Creators, 4 Contributors, 5 Developer, 6 Contributors2, 255
+		-- owner. Everything from 2 up is somebody on the inside of the game.
+		if not why and game.CreatorType == Enum.CreatorType.Group then
+			local entry = rankCache[p.UserId]
+			if entry == nil then
+				local ok, r = pcall(p.GetRankInGroup, p, game.CreatorId)
+				local okRole, role = pcall(p.GetRoleInGroup, p, game.CreatorId)
+				entry = { rank = (ok and tonumber(r)) or 0, role = okRole and tostring(role) or "?" }
+				rankCache[p.UserId] = entry
+			end
+			if entry.rank >= 2 then why = entry.role .. " (rank " .. entry.rank .. ")" end
+		end
+		if why then
+			if not EXTRA.staff[p.Name] then
+				EXTRA.staff[p.Name] = why
+				if CONFIG.staffAlert then note("STAFF in this server: " .. p.Name .. " (" .. why .. ")") end
+				if CONFIG.staffPanic then EXTRA.panic("staff: " .. p.Name) end
+			end
+		else
+			EXTRA.staff[p.Name] = nil
+		end
+	end
+
+	function EXTRA.panic(reason)
+		CONFIG.aim, CONFIG.trig, CONFIG.aimFire, CONFIG.silent = false, false, false, false
+		CONFIG.rapid, CONFIG.fly, CONFIG.speed = false, false, false
+		CONFIG.jumpOn, CONFIG.infJump, CONFIG.noSlideCd = false, false, false
+		for _, fn in ipairs(panicHandlers) do pcall(fn) end
+		note("PANIC (" .. tostring(reason) .. ") - aim, trigger, silent, rapid, movement off")
+	end
+
+	task.spawn(function()
+		claimIdentity()
+		while _G.__HYPER == GEN do
+			for _, p in ipairs(Players:GetPlayers()) do pcall(checkStaff, p) end
+			for name in pairs(EXTRA.staff) do
+				if not Players:FindFirstChild(name) then EXTRA.staff[name] = nil end
+			end
+			task.wait(8)
+		end
+	end)
+
+	-- rejoin / server hop ------------------------------------------------------------
+	function EXTRA.rejoin()
+		pcall(function() TeleportService:TeleportToPlaceInstance(game.PlaceId, game.JobId, plr) end)
+	end
+
+	function EXTRA.hop()
+		local ok, body = pcall(function()
+			return game:HttpGet("https://games.roblox.com/v1/games/" .. game.PlaceId
+				.. "/servers/Public?sortOrder=Desc&limit=100")
+		end)
+		if ok and body then
+			local ok2, data = pcall(HttpService.JSONDecode, HttpService, body)
+			if ok2 and type(data) == "table" and type(data.data) == "table" then
+				local pool = {}
+				for _, s in ipairs(data.data) do
+					if s.id ~= game.JobId and tonumber(s.playing) and tonumber(s.maxPlayers)
+						and s.playing < s.maxPlayers - 1 then
+						pool[#pool + 1] = s.id
+					end
+				end
+				if #pool > 0 then
+					local id = pool[math.random(#pool)]
+					note("server hop -> " .. tostring(id):sub(1, 8))
+					pcall(function() TeleportService:TeleportToPlaceInstance(game.PlaceId, id, plr) end)
+					return
+				end
+			end
+		end
+		note("server hop: no list, joining any server")
+		pcall(function() TeleportService:Teleport(game.PlaceId, plr) end)
+	end
+
+	-- streamer mode - your name in YOUR screen's labels only --------------------------
+	task.spawn(function()
+		claimIdentity()
+		while _G.__HYPER == GEN do
+			pcall(function()
+				if not CONFIG.streamer then return end
+				local pg = plr:FindFirstChildOfClass("PlayerGui")
+				if not pg then return end
+				local fake = CONFIG.streamerName
+				local names = { plr.Name, plr.DisplayName }
+				for _, d in ipairs(pg:GetDescendants()) do
+					if (d:IsA("TextLabel") or d:IsA("TextButton")) and d.Text ~= "" then
+						local txt = d.Text
+						for _, n in ipairs(names) do
+							if n ~= fake and txt:find(n, 1, true) then
+								txt = txt:gsub(n:gsub("%p", "%%%0"), fake)
+							end
+						end
+						if txt ~= d.Text then d.Text = txt end
+					end
+				end
+			end)
+			task.wait(1)
+		end
+	end)
+end
+
+--------------------------------------------------------------------------------
 -- the frame bindings
 --------------------------------------------------------------------------------
 
@@ -2522,6 +3291,10 @@ end, "the game's own shot ignores a ForceField", UI.theme.good)
 tuneCard:Toggle("Only while the gun can fire", CONFIG.aimReady, function(v)
 	CONFIG.aimReady = v
 end, "no tracking with a knife, an empty magazine or during a reload")
+tuneCard:Toggle("Projectile prediction", CONFIG.predict, function(v)
+	CONFIG.predict = v
+end, "leads moving targets with bows and launchers - the game's own ProjSpeed and gravity; hitscan guns need none",
+	UI.theme.good)
 tuneCard:Dropdown("Scope condition", { "Always", "Scoped only", "Not scoped" },
 	CONFIG.aimAds, function(v) CONFIG.aimAds = v end)
 
@@ -2623,6 +3396,9 @@ end, "a ForceField absorbs the shot", UI.theme.good)
 sCard:Slider("Max distance", 50, 500, CONFIG.silentMaxDist, function(v)
 	CONFIG.silentMaxDist = v
 end)
+sCard:Slider("Hit chance %", 1, 100, CONFIG.silentHitPct, function(v)
+	CONFIG.silentHitPct = v
+end, "below 100 some shots are left where you aimed - a perfect hit rate is its own tell")
 sCard:Toggle("Also in duels", CONFIG.silentDuel, function(v)
 	CONFIG.silentDuel = v
 end, "a duel records your camera and every shot for the server - off means silent aim sleeps there",
@@ -2653,13 +3429,27 @@ reg("rapid", modCard:Toggle("Rapid fire", CONFIG.rapid, function(v)
 	CONFIG.rapid = v
 end, "shortens the gap between shots - three shots with no gap all counted when measured",
 	UI.theme.bad))
-modCard:Slider("Fire rate x", 1, 3, CONFIG.rapidMult, function(v)
-	CONFIG.rapidMult = v
-end, "1.3 = 30% faster; the server was only ever tested on a 3-shot burst")
+-- Whole-number slider, so the multiplier is set as a percentage.
+modCard:Slider("Fire rate %", 100, 300, math.floor(CONFIG.rapidMult * 100 + 0.5), function(v)
+	CONFIG.rapidMult = v / 100
+end, "130 = 30% faster; the server was only ever tested on a 3-shot burst")
 modCard:Toggle("Also in duels", CONFIG.modsDuel, function(v)
 	CONFIG.modsDuel = v
 end, "duels are recorded; off means the mods pause there and the originals come back",
 	UI.theme.bad)
+
+local handCard = gunPage:Card("HANDLING", 1)
+handCard:Toggle("No sway / bob", CONFIG.noSway, function(v) CONFIG.noSway = v end,
+	"the game's own NoSway flag - the one it sets while you inspect a gun")
+handCard:Toggle("Instant ADS", CONFIG.instantAds, function(v) CONFIG.instantAds = v end,
+	"ScopeSpeed - the scope-in animation only; the scoped spread applies the moment you press it")
+reg("fastReload", handCard:Toggle("Fast reload", CONFIG.fastReload, function(v)
+	CONFIG.fastReload = v
+end, "speeds up the reload ANIMATION, which is what ends the reload here", UI.theme.warn))
+handCard:Slider("Reload speed x", 1, 5, CONFIG.reloadMult, function(v) CONFIG.reloadMult = v end)
+handCard:Toggle("Fast equip", CONFIG.fastEquip, function(v) CONFIG.fastEquip = v end,
+	"the swap waits for the equip animation's DoneEquip marker - faster animation, faster swap")
+handCard:Slider("Equip speed x", 1, 6, CONFIG.equipMult, function(v) CONFIG.equipMult = v end)
 
 gunOut = gunPage:Card("YOUR WEAPON", 2):Readout(9)
 end
@@ -2695,7 +3485,95 @@ flyCard:Toggle("Also in duels", CONFIG.moveDuel, function(v)
 	CONFIG.moveDuel = v
 end, "duels are recorded - off means speed and fly pause there", UI.theme.bad)
 
+local jumpCard = movePage:Card("JUMP & SLIDE", 1)
+reg("jumpOn", jumpCard:Toggle("High jump", CONFIG.jumpOn, function(v) CONFIG.jumpOn = v end,
+	"holds Humanoid.JumpHeight - the game's own is 7 (+3 Lightweight, +10 Gravity coil)", UI.theme.warn))
+jumpCard:Slider("Jump height", 7, 60, CONFIG.jumpHeight, function(v) CONFIG.jumpHeight = v end)
+reg("infJump", jumpCard:Toggle("Air jump", CONFIG.infJump, function(v) CONFIG.infJump = v end,
+	"jump again while falling", UI.theme.warn))
+reg("noSlideCd", jumpCard:Toggle("No slide cooldown", CONFIG.noSlideCd, function(v)
+	CONFIG.noSlideCd = v
+end, "the 0.2-0.5s the game waits between slides (MovementController.CanSlide)"))
+
 moveOut = movePage:Card("STATUS", 0):Readout(5)
+end
+
+-- WORLD ------------------------------------------------------------------------
+
+do
+local worldPage = win:Page("WORLD", UI.icon.map)
+
+local visCard = worldPage:Card("VIEW", 1):Accent()
+visCard:Toggle("Field of view", CONFIG.fovOn, function(v) CONFIG.fovOn = v end,
+	"writes the game's own FOV setting (90 by default) - a camera write would be undone every frame")
+visCard:Slider("FOV", 60, 120, CONFIG.fovValue, function(v) CONFIG.fovValue = v end)
+visCard:Toggle("Fullbright", CONFIG.fullbright, function(v) CONFIG.fullbright = v end,
+	"no shadows, full ambient light - put back exactly as it was when switched off")
+visCard:Toggle("Custom time", CONFIG.timeOn, function(v) CONFIG.timeOn = v end)
+visCard:Slider("Time of day", 0, 24, CONFIG.timeValue, function(v) CONFIG.timeValue = v end)
+visCard:Toggle("No fog", CONFIG.noFog, function(v) CONFIG.noFog = v end)
+visCard:Toggle("No blur / bloom / sun rays", CONFIG.noEffects, function(v) CONFIG.noEffects = v end,
+	"depth of field, bloom and sun rays only - the menu blurs are left to the game")
+
+local itemCard = worldPage:Card("ITEMS & TRACERS", 2)
+itemCard:Toggle("Pickups", CONFIG.pickupEsp, function(v) CONFIG.pickupEsp = v end,
+	"loot, heals, ammo, capsules and event items - the game's IgnoreThese.Pickups")
+itemCard:Colour("Pickup colour", CONFIG.colPickup, function(c) CONFIG.colPickup = c end)
+itemCard:Toggle("Grenades & projectiles", CONFIG.projEsp, function(v) CONFIG.projEsp = v end,
+	"everything in IgnoreThese.Projectiles, in red")
+itemCard:Toggle("Bullet tracers", CONFIG.tracers, function(v) CONFIG.tracers = v end,
+	"your own shots, from the gun's tip to where the ray ends - the bent point while silent aim has one")
+-- The template's slider is whole numbers only, so the life is set in ms.
+itemCard:Slider("Tracer life (ms)", 100, 3000, math.floor(CONFIG.tracerLife * 1000 + 0.5),
+	function(v) CONFIG.tracerLife = v / 1000 end)
+itemCard:Colour("Tracer colour", CONFIG.colTracer, function(c) CONFIG.colTracer = c end)
+
+local vmCard = worldPage:Card("VIEWMODEL", 1)
+vmCard:Toggle("Colour your gun and arms", CONFIG.vmColour, function(v) CONFIG.vmColour = v end,
+	"only you see it")
+vmCard:Dropdown("Material", { "ForceField", "Neon", "Glass", "SmoothPlastic", "Foil" },
+	CONFIG.vmMaterial, function(v) CONFIG.vmMaterial = v end)
+vmCard:Colour("Colour", CONFIG.colVm, function(c) CONFIG.colVm = c end)
+end
+
+-- MISC -------------------------------------------------------------------------
+
+local miscOut
+
+do
+local miscPage = win:Page("MISC", UI.icon.gear)
+
+local sessCard = miscPage:Card("SESSION", 1):Accent()
+sessCard:Toggle("Auto respawn", CONFIG.autoSpawn, function(v) CONFIG.autoSpawn = v end,
+	"presses the game's own spawn (HomeFrame.TrySpawn) after a death - never the paid instant revive")
+sessCard:Toggle("Anti-AFK", CONFIG.antiAfk, function(v) CONFIG.antiAfk = v end,
+	"a step and a hop after 50s idle; Roblox's own 20-minute kick needs VirtualUser, which the anticheat names - not used")
+sessCard:Button("REJOIN THIS SERVER", function() EXTRA.rejoin() end, UI.theme.band)
+sessCard:Button("SERVER HOP", function() EXTRA.hop() end, UI.theme.band)
+
+local staffCard = miscPage:Card("STAFF", 2)
+staffCard:Toggle("Staff alert", CONFIG.staffAlert, function(v) CONFIG.staffAlert = v end,
+	"CanAccessAdminPanel on a player, or a tester / creator / developer rank in the game's group", UI.theme.good)
+staffCard:Toggle("Panic when staff joins", CONFIG.staffPanic, function(v) CONFIG.staffPanic = v end,
+	"switches aim, trigger, silent aim, rapid fire and movement off by itself", UI.theme.warn)
+staffCard:Toggle("Streamer mode", CONFIG.streamer, function(v) CONFIG.streamer = v end,
+	"your name in your own screen's labels is replaced - nobody else is affected")
+staffCard:Dropdown("Shown name", { "Player", "Guest", "Selux", "Hidden" }, CONFIG.streamerName,
+	function(v) CONFIG.streamerName = v end)
+
+local skinCard = miscPage:Card("SKINS - ONLY YOU SEE THEM", 1)
+skinCard:Label("The server builds your skins from your own inventory and other players read them from the server, so these change your screen and nobody else's.")
+skinCard:Toggle("Skin changer", CONFIG.skinOn, function(v) CONFIG.skinOn = v end)
+if #EXTRA.skinList > 0 then
+	skinCard:Dropdown("Skin", EXTRA.skinList, CONFIG.skinName, function(v) CONFIG.skinName = v end)
+end
+skinCard:Toggle("Kill effect", CONFIG.killVfxOn, function(v) CONFIG.killVfxOn = v end,
+	"the effect YOUR kills play on your screen")
+if #EXTRA.killList > 0 then
+	skinCard:Dropdown("Effect", EXTRA.killList, CONFIG.killVfx, function(v) CONFIG.killVfx = v end)
+end
+
+miscOut = miscPage:Card("STATUS", 2):Readout(7)
 end
 
 -- HUMAN ------------------------------------------------------------------------
@@ -2769,7 +3647,8 @@ safeCard:Label("Panic key: switches aim, trigger, auto fire, silent aim and rapi
 bindButton(safeCard, "PANIC KEY", function() return CONFIG.panicKey end,
 	function(v) CONFIG.panicKey = v end)
 table.insert(panicHandlers, function()
-	for _, key in ipairs({ "aim", "trig", "aimFire", "silent", "rapid", "fly", "speed" }) do
+	for _, key in ipairs({ "aim", "trig", "aimFire", "silent", "rapid", "fly", "speed",
+		"jumpOn", "infJump", "noSlideCd" }) do
 		local handle = CTLS[key]
 		if handle then pcall(function() handle:set(false) end) end
 	end
@@ -3009,6 +3888,25 @@ task.spawn(function()
 			end)
 
 			pcall(function()
+				local staff = {}
+				for name, why in pairs(EXTRA.staff or {}) do staff[#staff + 1] = name .. " (" .. why .. ")" end
+				local c2 = ctl()
+				local set = c2 and c2.Shared.MenuCoreData and c2.Shared.MenuCoreData.Settings
+				miscOut:set({
+					"  staff     " .. ((#staff > 0) and table.concat(staff, ", ") or "none seen"),
+					"  spawns    " .. tostring(STATE.spawns or 0) .. " by auto respawn"
+						.. "   afk nudges " .. tostring(STATE.afkNudges or 0),
+					"  fov       setting " .. tostring(set and set.FOV or "-")
+						.. "   camera " .. string.format("%.0f", camera.FieldOfView),
+					"  skin      " .. (CONFIG.skinOn and CONFIG.skinName or "off")
+						.. "   kill effect " .. (CONFIG.killVfxOn and CONFIG.killVfx or "off"),
+					"  skins and kill effects are drawn on YOUR screen only",
+					"  place     " .. tostring(game.PlaceId),
+					"  server    " .. tostring(game.JobId):sub(1, 18),
+				})
+			end)
+
+			pcall(function()
 				humOut:set({
 					"  humaniser " .. (CONFIG.hum and "on" or "OFF"),
 					"  blocked   " .. ((STATE.paused ~= "") and STATE.paused or "no"),
@@ -3087,7 +3985,7 @@ _G.__HYPER_DBG = {
 	applyPreset = applyPreset, PRESETS = PRESETS, CTLS = CTLS,
 	note = note, panelOpen = panelOpen, assistBlocked = assistBlocked,
 	TOUCH = TOUCH, screenHeld = screenHeld, reachable = reachable, hotkeyHeld = hotkeyHeld,
-	GS = GS, CC = CC,
+	GS = GS, CC = CC, EXTRA = EXTRA,
 }
 
 if TOUCH then note("phone: hotkeys hold the screen instead") end
