@@ -8,7 +8,7 @@
 -- they are - they keep passing "Auto rebirth" and only this file decides what
 -- the player reads.
 --
--- 1936 entries.
+-- 1943 entries.
 
 return {
 	["$%s   %s/s   slots %d/%d   R%d   endurance %s"] = "%s$   %s/s   Plaetze %d/%d   R%d   Ausdauer %s",
@@ -39,6 +39,7 @@ return {
 	["25 -> 75 -> 500 -> 1000 for 2 / 10 / 35 cash"] = "25 -> 75 -> 500 -> 1000 für 2 / 10 / 35 Geld",
 	["25 of 25 crops credited at 50 ms, so this is already gentle"] = "25 von 25 Pflanzen wurden bei 50 ms gutgeschrieben, das ist schon schonend",
 	["27 sit in a fresh map and can hand over the tool you are waiting on"] = "27 liegen in einer frischen Karte und können genau das Werkzeug liefern, auf das du wartest",
+	["3 required spare pets -> a Rift Egg; seated pets are never used"] = "3 geforderte Ersatz-Haustiere -> ein Rift-Ei; ausgerüstete Haustiere werden nie benutzt",
 	["3 rolled slots per world, restock every 300s"] = "3 gewürfelte Slots pro Welt, Nachschub alle 300s",
 	["40 diamonds and Starter (no bonus) is 40% of the wheel"] = "40 Diamanten und Starter (kein Bonus) sind 40% des Rads",
 	["56 gum nodes in dependency order, about 7.9M gum for the lot"] = "56 Gum-Knoten in Abhängigkeitsreihenfolge, zusammen rund 7,9M Gum",
@@ -267,6 +268,7 @@ return {
 	["Claim group reward"] = "Gruppenbelohnung holen",
 	["Claim now"] = "Jetzt abholen",
 	["Claim offline earnings"] = "Offline-Einnahmen abholen",
+	["Claim offline money"] = "Offline-Geld abholen",
 	["Claim offline now"] = "Jetzt abholen",
 	["Claim on"] = "Claim auf",
 	["Claim rewards"] = "Belohnungen holen",
@@ -446,6 +448,7 @@ return {
 	["Font"] = "Schrift",
 	["Free rewards"] = "Gratis-Belohnungen",
 	["Free rewards and codes"] = "Gratis-Belohnungen und Codes",
+	["Free rift rerolls"] = "Gratis-Rift-Rerolls",
 	["Free title rolls"] = "Gratis Titel-Rolls",
 	["Freebies"] = "Geschenke",
 	["Freeze headroom (studs)"] = "Abstand zur Frostgrenze (Studs)",
@@ -688,6 +691,7 @@ return {
 	["One press turns aim, trigger, auto fire and recoil control off. "] = "Ein Druck schaltet Aim, Trigger, Autofeuer und Rückstoßkontrolle aus. ",
 	["Only airborne"] = "Nur in der Luft",
 	["Only grounded"] = "Nur am Boden",
+	["Only the free ones - the paid reroll is never touched"] = "Nur die kostenlosen - der bezahlte Reroll wird nie angefasst",
 	["Only when facing them"] = "Nur wenn du sie ansiehst",
 	["Only when facing you"] = "Nur wenn er dich ansieht",
 	["Only while the gun can fire"] = "Nur wenn die Waffe feuern kann",
@@ -805,6 +809,7 @@ return {
 	["Respect zone locks"] = "Zonensperren beachten",
 	["Resync walls"] = "Wände neu lesen",
 	["Revive at base"] = "Am Lager wiederbeleben",
+	["Rift trade-in"] = "Rift-Tausch",
 	["Robux egg is charged in WINS (99); crafts triples, equips best"] = "Robux-Ei kostet WINS (99); craftet Dreier, legt das Beste an",
 	["Robux is never touched: no boosts, no forever purchase"] = "Robux wird nie angefasst: keine Boosts, kein Dauerkauf",
 	["Roll auras"] = "Auras würfeln",
@@ -928,6 +933,7 @@ return {
 	["TRAIN"] = "TRAINING",
 	["TRAIN MODE"] = "TRAININGSMODUS",
 	["TRIGGER KEY"] = "TRIGGER-TASTE",
+	["Take eggs you can run out with before the guard wakes"] = "Eier nehmen, mit denen du rauskommst, bevor die Wache aufwacht",
 	["Take portals"] = "Portale nehmen",
 	["Target prediction"] = "Target Prediction",
 	["Target selection"] = "Zielwahl",
@@ -1040,6 +1046,7 @@ return {
 	["Weapon"] = "Waffe",
 	["Weapons"] = "Waffen",
 	["Weight budget (%)"] = "Budget für Traglast (%)",
+	["What your pets earned while you were away"] = "Was deine Haustiere verdient haben, während du weg warst",
 	["Which part"] = "Welches Teil",
 	["While firing"] = "Beim Schießen",
 	["While spectated"] = "Wenn zugeschaut wird",

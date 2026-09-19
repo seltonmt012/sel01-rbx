@@ -8,7 +8,7 @@
 -- they are - they keep passing "Auto rebirth" and only this file decides what
 -- the player reads.
 --
--- 1936 entries.
+-- 1943 entries.
 
 return {
 	["$%s   %s/s   slots %d/%d   R%d   endurance %s"] = "%s$   %s/с   слоты %d/%d   R%d   выносливость %s",
@@ -48,6 +48,7 @@ return {
 	["25 -> 75 -> 500 -> 1000 for 2 / 10 / 35 cash"] = "25 -> 75 -> 500 -> 1000 за 2 / 10 / 35 денег",
 	["25 of 25 crops credited at 50 ms, so this is already gentle"] = "25 из 25 растений засчитаны при 50 мс, это уже щадящий режим",
 	["27 sit in a fresh map and can hand over the tool you are waiting on"] = "27 штук лежат на новой карте и могут дать нужный инструмент",
+	["3 required spare pets -> a Rift Egg; seated pets are never used"] = "3 нужных запасных питомца -> яйцо Рифта; экипированные питомцы не трогаются",
 	["3 rolled slots per world, restock every 300s"] = "3 случайных слота на мир, обновление каждые 300с",
 	["40 diamonds and Starter (no bonus) is 40% of the wheel"] = "40 алмазов и Starter (без бонуса) - 40% колеса",
 	["56 gum nodes in dependency order, about 7.9M gum for the lot"] = "56 узлов за жвачку по зависимостям, всего около 7,9M",
@@ -308,6 +309,7 @@ return {
 	["Claim group reward"] = "Забрать награду группы",
 	["Claim now"] = "Забрать сейчас",
 	["Claim offline earnings"] = "Забирать офлайн-доход",
+	["Claim offline money"] = "Забирать офлайн-деньги",
 	["Claim offline now"] = "Забрать сейчас",
 	["Claim on"] = "Клейм по",
 	["Claim rewards"] = "Забрать награды",
@@ -513,6 +515,7 @@ return {
 	["Font"] = "Шрифт",
 	["Free rewards"] = "Бесплатные награды",
 	["Free rewards and codes"] = "Бесплатные награды и коды",
+	["Free rift rerolls"] = "Бесплатные рероллы Рифта",
 	["Free title rolls"] = "Бесплатные роллы титулов",
 	["Freebies"] = "Халява",
 	["Freeze headroom (studs)"] = "Запас до границы холода (студы)",
@@ -795,6 +798,7 @@ return {
 	["One press turns aim, trigger, auto fire and recoil control off. "] = "Одно нажатие выключает прицел, триггер, автоогонь и контроль отдачи.",
 	["Only airborne"] = "Только в воздухе",
 	["Only grounded"] = "Только на земле",
+	["Only the free ones - the paid reroll is never touched"] = "Только бесплатные - платный реролл никогда не используется",
 	["Only when facing them"] = "Только когда смотришь на них",
 	["Only when facing you"] = "Только когда смотрит на тебя",
 	["Only while the gun can fire"] = "Только когда оружие может стрелять",
@@ -924,6 +928,7 @@ return {
 	["Respect zone locks"] = "Учитывать блокировки зон",
 	["Resync walls"] = "Пересканировать стены",
 	["Revive at base"] = "Возрождение на базе",
+	["Rift trade-in"] = "Обмен в Рифте",
 	["Robux egg is charged in WINS (99); crafts triples, equips best"] = "Robux-яйцо стоит ПОБЕД (99); крафтит тройки, надевает лучшее",
 	["Robux is never touched: no boosts, no forever purchase"] = "Robux не трогается: ни бустов, ни вечной покупки",
 	["Roll auras"] = "Роллить ауры",
@@ -1076,6 +1081,7 @@ return {
 	["TRIGGERBOT"] = "ТРИГГЕРБОТ",
 	["TUNING"] = "НАСТРОЙКА",
 	["TYCOON"] = "ТАЙКУН",
+	["Take eggs you can run out with before the guard wakes"] = "Брать яйца, с которыми успеешь выбежать, пока охранник не проснулся",
 	["Take portals"] = "Использовать порталы",
 	["Target prediction"] = "Target Prediction",
 	["Target selection"] = "Выбор цели",
@@ -1202,6 +1208,7 @@ return {
 	["Weapon"] = "Оружие",
 	["Weapons"] = "Оружие",
 	["Weight budget (%)"] = "Бюджет на грузоподъёмность (%)",
+	["What your pets earned while you were away"] = "Что питомцы заработали, пока тебя не было",
 	["Which part"] = "Какая часть",
 	["While firing"] = "При стрельбе",
 	["While spectated"] = "Когда за тобой смотрят",

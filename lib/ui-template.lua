@@ -94,7 +94,8 @@ local UI = {}
 -- part of the i18n cache filename, so without this bump every client that has
 -- ever opened a panel keeps its old copy and the new controls come up untranslated.
 -- 3.10: the Hypershot panel's strings. 3.11: its WORLD / MISC / GUN additions.
-UI.VERSION = "3.11"
+-- 3.12: Steal An Egg's offline money / rift switches.
+UI.VERSION = "3.12"
 UI.BRAND = "SELUX"
 UI.DISCORD = "discord.gg/ARdpzFuKMm"
 UI.REPO = "seltonmt012/sel01-rbx"
