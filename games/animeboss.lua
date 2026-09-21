@@ -376,13 +376,20 @@ end
 -- looking at simply stayed there. Every spawn folder under the plot is
 -- scanned now, and each boss is rerolled at ITS OWN roller - the sibling of
 -- the spawn it came from, never the ground-level one.
+-- Cached for the same reason: the spawn folders are fixed, only their contents
+-- change, and this is asked for twice a second by the farm cycle.
+local _bossSpawns = { t = -1, v = nil }
 local function bossSpawns()
+    local now = os.clock()
+    if _bossSpawns.v and (now - _bossSpawns.t) < 5.0 then return _bossSpawns.v end
     local p = myPlot()
     local out = {}
-    if not p then return out end
-    for _, d in ipairs(p:GetDescendants()) do
-        if d.Name == "BossSpawn" then out[#out + 1] = d end
+    if p then
+        for _, d in ipairs(p:GetDescendants()) do
+            if d.Name == "BossSpawn" then out[#out + 1] = d end
+        end
     end
+    if #out > 0 then _bossSpawns.t, _bossSpawns.v = now, out end
     return out
 end
 
@@ -494,13 +501,20 @@ end
 -- time. So every slot folder on the plot is collected, ordered by the number
 -- in the slot's name, and the unlocked COUNT is read from the upgrade card
 -- itself - which means a slot bought later is picked up with no code change.
+-- CACHED: this walks 5,000+ descendants and the folders never move. Rebuilding
+-- it on every call was a measurable share of the remaining frame spikes.
+local _slotFolders = { t = -1, v = nil }
 local function slotFolders()
+    local now = os.clock()
+    if _slotFolders.v and (now - _slotFolders.t) < 5.0 then return _slotFolders.v end
     local p = myPlot()
     local out = {}
-    if not p then return out end
-    for _, d in ipairs(p:GetDescendants()) do
-        if d.Name == "Slots" and d:IsA("Folder") then out[#out + 1] = d end
+    if p then
+        for _, d in ipairs(p:GetDescendants()) do
+            if d.Name == "Slots" and d:IsA("Folder") then out[#out + 1] = d end
+        end
     end
+    if #out > 0 then _slotFolders.t, _slotFolders.v = now, out end
     return out
 end
 
@@ -1591,12 +1605,16 @@ local function levelUnits()
     local budget = math.max(0, bal - reserve) * (tonumber(CONFIG.levelBudget) or 0.4)
     if budget <= 0 then return false end
 
+    -- The slot list is built ONCE and updated in place. Rebuilding it inside
+    -- the loop meant up to fifteen full plot scans per pass, which was most of
+    -- what was left of the frame spikes after the sorting fix.
+    local list = slots()
     local spent, done = 0, 0
     for _ = 1, 15 do
         -- Best return per dollar. At equal cost that is the strongest unit,
         -- because its base value is what the level multiplies.
         local best
-        for _, s in ipairs(slots()) do
+        for _, s in ipairs(list) do
             if s.occupied and s.button and s.upgradeCost
                and (spent + s.upgradeCost) <= budget then
                 local ratio = (s.score or 0) / math.max(1, s.upgradeCost)
@@ -1619,6 +1637,11 @@ local function levelUnits()
         spent = spent + best.slot.upgradeCost
         done = done + 1
         STATE.lvlBuys = STATE.lvlBuys + 1
+        -- Refresh just this slot rather than the whole plot.
+        best.slot.level       = after.level
+        best.slot.upgradeCost = after.upgradeCost
+        best.slot.score       = after.score
+        best.slot.button      = after.button
     end
 
     if done > 0 then note(("levelled %d unit levels"):format(done)) end
@@ -1847,7 +1870,7 @@ local function rerollBoss(entry)
     return false
 end
 
-local _lastClick = 0
+local _lastClick, _lastCollect = 0, 0
 local function farmCycle()
     if not alive() then STATE.mode = "dead"; return end
     -- The raid owns the player until it ends. Money collection is a touch and
@@ -1865,7 +1888,12 @@ local function farmCycle()
         STATE.bossName = b and b.Name or "-"
     end
 
-    if CONFIG.autoMoney then collectMoney() end
+    -- Money accrues continuously, so touching the claimer twice a second is
+    -- pure cost for no gain - every two seconds collects exactly the same.
+    if CONFIG.autoMoney and (os.clock() - _lastCollect) >= 2.0 then
+        _lastCollect = os.clock()
+        collectMoney()
+    end
 
     -- ROLLING IS LAST IN LINE, ALWAYS. Units come first (a better one sitting
     -- in the backpack is income and damage the plot is not getting), then the
