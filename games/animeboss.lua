@@ -272,6 +272,7 @@ local CONFIG = {
     autoItems       = true,   -- drink the potions instead of hoarding them
     autoFilter      = true,   -- stop rolling rarities the plot has outgrown
     autoRaid        = true,   -- join a boss raid when one opens - the ONLY artifact source
+    raidJoinWindow  = 10,     -- only walk to the portal inside this many seconds of the start
     autoArtifacts   = true,   -- keep the three best artifacts in the plot slots
 
     -- stuck bosses
@@ -586,33 +587,32 @@ local function freeSlot()
     return nil
 end
 
-local function weakestPlaced()
-    local worst
-    for _, s in ipairs(slots()) do
-        if s.occupied and (not worst or s.score < worst.score) then worst = s end
-    end
-    return worst
-end
-
 -- COMPARE AT THE SAME LEVEL, NOT AT THE CURRENT ONE.
 --
--- A placed unit that has been levelled 50 times will out-score a freshly
--- dropped one of a far better rarity, so comparing "as they stand" refuses
--- every upgrade: measured with a level 50 Demon Progenitor at 5.82e14 holding
--- the weakest slot while five MAGIC units sat in the chest at 1.08-1.73e14,
--- all of them rejected - even though a Magic at that same level 50 is about
--- 3.4e15, six times the incumbent. The same mistake made the rarity filter
--- delete Fighter while the plot was still full of the weaker Evil tier.
+-- A placed unit levelled 50 times out-scores a freshly dropped one of a far
+-- better rarity, so comparing "as they stand" refuses every upgrade: measured
+-- with a level 50 Demon Progenitor at 5.82e14 holding the weakest slot while
+-- five MAGIC units sat in the chest at 1.08-1.73e14, all rejected - even
+-- though a Magic at that same level is about 1.45e16, twenty times better.
+-- The same mistake made the rarity filter switch off Fighter while the plot
+-- was still full of the weaker Evil tier.
 --
--- Levels are cheap and get rebought in seconds (541 of them in one pass here),
--- while a rarity gap is permanent - so the honest question is "which is better
--- once both are levelled", and that is what this answers.
+-- Levels are cheap and get rebought in seconds (541 in a single pass here),
+-- while a rarity gap is permanent. RARITY IS THE PRIORITY; the level a unit
+-- happens to be sitting at must not decide anything.
+--
+-- The reference is the HIGHEST level on the plot, computed from levels ALONE.
+-- Deriving it from "the weakest unit" would be circular, because the weakest
+-- unit is itself decided by a score taken at the reference level.
 local function refLevel()
-    local worst
+    local best = 1
     for _, s in ipairs(slots()) do
-        if s.occupied and (not worst or s.score < worst.score) then worst = s end
+        if s.occupied then
+            local lv = tonumber(s.level) or 1
+            if lv > best then best = lv end
+        end
     end
-    return (worst and worst.level) or 1
+    return best
 end
 
 local function scoreAtLevel(charId, mutation, level)
@@ -625,6 +625,28 @@ end
 local function refScoreOf(e)
     if not e or not e.charId then return 0 end
     return scoreAtLevel(e.charId, e.mutation, math.max(tonumber(e.level) or 1, refLevel()))
+end
+
+-- BOTH SIDES ARE VALUED THE SAME WAY OR THE FARM EATS ITSELF.
+-- This used to rank the placed units by their CURRENT score while candidates
+-- were valued at the plot's level. The moment a Magic was swapped in at level
+-- 1 it became "the weakest slot" by its own low current score, so the next
+-- pass ripped it straight back out for the next candidate - remove Evil, place
+-- Magic, remove Magic, place Magic, forever. Same level on both sides, always.
+local function weakestPlaced()
+    local ref = refLevel()
+    local worst
+    for _, s in ipairs(slots()) do
+        if s.occupied and s.charId then
+            local sc = scoreAtLevel(s.charId, s.mutation,
+                                    math.max(tonumber(s.level) or 1, ref))
+            if not worst or sc < worst.refScore then
+                worst = s
+                worst.refScore = sc
+            end
+        end
+    end
+    return worst
 end
 
 local function totalIncome()
@@ -920,7 +942,7 @@ local function drainChest()
         -- Still roomy: only pull what is actually wanted, so the chest stays a
         -- useful buffer rather than a second inventory.
         local worst = weakestPlaced()
-        local floor = worst and worst.score or 0
+        local floor = worst and worst.refScore or 0
         local free  = freeSlot()
         local n = 0
         for _, e in ipairs(chestEntries()) do
@@ -1067,7 +1089,12 @@ local function placeAndSwap()
             if not (best and worst and best.charId) then break end
             -- The challenger is valued at the level the plot runs at, so a
             -- better rarity is not refused just because it dropped at level 1.
-            if refScoreOf(best) <= worst.score * margin then break end
+            -- RANK FIRST: a higher rarity never gives way to a lower one,
+            -- whatever the numbers say. This is a hard floor on top of the
+            -- score, so no combination of level and mutation can talk the
+            -- farm into downgrading a tier.
+            if rarityRank(best.charId) < rarityRank(worst.charId) then break end
+            if refScoreOf(best) <= worst.refScore * margin then break end
             local done = false
             withUI("swap", function()
                 if removeFrom(worst) then
@@ -1097,7 +1124,7 @@ local function sellSpares()
     for i = #tools, 1, -1 do
         local t = tools[i]
         local keepTier = t.charId and rarityRank(t.charId) >= guard
-        if t.charId and not keepTier and refScoreOf(t) < worst.score then
+        if t.charId and not keepTier and refScoreOf(t) < worst.refScore then
             if sellTool(t) then
                 sold = sold + 1
                 STATE.sold = STATE.sold + 1
@@ -1149,8 +1176,29 @@ local function raidOpen()
     return raidTimerText():upper():find("NOW") ~= nil
 end
 
+-- Seconds until the next raid, read off the portal billboard. "NOW!" means a
+-- raid is running (late joining works), a "MM:SS" countdown means it is not.
+-- nil means the label could not be read and nothing should be done.
+local function raidSecondsLeft()
+    local txt = raidTimerText()
+    if txt:upper():find("NOW") then return 0 end
+    local m, s = txt:match("(%d+)%s*:%s*(%d+)")
+    if m and s then return tonumber(m) * 60 + tonumber(s) end
+    return nil
+end
+
 local function joinRaid()
     if raidActive() then return false end
+
+    -- THE COUNTDOWN DECIDES WHEN, NOT THE PROMPT TEXT. The prompt reads
+    -- "Join Raid" all the time, including the twenty-odd minutes between
+    -- raids, so keying on it alone sent the character walking to the portal
+    -- every cycle for nothing. Reading the label is free; only the last few
+    -- seconds before the start - or a raid already running - are worth moving
+    -- for.
+    local secs = raidSecondsLeft()
+    if not secs or secs > (tonumber(CONFIG.raidJoinWindow) or 10) then return false end
+
     local t = raidPortalTarget()
     local prompt = t and t:FindFirstChild("JoinPrompt")
     if not prompt or not prompt.Enabled then return false end
@@ -1292,7 +1340,7 @@ local function syncSummonerSettings()
     local worst = weakestPlaced()
     -- A free slot means ANY drop is still worth having, so the filter only
     -- starts once the plot is full and has something real on it.
-    if not worst or worst.score <= 0 or freeSlot() then return false end
+    if not worst or (worst.refScore or 0) <= 0 or freeSlot() then return false end
     if not SummonerCfg or type(SummonerCfg.RarityTierIndex) ~= "table" then return false end
 
     local floors = DATA.SummonerSettings
@@ -1307,7 +1355,7 @@ local function syncSummonerSettings()
         local already = (type(cfg) == "table" and cfg.AutoDeleteRarities) or {}
         for rarity in pairs(SummonerCfg.RarityTierIndex) do
             local ceiling = rarityCeiling(rarity, ref)
-            if ceiling > 0 and ceiling < worst.score and not already[rarity] then
+            if ceiling > 0 and ceiling < worst.refScore and not already[rarity] then
                 pcall(function() Remotes.SetAutoDelete:FireServer(floor, rarity, true) end)
                 changed = changed + 1
                 STATE.filtered = (STATE.filtered or 0) + 1
@@ -1333,7 +1381,7 @@ local function unitWorkPending()
     local best  = backpackTools()[1]
     local worst = weakestPlaced()
     if best and worst and best.charId
-       and refScoreOf(best) > worst.score * (tonumber(CONFIG.swapMargin) or 1.1) then
+       and refScoreOf(best) > worst.refScore * (tonumber(CONFIG.swapMargin) or 1.1) then
         return true
     end
     return false
@@ -1844,7 +1892,9 @@ loop(30,   "autoCodes",   redeemCodes)
 loop(2,    "autoCastle",  castleStep)
 loop(25,   "autoItems",   useBoosts)
 loop(45,   "autoFilter",  syncSummonerSettings)
-loop(20,   "autoRaid",    joinRaid)
+-- Checked often, but it only READS a label until the countdown is nearly up -
+-- the character is not moved unless a raid is actually about to start.
+loop(3,    "autoRaid",    joinRaid)
 loop(60,   "autoArtifacts", placeArtifacts)
 
 -- Kill counter, read off the oracle rather than counted by us: a boss whose
@@ -1882,6 +1932,7 @@ _G.__ANIMEBOSS_DBG = {
     useBoosts = useBoosts, bossEta = bossEta, rerollBoss = rerollBoss, DATA = DATA,
     raidActive = raidActive, syncSummonerSettings = syncSummonerSettings,
     joinRaid = joinRaid, raidOpen = raidOpen, raidTimerText = raidTimerText,
+    raidSecondsLeft = raidSecondsLeft,
     placeArtifacts = placeArtifacts, artifactInfo = artifactInfo,
     rarityCeiling = rarityCeiling, unitWorkPending = unitWorkPending,
     money = money, parseAmount = parseAmount, totalIncome = totalIncome,
