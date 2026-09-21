@@ -604,7 +604,16 @@ end
 -- The reference is the HIGHEST level on the plot, computed from levels ALONE.
 -- Deriving it from "the weakest unit" would be circular, because the weakest
 -- unit is itself decided by a score taken at the reference level.
+-- CACHED, because everything downstream asks for it and each answer walks the
+-- whole plot. Uncached this was the single biggest cost in the script: used as
+-- a table.sort comparator it re-scanned the plot on EVERY comparison, which
+-- turned one chest sort into hundreds of plot walks - measured 355 ms for one
+-- chestEntries() call and 97 ms for backpackTools(), the latter running twice
+-- a second. That is what the heavy lag spikes were, and they were ours.
+local _refLevel = { t = -1, v = 1 }
 local function refLevel()
+    local now = os.clock()
+    if (now - _refLevel.t) < 1.0 then return _refLevel.v end
     local best = 1
     for _, s in ipairs(slots()) do
         if s.occupied then
@@ -612,6 +621,7 @@ local function refLevel()
             if lv > best then best = lv end
         end
     end
+    _refLevel.t, _refLevel.v = now, best
     return best
 end
 
@@ -624,6 +634,8 @@ end
 -- already past that level keeps its own, so nothing is ever undervalued.
 local function refScoreOf(e)
     if not e or not e.charId then return 0 end
+    -- Precomputed by whoever built the entry; never recompute it inside a sort.
+    if e.refScore then return e.refScore end
     return scoreAtLevel(e.charId, e.mutation, math.max(tonumber(e.level) or 1, refLevel()))
 end
 
@@ -690,11 +702,25 @@ local function chestCount()
     return tonumber(a) or 0, tonumber(b) or 25
 end
 
+-- The pet-level cache is required ONCE, not once per entry, and the reference
+-- level is taken ONCE, not once per comparison.
+local petCache
+do
+    local c = ReplicatedStorage:FindFirstChild("Modules")
+    c = c and c:FindFirstChild("Client")
+    c = c and c:FindFirstChild("OwnedPetsCache")
+    if c then
+        local ok, mod = pcall(require, c)
+        if ok then petCache = mod end
+    end
+end
+
 local function chestEntries()
     local m = chestFrame()
     local out = {}
     local sf = m and m:FindFirstChild("ScrollingFrame")
     if not sf then return out end
+    local ref = refLevel()
     for _, c in ipairs(sf:GetChildren()) do
         local uid = c.Name:match("^Unit_(.+)$")
         if uid then
@@ -707,28 +733,25 @@ local function chestEntries()
             -- Chest units are fresh drops, so level 1 unless the cache knows
             -- better. Guessing high here would make junk outrank the plot.
             local level = 1
-            local cache = ReplicatedStorage:FindFirstChild("Modules")
-            cache = cache and cache:FindFirstChild("Client")
-            cache = cache and cache:FindFirstChild("OwnedPetsCache")
-            if cache then
-                local ok, mod = pcall(require, cache)
-                if ok and mod and mod.GetLevel then
-                    local ok2, lv = pcall(mod.GetLevel, uid)
-                    if ok2 and tonumber(lv) then level = tonumber(lv) end
-                end
+            if petCache and petCache.GetLevel then
+                local ok2, lv = pcall(petCache.GetLevel, uid)
+                if ok2 and tonumber(lv) then level = tonumber(lv) end
             end
             local dmg, cash, score = unitStats(charId, mutation, level)
             out[#out + 1] = {
                 uid = uid, display = display, charId = charId,
                 rarity = ra and ra.Text or "?", mutation = mutation, level = level,
                 dmg = dmg, cash = cash, score = score,
+                refScore = scoreAtLevel(charId, mutation, math.max(level, ref)),
                 locked = c:FindFirstChild("LockedFrame") and c.LockedFrame.Visible or false,
             }
         end
     end
     -- Ranked on what each is worth once levelled to the plot's level, not on
-    -- the number it shows while still at level 1.
-    table.sort(out, function(a, b) return refScoreOf(a) > refScoreOf(b) end)
+    -- the number it shows while still at level 1. The score is stored on the
+    -- entry first and the sort only reads that field - a comparator that
+    -- computes is a comparator that runs O(n log n) times.
+    table.sort(out, function(a, b) return (a.refScore or 0) > (b.refScore or 0) end)
     return out
 end
 
@@ -975,20 +998,24 @@ local function backpackTools()
     local out = {}
     local bp = plr:FindFirstChild("Backpack")
     if not bp then return out end
+    local ref = refLevel()
     for _, t in ipairs(bp:GetChildren()) do
         if t:IsA("Tool") then
             local id  = t:GetAttribute("CharacterId")
             local mut = t:GetAttribute("MutationId") or "Normal"
-            local lvl = t:GetAttribute("Level") or 1
+            local lvl = tonumber(t:GetAttribute("Level")) or 1
             local dmg, cash, score = unitStats(id, mut, lvl)
             out[#out + 1] = {
                 tool = t, charId = id, mutation = mut, level = lvl,
                 uid = t:GetAttribute("UID"),
                 dmg = dmg, cash = cash, score = score,
+                refScore = id and scoreAtLevel(id, mut, math.max(lvl, ref)) or 0,
             }
         end
     end
-    table.sort(out, function(a, b) return refScoreOf(a) > refScoreOf(b) end)
+    -- Stored first, sorted second. A comparator that computes is a comparator
+    -- that runs O(n log n) times.
+    table.sort(out, function(a, b) return (a.refScore or 0) > (b.refScore or 0) end)
     return out
 end
 
@@ -1375,7 +1402,12 @@ end
 -- Is there unit work outstanding? This is what holds the roll back: a free
 -- slot, a chest with anything in it, or a spare that beats the weakest placed
 -- unit all mean the body is needed somewhere more valuable than the roller.
-local function unitWorkPending()
+-- Called from the 0.5s farm cycle, so it is throttled: it reads the backpack,
+-- the chest and the whole plot, and doing that twice a second was a large part
+-- of the lag. Two seconds of staleness costs nothing here - the answer only
+-- gates whether a ROLL may happen.
+local _pending = { t = -1, v = false }
+local function unitWorkPendingRaw()
     if freeSlot() then return true end
     if (select(1, chestCount()) or 0) > 0 then return true end
     local best  = backpackTools()[1]
@@ -1387,14 +1419,33 @@ local function unitWorkPending()
     return false
 end
 
+local function unitWorkPending()
+    local now = os.clock()
+    if (now - _pending.t) < 2.0 then return _pending.v end
+    local ok, v = pcall(unitWorkPendingRaw)
+    _pending.t, _pending.v = now, (ok and v) or false
+    return _pending.v
+end
+
 -- The decision the whole script exists for, in the order the user asked for:
 -- empty the chest so drops never stop, place and swap until the plot holds the
 -- six best units in hand, and only THEN sell what is left over - so nothing
 -- that could still earn a slot is ever sold.
 local function manageUnits()
     if not alive() then return end
-    -- Hands off the body while a raid is running.
-    if raidActive() then STATE.mode = "raid"; return end
+
+    -- DURING A RAID ONLY THE BODY IS OFF LIMITS, NOT EVERYTHING.
+    -- Emptying the chest is a pure remote call, and a raid runs for ten to
+    -- fifteen minutes - long enough for the chest to overflow and start
+    -- throwing drops away, which is exactly what it did: 26/25 while a raid
+    -- was at wave 43 of 70. Placing, swapping and selling all move or equip
+    -- the character, so those still wait.
+    if raidActive() then
+        STATE.mode = "raid"
+        if CONFIG.autoChest then drainChest() end
+        return
+    end
+
     if CONFIG.autoChest then drainChest() end
     placeAndSwap()
     sellSpares()
