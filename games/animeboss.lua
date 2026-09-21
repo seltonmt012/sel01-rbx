@@ -101,11 +101,12 @@
         (99), x2 Damage, x2 Offline Rewards, the Starter Pack, the LIMITED
         product podiums and every RobuxBuyButton on the upgrade cards.
       * Trading. A trade remote exists; nothing in this script touches it.
-      * FuseUnits / AwakenUnit / RerollMutation / PlaceArtifact / JoinRaid /
-        the Infinity Castle are mapped in the recon but unimplemented - they
-        are marked unverified in the panel rather than shipped half-measured.
-      * Selling is exposed but OFF by default: it is irreversible, and the
-        chest prune already keeps the cap clear.
+      * FuseUnits / AwakenUnit / RerollMutation / PlaceArtifact / JoinRaid are
+        mapped in the recon but unimplemented - they are left out rather than
+        shipped half-measured. The Infinity Castle IS implemented (castleStep,
+        CONFIG.autoCastle) and is the strongest feature here.
+      * Selling is ON, but it can only ever reach a unit that has already lost
+        the contest for every slot - the ranking runs first, the sale second.
 
     Panel: RightShift.  Console handle: _G.__ANIMEBOSS_DBG
 ]]
