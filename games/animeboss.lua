@@ -245,6 +245,7 @@ local CONFIG = {
     -- stuck bosses
     autoReroll      = true,   -- reroll a boss that would take all night
     bossMaxSeconds  = 120,    -- projected time to kill, above which it is rerolled
+    rollAfterEmpty  = 10,     -- only roll a spawn the server has left empty this long
 }
 
 local STATE = {
@@ -332,14 +333,47 @@ local function myPlot()
     return nil
 end
 
-local function boss()
+-- THERE IS MORE THAN ONE BOSS, and the big one is not on the tier this script
+-- originally looked at. The plot ships BossSpawn/BossRoller at ground level
+-- and a SECOND pair under BaseLevel2 that unlocks with the Unit Slots ladder.
+-- Measured while the first tier sat empty: BaseLevel2.BossSpawn held a
+-- One-Eyed Ghoul at 33,154,359,795 of 69,447,240,174 HP, so `boss()` returned
+-- nil, the reroll never had anything to act on, and the monster the user was
+-- looking at simply stayed there. Every spawn folder under the plot is
+-- scanned now, and each boss is rerolled at ITS OWN roller - the sibling of
+-- the spawn it came from, never the ground-level one.
+local function bossSpawns()
     local p = myPlot()
-    local spawn = p and p:FindFirstChild("BossSpawn")
-    if not spawn then return nil end
-    for _, c in ipairs(spawn:GetChildren()) do
-        if c:GetAttribute("MaxHealth") then return c end
+    local out = {}
+    if not p then return out end
+    for _, d in ipairs(p:GetDescendants()) do
+        if d.Name == "BossSpawn" then out[#out + 1] = d end
     end
-    return nil
+    return out
+end
+
+local function bosses()
+    local out = {}
+    for _, sp in ipairs(bossSpawns()) do
+        local tier = sp.Parent
+        local roller = tier and tier:FindFirstChild("BossRoller")
+        for _, c in ipairs(sp:GetChildren()) do
+            if c:GetAttribute("MaxHealth") then
+                out[#out + 1] = {
+                    model = c,
+                    spawn = sp,
+                    roller = roller,
+                    key = c:GetFullName() .. "/" .. tostring(c:GetAttribute("MaxHealth")),
+                }
+            end
+        end
+    end
+    return out
+end
+
+local function boss()
+    local list = bosses()
+    return list[1] and list[1].model or nil
 end
 
 local function bossHealth()
@@ -637,23 +671,99 @@ local function pinAt(position, seconds, until_)
 end
 
 -- ------------------------------------------------------------- boss actions
-local function rollBoss()
+-- THE ROLL PROMPT IS 15 STUDS AND THE BODY IS USUALLY NOWHERE NEAR IT.
+-- Measured mid-run: the character sat 262 studs from its own BossRoller while
+-- the reroll fired into empty air, over and over, and the boss simply stayed.
+-- The prompt reads Enabled = true from any distance, so nothing about the
+-- prompt says it is out of reach - it just silently does nothing. Every roll
+-- therefore pins the root part on the roller first, exactly like placing does.
+-- THE PROMPT HAS A 0.5s HOLD, AND fireproximityprompt WITHOUT IT DOES NOTHING.
+-- Standing on the roller is not the same as pressing the key: the hold has to
+-- be handed over, or the prompt is "triggered" and the server never sees a
+-- roll. This is what kept the stuck boss alive through every earlier attempt.
+local function fireRollPrompt(roller)
     local p = myPlot()
-    local roller = p and p:FindFirstChild("BossRoller")
+    roller = roller or (p and p:FindFirstChild("BossRoller"))
     local hitbox = roller and roller:FindFirstChild("Hitbox")
     local prompt = hitbox and hitbox:FindFirstChild("RollPrompt")
-    if not prompt or not prompt.Enabled then return false end
-    local before = boss()
-    pcall(fireproximityprompt, prompt)
-    task.wait(0.8)
-    local after = boss()
-    if after and after ~= before then
-        STATE.rolled = STATE.rolled + 1
-        STATE.bossName = after.Name
-        note("rolled " .. after.Name)
-        return true
+    local root = hrp()
+    if not prompt or not root then return false end
+
+    local hold = prompt.HoldDuration or 0
+    local function press()
+        -- Pass the hold duration; fall back to the bare call on executors whose
+        -- fireproximityprompt only takes one argument.
+        if not pcall(function() fireproximityprompt(prompt, hold) end) then
+            pcall(function() fireproximityprompt(prompt) end)
+        end
     end
-    return false
+
+    if (root.Position - hitbox.Position).Magnitude > 12 then
+        local origin = pinAt(hitbox.Position + Vector3.new(0, 4, 0), 1.2)
+        press()
+        task.wait(hold + 0.6)
+        if origin then pcall(function() root.CFrame = origin end) end
+    else
+        press()
+        task.wait(hold + 0.6)
+    end
+    return true
+end
+
+-- THE SERVER ROLLS BY ITSELF and the script must not fight it for the body.
+-- AutoRoll maxes at level 2 and then the server refills an empty spawn on its
+-- own in about 3.5s (measured inter-roll gaps 3.48-3.78s). Rolling on every
+-- empty spawn meant warping onto the roller within half a second of every
+-- single kill and standing there - which is what the user saw, and it stole
+-- the body from placing, swapping and selling for no gain at all.
+--
+-- So a spawn has to have been empty for a WHILE before the script touches it.
+-- Below that it is simply the server taking its normal turn.
+local _emptySince = {}
+
+local function tierEmptyFor(sp)
+    local occupied = false
+    for _, c in ipairs(sp:GetChildren()) do
+        if c:GetAttribute("MaxHealth") then occupied = true end
+    end
+    local key = sp:GetFullName()
+    if occupied then
+        _emptySince[key] = nil
+        return nil
+    end
+    if not _emptySince[key] then
+        _emptySince[key] = os.clock()
+        return 0
+    end
+    return os.clock() - _emptySince[key]
+end
+
+-- Roll at EVERY tier that is standing empty, not just the first. With two
+-- tiers a single roll left the other one idle, which is a whole boss ladder
+-- producing nothing.
+local function rollBoss()
+    local rolled = false
+    for _, sp in ipairs(bossSpawns()) do
+        local empty = tierEmptyFor(sp)
+        if empty and empty >= (tonumber(CONFIG.rollAfterEmpty) or 10) then
+            _emptySince[sp:GetFullName()] = os.clock()
+            local tier = sp.Parent
+            local roller = tier and tier:FindFirstChild("BossRoller")
+            if roller then
+                withUI("roll", function() fireRollPrompt(roller) end)
+                task.wait(0.4)
+                for _, c in ipairs(sp:GetChildren()) do
+                    if c:GetAttribute("MaxHealth") then
+                        rolled = true
+                        STATE.rolled = STATE.rolled + 1
+                        STATE.bossName = c.Name
+                        note("rolled " .. c.Name)
+                    end
+                end
+            end
+        end
+    end
+    return rolled
 end
 
 -- Paced at the measured server cap. Firing this in a burst is measurably
@@ -827,16 +937,26 @@ end
 -- counters did.
 local function placeAndSwap()
     if CONFIG.autoPlace then
-        local guard = 0
+        local guard, busyTries = 0, 0
         while guard < 12 do
             guard = guard + 1
             local slot = freeSlot()
             if not slot then break end
             local best = backpackTools()[1]
             if not best or not best.charId then break end
+            -- A busy mutex is not a failure, it is a "try again in a moment",
+            -- and treating the two the same made one contended cycle abandon
+            -- every remaining slot. Retries are counted separately from the
+            -- guard so a permanently held lock cannot spin here.
             local ok = false
-            withUI("place", function() ok = placeOn(slot, best) end)
-            if not ok then break end
+            local got = withUI("place", function() ok = placeOn(slot, best) end)
+            if not got then
+                busyTries = busyTries + 1
+                if busyTries > 3 then break end
+                task.wait(1.0)
+            elseif not ok then
+                break
+            end
             STATE.placed = STATE.placed + 1
             note("placed " .. tostring(best.charId))
         end
@@ -892,6 +1012,21 @@ local function sellSpares()
     end
     if sold > 0 then note(("sold %d spare units"):format(sold)) end
     return sold
+end
+
+-- Is there unit work outstanding? This is what holds the roll back: a free
+-- slot, a chest with anything in it, or a spare that beats the weakest placed
+-- unit all mean the body is needed somewhere more valuable than the roller.
+local function unitWorkPending()
+    if freeSlot() then return true end
+    if (select(1, chestCount()) or 0) > 0 then return true end
+    local best  = backpackTools()[1]
+    local worst = weakestPlaced()
+    if best and worst and best.charId
+       and best.score > worst.score * (tonumber(CONFIG.swapMargin) or 1.1) then
+        return true
+    end
+    return false
 end
 
 -- The decision the whole script exists for, in the order the user asked for:
@@ -1227,43 +1362,43 @@ end
 -- coming off over the first seconds and divide the remainder by it. That
 -- adapts by itself as the plot gets stronger, where a fixed "give up after two
 -- minutes" would throw away bosses the plot has grown into.
-local _track = { key = nil, t0 = 0, hp0 = 0 }
+-- One tracker per boss, keyed on the model, because the two tiers run their
+-- own bosses side by side and a single tracker would keep resetting itself.
+local _track = {}
 
-local function bossEta()
-    local b = boss()
-    if not b then _track.key = nil; return nil end
-    local hp = tonumber(b:GetAttribute("Health")) or 0
-    local key = tostring(b) .. "/" .. tostring(b:GetAttribute("MaxHealth"))
+local function bossEta(entry)
+    if not entry or not entry.model or not entry.model.Parent then return nil end
+    local hp = tonumber(entry.model:GetAttribute("Health")) or 0
     local now = os.clock()
-    if _track.key ~= key then
-        _track.key, _track.t0, _track.hp0 = key, now, hp
+    local t = _track[entry.key]
+    if not t then
+        _track[entry.key] = { t0 = now, hp0 = hp }
         return nil
     end
-    local dt = now - _track.t0
+    local dt = now - t.t0
     if dt < 8 then return nil end
-    local done = _track.hp0 - hp
-    if done <= 0 then STATE.bossDps = 0; return math.huge end
+    local done = t.hp0 - hp
+    if done <= 0 then return math.huge end
     local dps = done / dt
-    STATE.bossDps = dps
-    return hp / dps
+    if entry.key == (bosses()[1] and bosses()[1].key) then STATE.bossDps = dps end
+    return hp / dps, dps
 end
 
-local function rerollBoss()
-    local p = myPlot()
-    local roller = p and p:FindFirstChild("BossRoller")
-    local hitbox = roller and roller:FindFirstChild("Hitbox")
-    local prompt = hitbox and hitbox:FindFirstChild("RollPrompt")
-    if not prompt then return false end
-    local before = boss()
-    pcall(fireproximityprompt, prompt)
-    task.wait(1.2)
-    local after = boss()
-    if after ~= before then
-        _track.key = nil
+local function rerollBoss(entry)
+    entry = entry or bosses()[1]
+    if not entry then return false end
+    local model = entry.model
+    local ok = false
+    withUI("reroll", function() ok = fireRollPrompt(entry.roller) end)
+    if not ok then return false end
+    task.wait(1.0)
+    if model.Parent == nil or model:GetAttribute("MaxHealth") ~= entry.model:GetAttribute("MaxHealth") then
+        _track[entry.key] = nil
         STATE.rerolled = STATE.rerolled + 1
         note("rerolled a boss that was going nowhere")
         return true
     end
+    _track[entry.key] = nil
     return false
 end
 
@@ -1280,11 +1415,27 @@ local function farmCycle()
 
     if CONFIG.autoMoney then collectMoney() end
 
-    if not boss() then
-        STATE.mode = "rolling"
-        if CONFIG.autoRoll then rollBoss() end
-        return
+    -- ROLLING IS LAST IN LINE, ALWAYS. Units come first (a better one sitting
+    -- in the backpack is income and damage the plot is not getting), then the
+    -- upgrades - which never touch the body at all, they are UI clicks - then
+    -- placing, and only then a roll. Measured while this was the other way
+    -- round: a Shigaraki worth 51,562,500 sat in the backpack against a
+    -- weakest placed unit of 8,411,091, six times better, while the character
+    -- stood on the roller holding the UI lock so every swap silently failed.
+    if CONFIG.autoRoll and not unitWorkPending() then
+        local stale = false
+        for _, sp in ipairs(bossSpawns()) do
+            local empty = tierEmptyFor(sp)
+            if empty and empty >= (tonumber(CONFIG.rollAfterEmpty) or 10) then
+                stale = true
+            end
+        end
+        if stale then
+            STATE.mode = "rolling"
+            rollBoss()
+        end
     end
+    if not boss() then STATE.mode = "waiting"; return end
 
     STATE.mode = "fighting"
     -- One click a second, because that is all the server will take.
@@ -1293,12 +1444,19 @@ local function farmCycle()
         clickBoss()
     end
 
+    -- Every tier is checked, not just the first: the ground-level boss dies on
+    -- its own while the BaseLevel2 one is the one that sits there for hours.
     if CONFIG.autoReroll then
-        local eta = bossEta()
-        STATE.bossEta = eta
-        if eta and eta > (tonumber(CONFIG.bossMaxSeconds) or 120) then
-            rerollBoss()
+        local limit = tonumber(CONFIG.bossMaxSeconds) or 120
+        local worst
+        for _, e in ipairs(bosses()) do
+            local eta = bossEta(e)
+            if eta and eta > limit and (not worst or eta > worst.eta) then
+                worst = { entry = e, eta = eta }
+            end
+            if e.key == (bosses()[1] and bosses()[1].key) then STATE.bossEta = eta end
         end
+        if worst then rerollBoss(worst.entry) end
     end
 end
 
@@ -1315,7 +1473,7 @@ local function loop(period, key, fn)
 end
 
 loop(0.5,  nil,           farmCycle)
-loop(6,    "autoChest",   manageUnits)
+loop(4,    "autoChest",   manageUnits)
 loop(12,   "autoStats",   buyStats)
 loop(9,    "autoLevel",   levelUnits)
 loop(90,   "autoClaims",  claimRewards)
@@ -1341,6 +1499,7 @@ end)
 _G.__ANIMEBOSS_DBG = {
     CONFIG = CONFIG, STATE = STATE,
     myPlot = myPlot, boss = boss, bossHealth = bossHealth,
+    bosses = bosses, bossSpawns = bossSpawns, fireRollPrompt = fireRollPrompt,
     slots = slots, readSlot = readSlot, freeSlot = freeSlot, weakestPlaced = weakestPlaced,
     slotFolders = slotFolders, unlockedSlotCount = unlockedSlotCount,
     chestEntries = chestEntries, chestCount = chestCount,
