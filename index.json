@@ -569,6 +569,17 @@
       "detect": "local rs = game:GetService('ReplicatedStorage') local e = rs:FindFirstChild('Events') local m = rs:FindFirstChild('Modules') if not e or not m then return false end local gp = game.Workspace:FindFirstChild('Gameplay') return e:FindFirstChild('PickaxeSwing') ~= nil and e:FindFirstChild('EggHit') ~= nil and e:FindFirstChild('RequestPlaceItem') ~= nil and m:FindFirstChild('EggConfig') ~= nil and m:FindFirstChild('PenConfig') ~= nil and gp ~= nil and gp:FindFirstChild('Eggs') ~= nil"
     },
     {
+      "alias": "animeboss",
+      "name": "[TRADE] Beat the Anime Boss!",
+      "file": "games/animeboss.lua",
+      "places": [
+        129216769649527
+      ],
+      "status": "ok",
+      "note": "FREE. Roll a boss onto your plot, beat it, it drops an anime unit into a 25-slot chest, place the good ones on the six plot slots where they deal the damage and pay the income. Vanilla Roblox, 59 named remotes, every config require-able. THE CLICK IS NOT THE LEVER: AttackBoss('Click') is server-capped at ~1 hit/s and the game's own AutoClickerController already saturates it (50 calls at 10/s produced 5 damage echoes against 4 in a silent window) - the damage comes from the PLACED UNITS, so unit quality is the only thing that moves the economy. A unit's worth is computed before it is touched from CharacterConfig.GetInfo (AttackDamage/MoneyPerSecond over 163 characters, 33 rarity tiers) x MutationConfig DamageBoost (Normal 1 ... Omega 8) x PetLevelConfig level curve, validated against the live billboard to the digit. RARITY BEATS LEVEL and that is the whole script: a level 1 Epic measured 4.2K DMG against a level 24 Rare at 1.3K. The chest cap of 25 is a hard stop - a full chest blocks every new drop - so pruning runs before placement. Upgrading a unit is NOT UpgradePet:FireServer(uid) (a dead end that moves nothing); it is the slot SurfaceGui button's MouseButton1Click (Activated has 0 connections, the handler is in an Actor VM). BuyUpgrade:FireServer('<StatKey>') takes one of Summoner/Luck/Damage/AutoRoll/Slots/RespawnDelay/WalkSpeed. Money is firetouchinterest on Plot.Claimer.Hitbox and is not position gated (verified from 41 studs). Codes go through Communication:FireServer('RedeemCode', CODE). WARNING: bridge.py spy BREAKS THIS GAME - with the FireServer hook installed the game's own rolling and chest collecting silently stop working",
+      "detect": "local rs = game:GetService('ReplicatedStorage') local c = rs:FindFirstChild('Config') local r = rs:FindFirstChild('Remotes') if not c or not r then return false end return c:FindFirstChild('CharacterConfig') ~= nil and c:FindFirstChild('SummonerLuckConfig') ~= nil and r:FindFirstChild('AttackBoss') ~= nil and r:FindFirstChild('CollectChestPet') ~= nil and r:FindFirstChild('RollBoss') ~= nil"
+    },
+    {
       "alias": "jumpanimals",
       "name": "Jump for Animals!",
       "file": "games/jumpanimals.lua",
