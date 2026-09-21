@@ -273,6 +273,7 @@ local CONFIG = {
     -- stuck bosses
     autoReroll      = true,   -- reroll a boss that would take all night
     bossMaxSeconds  = 120,    -- projected time to kill, above which it is rerolled
+    bossMinAge      = 90,     -- and it must have stood there this long first
     rollAfterEmpty  = 10,     -- only roll a spawn the server has left empty this long
 }
 
@@ -391,7 +392,14 @@ local function bosses()
                     model = c,
                     spawn = sp,
                     roller = roller,
-                    key = c:GetFullName() .. "/" .. tostring(c:GetAttribute("MaxHealth")),
+                    -- THE MODEL ITSELF IS THE KEY, never its name. Keying the
+                    -- tracker on name+MaxHealth collided across generations:
+                    -- a boss dies, an identical one spawns a second later,
+                    -- and it inherits the dead one's start time - so it was
+                    -- instantly "90 seconds old" with a nonsense damage rate
+                    -- and got rerolled on its first frame. That is where the
+                    -- constant rerolling came from.
+                    key = c,
                 }
             end
         end
@@ -1475,35 +1483,57 @@ local function bossEta(entry)
     if not entry or not entry.model or not entry.model.Parent then return nil end
     local hp = tonumber(entry.model:GetAttribute("Health")) or 0
     local now = os.clock()
+
+    -- Drop trackers for bosses that no longer exist, so the table cannot grow
+    -- and a dead boss's timing can never be handed to a live one.
+    for k in pairs(_track) do
+        if typeof(k) == "Instance" and k.Parent == nil then _track[k] = nil end
+    end
+
     local t = _track[entry.key]
     if not t then
         _track[entry.key] = { t0 = now, hp0 = hp }
         return nil
     end
-    local dt = now - t.t0
-    if dt < 8 then return nil end
+    -- MEASURING FOR ONLY A FEW SECONDS IS HOW A GOOD BOSS GETS THROWN AWAY.
+    -- This projected after 8s, and 8s is easily a quiet patch: units tick on
+    -- their own server timers and a fresh spawn has not been reached by all of
+    -- them yet, so the damage rate reads low, the projection reads enormous,
+    -- and a boss that would have died in half a minute is rerolled. A reroll
+    -- throws the whole boss away, so the bias has to be towards patience.
+    local age = now - t.t0
+    if age < 20 then return nil, age end
     local done = t.hp0 - hp
-    if done <= 0 then return math.huge end
-    local dps = done / dt
+    if done <= 0 then return math.huge, age end
+    local dps = done / age
     if entry.key == (bosses()[1] and bosses()[1].key) then STATE.bossDps = dps end
-    return hp / dps, dps
+    return hp / dps, age
 end
 
 local function rerollBoss(entry)
     entry = entry or bosses()[1]
     if not entry then return false end
-    local model = entry.model
+    local target = entry.model
+    local spawn  = entry.spawn
     local ok = false
     withUI("reroll", function() ok = fireRollPrompt(entry.roller) end)
     if not ok then return false end
     task.wait(1.0)
-    if model.Parent == nil or model:GetAttribute("MaxHealth") ~= entry.model:GetAttribute("MaxHealth") then
-        _track[entry.key] = nil
+    _track[target] = nil
+
+    -- Did the spawn actually change hands? The old check compared the model
+    -- against ITSELF, which can never differ, and counted a boss that simply
+    -- died of its own accord as a successful reroll - so the counter climbed
+    -- even when nothing was rerolled at all.
+    local nowHolds
+    for _, c in ipairs(spawn:GetChildren()) do
+        if c:GetAttribute("MaxHealth") then nowHolds = c end
+    end
+    if nowHolds ~= target then
         STATE.rerolled = STATE.rerolled + 1
         note("rerolled a boss that was going nowhere")
         return true
     end
-    _track[entry.key] = nil
     return false
 end
 
@@ -1558,15 +1588,25 @@ local function farmCycle()
 
     -- Every tier is checked, not just the first: the ground-level boss dies on
     -- its own while the BaseLevel2 one is the one that sits there for hours.
+    -- TWO CONDITIONS, BOTH REQUIRED, and the age one is what stops a healthy
+    -- boss being rerolled on a bad reading: the boss must have actually been
+    -- standing there for `bossMinAge` seconds, AND still be projected to need
+    -- more than `bossMaxSeconds` on top of that. A forced roll is the last
+    -- resort, not the first reaction to a slow-looking few seconds.
     if CONFIG.autoReroll then
-        local limit = tonumber(CONFIG.bossMaxSeconds) or 120
+        local limit  = tonumber(CONFIG.bossMaxSeconds) or 120
+        local minAge = tonumber(CONFIG.bossMinAge) or 90
         local worst
         for _, e in ipairs(bosses()) do
-            local eta = bossEta(e)
-            if eta and eta > limit and (not worst or eta > worst.eta) then
+            local eta, age = bossEta(e)
+            if eta and age and age >= minAge and eta > limit
+               and (not worst or eta > worst.eta) then
                 worst = { entry = e, eta = eta }
             end
-            if e.key == (bosses()[1] and bosses()[1].key) then STATE.bossEta = eta end
+            if e.key == (bosses()[1] and bosses()[1].key) then
+                STATE.bossEta = eta
+                STATE.bossAge = age
+            end
         end
         if worst then rerollBoss(worst.entry) end
     end
@@ -1660,6 +1700,9 @@ cBoss:Toggle("Reroll stuck bosses", CONFIG.autoReroll, function(v) CONFIG.autoRe
 cBoss:Slider("Give up after (s)", 30, 600, CONFIG.bossMaxSeconds,
     function(v) CONFIG.bossMaxSeconds = v end,
     "Projected from the damage actually landing, not a fixed timer")
+cBoss:Slider("Watch it for at least (s)", 30, 300, CONFIG.bossMinAge,
+    function(v) CONFIG.bossMinAge = v end,
+    "A boss is never rerolled before this, however slow it looks")
 
 local cSpend = farm:Card("SPENDING", 2)
 cSpend:Toggle("Buy stat upgrades", CONFIG.autoStats, function(v) CONFIG.autoStats = v end,
