@@ -212,7 +212,7 @@ local STAT_PLAN = {
     { key = "RespawnDelay", cap = 26,  share = 0.60 },
     { key = "AutoRoll",     cap = 2,   share = 1.00 },
     { key = "Damage",       cap = 999 },
-    { key = "WalkSpeed",    cap = 25 },
+    { key = "WalkSpeed",    cap = 50 },
 }
 
 -- ------------------------------------------------------------- the oracle
@@ -261,6 +261,7 @@ local CONFIG = {
     autoLevel       = true,   -- level the placed units
     moneyReserve    = 0,      -- never spend below this
     maxStatSpend    = 0.5,    -- fraction of the balance a single stat buy may cost
+    levelBudget     = 0.4,    -- share of the balance one levelling pass may spend
     statOrder       = "Value order",
 
     -- extras
@@ -1428,39 +1429,56 @@ end
 
 -- Levelling a placed unit goes through the slot's own SurfaceGui button.
 -- UpgradePet:FireServer(uid) is a dead end and is deliberately not used.
+-- LEVELLING RUNS ON A BUDGET, NOT ONE LEVEL AT A TIME.
+-- The first version bought a single level per call on a 9 second loop, so a
+-- plot earning trillions a second crawled along at Lv.3 and Lv.4 while the
+-- money piled up. But spending freely here is the other failure: unit levels
+-- are a cheap, constantly available purchase and they would eat exactly the
+-- balance the stat upgrades need - the starvation pattern that already caught
+-- Luck once in this script.
+--
+-- So each pass gets a fixed SHARE of the balance and spends it down, taking
+-- the best value-per-dollar unit each time. The rest of the money is left
+-- alone for the stats.
 local function levelUnits()
+    if raidActive() then return false end
     local bal = money()
     local reserve = tonumber(CONFIG.moneyReserve) or 0
-    local spendable = math.max(0, bal - reserve)
+    local budget = math.max(0, bal - reserve) * (tonumber(CONFIG.levelBudget) or 0.4)
+    if budget <= 0 then return false end
 
-    -- Level the unit that returns the most per dollar, which at equal cost is
-    -- always the strongest one - its base value is what the level multiplies.
-    local best
-    for _, s in ipairs(slots()) do
-        if s.occupied and s.button and s.upgradeCost and s.upgradeCost <= spendable * 0.5 then
-            local ratio = (s.score or 0) / math.max(1, s.upgradeCost)
-            if not best or ratio > best.ratio then best = { slot = s, ratio = ratio } end
+    local spent, done = 0, 0
+    for _ = 1, 15 do
+        -- Best return per dollar. At equal cost that is the strongest unit,
+        -- because its base value is what the level multiplies.
+        local best
+        for _, s in ipairs(slots()) do
+            if s.occupied and s.button and s.upgradeCost
+               and (spent + s.upgradeCost) <= budget then
+                local ratio = (s.score or 0) / math.max(1, s.upgradeCost)
+                if not best or ratio > best.ratio then best = { slot = s, ratio = ratio } end
+            end
         end
-    end
-    if not best then return false end
+        if not best then break end
 
-    local levelBefore = best.slot.level or 0
-    local conns = {}
-    pcall(function() conns = getconnections(best.slot.button.MouseButton1Click) end)
-    if #conns == 0 then return false end
-    for _, c in ipairs(conns) do pcall(function() c:Fire() end) end
-    task.wait(1.2)
+        local levelBefore = best.slot.level or 0
+        local conns = {}
+        pcall(function() conns = getconnections(best.slot.button.MouseButton1Click) end)
+        if #conns == 0 then break end
+        for _, c in ipairs(conns) do pcall(function() c:Fire() end) end
+        task.wait(0.6)
 
-    -- Read the slot back rather than the balance: the abbreviated money string
-    -- cannot see a purchase that is small against the balance.
-    local after = readSlot(best.slot.slot)
-    if (after.level or 0) > levelBefore then
+        -- Read the slot back rather than the balance: the abbreviated money
+        -- string cannot see a purchase that is small against the balance.
+        local after = readSlot(best.slot.slot)
+        if (after.level or 0) <= levelBefore then break end
+        spent = spent + best.slot.upgradeCost
+        done = done + 1
         STATE.lvlBuys = STATE.lvlBuys + 1
-        note(("levelled %s to Lv.%d"):format(
-            tostring(after.display or after.charId), after.level))
-        return true
     end
-    return false
+
+    if done > 0 then note(("levelled %d unit levels"):format(done)) end
+    return done > 0
 end
 
 -- -------------------------------------------------------------- extra claims
@@ -1767,7 +1785,7 @@ end
 loop(0.5,  nil,           farmCycle)
 loop(4,    "autoChest",   manageUnits)
 loop(12,   "autoStats",   buyStats)
-loop(9,    "autoLevel",   levelUnits)
+loop(5,    "autoLevel",   levelUnits)
 loop(90,   "autoClaims",  claimRewards)
 loop(30,   "autoCodes",   redeemCodes)
 loop(2,    "autoCastle",  castleStep)
@@ -1859,6 +1877,9 @@ cSpend:Label("Value order buys Summoner first: one level moves the roll centre a
 cSpend:Slider("Max share per buy", 10, 100, math.floor((CONFIG.maxStatSpend or 0.5) * 100),
     function(v) CONFIG.maxStatSpend = v / 100 end,
     "Never spend more than this share of the balance on one upgrade")
+cSpend:Slider("Share for unit levels", 5, 80, math.floor((CONFIG.levelBudget or 0.4) * 100),
+    function(v) CONFIG.levelBudget = v / 100 end,
+    "How much of the balance one levelling pass may spend - the rest stays for stats")
 
 local units = win:Page("UNITS", UI.icon.star)
 
