@@ -8,7 +8,7 @@
 -- they are - they keep passing "Auto rebirth" and only this file decides what
 -- the player reads.
 --
--- 2004 entries.
+-- 2006 entries.
 
 return {
 	["$%s   %s/s   slots %d/%d   R%d   endurance %s"] = "%s$   %s/s   Plaetze %d/%d   R%d   Ausdauer %s",
@@ -542,6 +542,7 @@ return {
 	["How far a challenger must beat the weakest placed unit"] = "Wie deutlich ein Herausforderer die schwächste platzierte Einheit schlagen muss",
 	["How far to look for something hostile"] = "Wie weit nach Feinden gesucht wird",
 	["How long to hold position before the hit is sent"] = "Wie lange die Position gehalten wird, bevor der Treffer gesendet wird",
+	["How much of the balance one levelling pass may spend - the rest stays for stats"] = "Wieviel des Guthabens ein Level-Durchlauf ausgeben darf - der Rest bleibt fuer die Stats",
 	["Human"] = "Menschlich",
 	["Humanisation"] = "Vermenschlichung",
 	["Humanisation on"] = "Humanisierung an",
@@ -904,6 +905,7 @@ return {
 	["Settle after (s)"] = "Wartezeit danach (s)",
 	["Settle time"] = "Wartezeit",
 	["Settle time (s x10)"] = "Wartezeit (s x10)",
+	["Share for unit levels"] = "Anteil fuer Unit-Level",
 	["Shoes"] = "Schuhe",
 	["Shop now"] = "Jetzt einkaufen",
 	["Shot interval (ms)"] = "Schussabstand (ms)",

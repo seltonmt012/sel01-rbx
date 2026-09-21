@@ -594,6 +594,39 @@ local function weakestPlaced()
     return worst
 end
 
+-- COMPARE AT THE SAME LEVEL, NOT AT THE CURRENT ONE.
+--
+-- A placed unit that has been levelled 50 times will out-score a freshly
+-- dropped one of a far better rarity, so comparing "as they stand" refuses
+-- every upgrade: measured with a level 50 Demon Progenitor at 5.82e14 holding
+-- the weakest slot while five MAGIC units sat in the chest at 1.08-1.73e14,
+-- all of them rejected - even though a Magic at that same level 50 is about
+-- 3.4e15, six times the incumbent. The same mistake made the rarity filter
+-- delete Fighter while the plot was still full of the weaker Evil tier.
+--
+-- Levels are cheap and get rebought in seconds (541 of them in one pass here),
+-- while a rarity gap is permanent - so the honest question is "which is better
+-- once both are levelled", and that is what this answers.
+local function refLevel()
+    local worst
+    for _, s in ipairs(slots()) do
+        if s.occupied and (not worst or s.score < worst.score) then worst = s end
+    end
+    return (worst and worst.level) or 1
+end
+
+local function scoreAtLevel(charId, mutation, level)
+    local _, _, s = unitStats(charId, mutation, level)
+    return s or 0
+end
+
+-- What a candidate is worth once it has caught up with the plot. A unit
+-- already past that level keeps its own, so nothing is ever undervalued.
+local function refScoreOf(e)
+    if not e or not e.charId then return 0 end
+    return scoreAtLevel(e.charId, e.mutation, math.max(tonumber(e.level) or 1, refLevel()))
+end
+
 local function totalIncome()
     local dmg, cash = 0, 0
     for _, s in ipairs(slots()) do
@@ -671,7 +704,9 @@ local function chestEntries()
             }
         end
     end
-    table.sort(out, function(a, b) return a.score > b.score end)
+    -- Ranked on what each is worth once levelled to the plot's level, not on
+    -- the number it shows while still at level 1.
+    table.sort(out, function(a, b) return refScoreOf(a) > refScoreOf(b) end)
     return out
 end
 
@@ -889,7 +924,7 @@ local function drainChest()
         local free  = freeSlot()
         local n = 0
         for _, e in ipairs(chestEntries()) do
-            if e.charId and (free ~= nil or e.score > floor) then
+            if e.charId and (free ~= nil or refScoreOf(e) > floor) then
                 takeFromChest(e.uid)
                 n = n + 1
                 STATE.taken = STATE.taken + 1
@@ -931,7 +966,7 @@ local function backpackTools()
             }
         end
     end
-    table.sort(out, function(a, b) return a.score > b.score end)
+    table.sort(out, function(a, b) return refScoreOf(a) > refScoreOf(b) end)
     return out
 end
 
@@ -1030,9 +1065,9 @@ local function placeAndSwap()
             local best  = backpackTools()[1]
             local worst = weakestPlaced()
             if not (best and worst and best.charId) then break end
-            -- Compared at CURRENT level on both sides, which is what protects
-            -- the levels already paid for on the placed unit.
-            if best.score <= worst.score * margin then break end
+            -- The challenger is valued at the level the plot runs at, so a
+            -- better rarity is not refused just because it dropped at level 1.
+            if refScoreOf(best) <= worst.score * margin then break end
             local done = false
             withUI("swap", function()
                 if removeFrom(worst) then
@@ -1062,7 +1097,7 @@ local function sellSpares()
     for i = #tools, 1, -1 do
         local t = tools[i]
         local keepTier = t.charId and rarityRank(t.charId) >= guard
-        if t.charId and not keepTier and t.score < worst.score then
+        if t.charId and not keepTier and refScoreOf(t) < worst.score then
             if sellTool(t) then
                 sold = sold + 1
                 STATE.sold = STATE.sold + 1
@@ -1115,17 +1150,21 @@ local function raidOpen()
 end
 
 local function joinRaid()
-    if raidActive() or not raidOpen() then return false end
+    if raidActive() then return false end
     local t = raidPortalTarget()
     local prompt = t and t:FindFirstChild("JoinPrompt")
     if not prompt or not prompt.Enabled then return false end
 
+    -- THE ACTION TEXT IS THE SIGNAL, not the countdown. The prompt itself
+    -- switches between the free "Join Raid" and the paid "Start Raid NOW - 49",
+    -- so it already says which one it is. Requiring the timer to read "NOW" as
+    -- well was too strict and missed a real raid: the text read "Join Raid",
+    -- the prompt was enabled, and the script sat it out.
     local action = tostring(prompt.ActionText)
     local low = action:lower()
-    -- Refuse anything that smells of the paid starter, and require the word
-    -- "join" to be there before touching it.
+    -- Refuse anything that smells of the paid starter: the wording, the word
+    -- Robux, or a trailing price.
     if low:find("start raid") or low:find("robux") or action:match("%-%s*%d+%s*$") then
-        note("raid prompt is the paid one, leaving it alone")
         return false
     end
     if not low:find("join") then return false end
@@ -1230,13 +1269,18 @@ end
 -- nothing that could ever be useful is thrown away. It only ever switches
 -- filters ON - a rarity the player turned off by hand is never turned back on
 -- underneath them.
-local function rarityCeiling(rarity)
+-- The ceiling is taken at the level the PLOT runs at, not at level 1. Judging
+-- a rarity by a level-1 drop is what made this switch off Fighter while the
+-- plot was still full of the weaker Evil tier: a fresh Fighter scored below a
+-- level-50 Evil, even though the Fighter passes it within a few levels.
+local function rarityCeiling(rarity, level)
     if not CharCfg or type(CharCfg.Characters) ~= "table" then return 0 end
+    level = level or 1
     local best = 0
     for id, info in pairs(CharCfg.Characters) do
         if type(info) == "table" and info.Rarity == rarity
            and (tonumber(info.RollWeight) or 0) > 0 then
-            local _, _, score = unitStats(id, "Omega", 1)
+            local _, _, score = unitStats(id, "Omega", level)
             if score > best then best = score end
         end
     end
@@ -1257,11 +1301,12 @@ local function syncSummonerSettings()
         return false
     end
 
+    local ref = refLevel()
     local changed = 0
     for floor, cfg in pairs(floors) do
         local already = (type(cfg) == "table" and cfg.AutoDeleteRarities) or {}
         for rarity in pairs(SummonerCfg.RarityTierIndex) do
-            local ceiling = rarityCeiling(rarity)
+            local ceiling = rarityCeiling(rarity, ref)
             if ceiling > 0 and ceiling < worst.score and not already[rarity] then
                 pcall(function() Remotes.SetAutoDelete:FireServer(floor, rarity, true) end)
                 changed = changed + 1
@@ -1288,7 +1333,7 @@ local function unitWorkPending()
     local best  = backpackTools()[1]
     local worst = weakestPlaced()
     if best and worst and best.charId
-       and best.score > worst.score * (tonumber(CONFIG.swapMargin) or 1.1) then
+       and refScoreOf(best) > worst.score * (tonumber(CONFIG.swapMargin) or 1.1) then
         return true
     end
     return false
@@ -1607,20 +1652,28 @@ end
 local function useBoosts()
     local items = DATA.Items
     if type(items) ~= "table" then return false end
+    -- ONE OF EVERY TYPE, not one in total. They are separate buffs on separate
+    -- timers and they stack, so stopping after the first left most of the
+    -- stock sitting unused. The server clamps the amount to what is owned, so
+    -- there is nothing to gain by asking for more than one at a time.
     local order = {
         "AngelicPotion", "OniPotion",
         "BigLuckPotion", "BigDamagePotion", "BigMoneyPotion",
         "LuckPotion", "DamagePotion", "MoneyPotion",
     }
+    local used = 0
     for _, id in ipairs(order) do
         if (tonumber(items[id]) or 0) > 0 then
             pcall(function() Remotes.UseItem:FireServer(id, 1) end)
+            used = used + 1
             task.wait(0.4)
-            note("used " .. id)
-            return true
         end
     end
-    return false
+    if used > 0 then
+        note(("drank %d potions"):format(used))
+        pcall(function() Remotes.RequestSync:FireServer() end)
+    end
+    return used > 0
 end
 
 -- ------------------------------------------------------------- the main loop
@@ -1817,6 +1870,7 @@ _G.__ANIMEBOSS_DBG = {
     slotFolders = slotFolders, unlockedSlotCount = unlockedSlotCount,
     chestEntries = chestEntries, chestCount = chestCount,
     unitStats = unitStats, charInfo = charInfo, rarityRank = rarityRank,
+    refLevel = refLevel, refScoreOf = refScoreOf, scoreAtLevel = scoreAtLevel,
     backpackTools = backpackTools, placeOn = placeOn, removeFrom = removeFrom,
     manageUnits = manageUnits, drainChest = drainChest, placeAndSwap = placeAndSwap,
     sellSpares = sellSpares, sellTool = sellTool,

@@ -8,7 +8,7 @@
 -- they are - they keep passing "Auto rebirth" and only this file decides what
 -- the player reads.
 --
--- 2004 entries.
+-- 2006 entries.
 
 return {
 	["$%s   %s/s   slots %d/%d   R%d   endurance %s"] = "%s$   %s/с   слоты %d/%d   R%d   выносливость %s",
@@ -618,6 +618,7 @@ return {
 	["How far a challenger must beat the weakest placed unit"] = "Насколько претендент должен превзойти самого слабого юнита",
 	["How far to look for something hostile"] = "Насколько далеко искать врагов",
 	["How long to hold position before the hit is sent"] = "Сколько удерживать позицию перед отправкой удара",
+	["How much of the balance one levelling pass may spend - the rest stays for stats"] = "Сколько баланса может потратить один проход прокачки - остальное остаётся на статы",
 	["Human"] = "По-человечески",
 	["Humanisation"] = "Очеловечивание",
 	["Humanisation on"] = "Очеловечивание вкл",
@@ -1038,6 +1039,7 @@ return {
 	["Settle after (s)"] = "Пауза после (с)",
 	["Settle time"] = "Время оседания",
 	["Settle time (s x10)"] = "Время ожидания (с x10)",
+	["Share for unit levels"] = "Доля на уровни юнитов",
 	["Shoes"] = "Обувь",
 	["Shop now"] = "Купить сейчас",
 	["Shot interval (ms)"] = "Интервал выстрелов (мс)",
