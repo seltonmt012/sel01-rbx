@@ -8,7 +8,7 @@
 -- they are - they keep passing "Auto rebirth" and only this file decides what
 -- the player reads.
 --
--- 1998 entries.
+-- 2000 entries.
 
 return {
 	["$%s   %s/s   slots %d/%d   R%d   endurance %s"] = "%s$   %s/s   Plaetze %d/%d   R%d   Ausdauer %s",
@@ -959,6 +959,7 @@ return {
 	["Sticky target"] = "Ziel festhalten",
 	["Stop at rebirth"] = "Stopp bei Rebirth",
 	["Stop farming while the night hunts"] = "Pausiert das Farmen, solange die Nacht jagt",
+	["Stop useless rarities"] = "Nutzlose Raritaeten abschalten",
 	["Stopped"] = "Gestoppt",
 	["Streamer mode"] = "Streamer-Modus",
 	["Style"] = "Stil",
@@ -1042,6 +1043,7 @@ return {
 	["Trophies"] = "Trophäen",
 	["Tune the boost automatically"] = "Boost automatisch regeln",
 	["Turn speed cap (deg/s)"] = "Drehtempo-Limit (Grad/s)",
+	["Turns a rarity off in the summoner settings once the plot has outgrown it"] = "Schaltet eine Raritaet in den Summoner-Einstellungen ab, sobald die Basis sie ueberholt hat",
 	["UNITS"] = "EINHEITEN",
 	["UNSTUCK"] = "LÖSEN",
 	["UNVERIFIED - never reached in testing, the unlock alone is 1e25"] = "UNGEPRÜFT - im Test nie erreicht, allein das Freischalten kostet 1e25",

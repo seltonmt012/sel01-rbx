@@ -128,7 +128,7 @@ local Config  = ReplicatedStorage:WaitForChild("Config")
 -- --------------------------------------------------------------- game config
 -- The game's own tables. Everything about a unit's worth comes out of these
 -- three, so the script never carries a hand-written price or damage table.
-local CharCfg, MutCfg, PetLvl, StatsCfg
+local CharCfg, MutCfg, PetLvl, StatsCfg, SummonerCfg
 do
     local function grab(name)
         local ok, m = pcall(require, Config:WaitForChild(name))
@@ -138,6 +138,7 @@ do
     MutCfg   = grab("MutationConfig")
     PetLvl   = grab("PetLevelConfig")
     StatsCfg = grab("StatsConfig")
+    SummonerCfg = grab("SummonerLuckConfig")
 end
 
 local CODES = {}
@@ -213,6 +214,31 @@ local STAT_PLAN = {
     { key = "WalkSpeed",    cap = 25 },
 }
 
+-- ------------------------------------------------------------- the oracle
+-- DataSync carries the server's own view of the player - Money, Stats, Items,
+-- Crystals, SavedCastleRun, SummonerSettings, PlayerStatistics - but it
+-- arrives in PARTIAL payloads, so they are merged rather than replaced.
+-- It also LAGS 30-60 seconds behind writes: a single stale read is not a
+-- refusal, and treating it as one wasted a measurement round.
+local DATA = {}
+do
+    if _G.__ANIMEBOSS_DSCONN then
+        pcall(function() _G.__ANIMEBOSS_DSCONN:Disconnect() end)
+    end
+    local ds = Remotes:FindFirstChild("DataSync")
+    if ds then
+        _G.__ANIMEBOSS_DSCONN = ds.OnClientEvent:Connect(function(payload)
+            if type(payload) == "table" then
+                for k, v in pairs(payload) do DATA[k] = v end
+            end
+        end)
+    end
+    pcall(function()
+        local rs = Remotes:FindFirstChild("RequestSync")
+        if rs then rs:FireServer() end
+    end)
+end
+
 -- ------------------------------------------------------------------- config
 local CONFIG = {
     -- boss loop
@@ -242,6 +268,7 @@ local CONFIG = {
     autoSell        = true,   -- sells only what could not earn a slot
     autoCastle      = true,   -- the Infinity Castle room walk
     autoItems       = true,   -- drink the potions instead of hoarding them
+    autoFilter      = true,   -- stop rolling rarities the plot has outgrown
 
     -- stuck bosses
     autoReroll      = true,   -- reroll a boss that would take all night
@@ -636,6 +663,26 @@ local function chestEntries()
     return out
 end
 
+-- ----------------------------------------------------------------- raids
+-- A BOSS RAID AND THE BASE FARM CANNOT BOTH HAVE THE BODY. While a raid runs
+-- the player is in the raid UI placing raid units, and the base loop was
+-- happily warping the character onto the boss roller and pinning it on plot
+-- slots underneath it - the user hit this at wave 51 of 70 and it read as the
+-- script being "buggy", which it was.
+--
+-- The raid runs in the SAME place (PlaceId never changes, the arena is
+-- workspace.RaidArena with its own BossSlot/Slots/Portal/KillBossPrompt), so
+-- there is no teleport to follow and no second hub entry needed. The detector
+-- is simply the raid UI being up.
+local function raidActive()
+    local gui = plr:FindFirstChild("PlayerGui")
+    local main = gui and gui:FindFirstChild("Main")
+    local f = main and main:FindFirstChild("BossRaidFrame")
+    if not f then return false end
+    local ok, vis = pcall(function() return f.Visible end)
+    return ok and vis == true
+end
+
 -- --------------------------------------------------------------- UI mutex
 -- One routine owns the character at a time. Placing pins the root part, and a
 -- second routine pinning it somewhere else mid-placement loses the unit.
@@ -1015,6 +1062,74 @@ local function sellSpares()
     return sold
 end
 
+-- ------------------------------------------------- summoner roll filter
+-- Stop useless rarities at the SOURCE instead of shovelling them out of the
+-- chest afterwards. The Summoner Settings panel carries an AutoDelete flag per
+-- rarity, and the call shape had to be read out of the decompiled
+-- SummonerSettingsController because it takes a FLOOR as well:
+--
+--     SetAutoDelete:FireServer(<floor>, <rarityName>, <boolean>)
+--
+-- Firing it with just (rarity, true) - the obvious two-argument guess - does
+-- nothing at all and reports nothing, which is what made this look impossible
+-- earlier. Verified end to end: AutoDeleteRarities came back from the server
+-- with Uncommon = true after one call.
+--
+-- The rule: a rarity is switched off once even its STRONGEST member, rolled
+-- with the BEST mutation in the game, could not beat the weakest unit already
+-- on the plot. That is deliberately the most generous case for the rarity, so
+-- nothing that could ever be useful is thrown away. It only ever switches
+-- filters ON - a rarity the player turned off by hand is never turned back on
+-- underneath them.
+local function rarityCeiling(rarity)
+    if not CharCfg or type(CharCfg.Characters) ~= "table" then return 0 end
+    local best = 0
+    for id, info in pairs(CharCfg.Characters) do
+        if type(info) == "table" and info.Rarity == rarity
+           and (tonumber(info.RollWeight) or 0) > 0 then
+            local _, _, score = unitStats(id, "Omega", 1)
+            if score > best then best = score end
+        end
+    end
+    return best
+end
+
+local function syncSummonerSettings()
+    if raidActive() then return false end
+    local worst = weakestPlaced()
+    -- A free slot means ANY drop is still worth having, so the filter only
+    -- starts once the plot is full and has something real on it.
+    if not worst or worst.score <= 0 or freeSlot() then return false end
+    if not SummonerCfg or type(SummonerCfg.RarityTierIndex) ~= "table" then return false end
+
+    local floors = DATA.SummonerSettings
+    if type(floors) ~= "table" then
+        pcall(function() Remotes.RequestSync:FireServer() end)
+        return false
+    end
+
+    local changed = 0
+    for floor, cfg in pairs(floors) do
+        local already = (type(cfg) == "table" and cfg.AutoDeleteRarities) or {}
+        for rarity in pairs(SummonerCfg.RarityTierIndex) do
+            local ceiling = rarityCeiling(rarity)
+            if ceiling > 0 and ceiling < worst.score and not already[rarity] then
+                pcall(function() Remotes.SetAutoDelete:FireServer(floor, rarity, true) end)
+                changed = changed + 1
+                STATE.filtered = (STATE.filtered or 0) + 1
+                note("stopped rolling " .. tostring(rarity))
+                task.wait(0.35)
+                if changed >= 6 then break end
+            end
+        end
+        if changed >= 6 then break end
+    end
+    if changed > 0 then
+        pcall(function() Remotes.RequestSync:FireServer() end)
+    end
+    return changed > 0
+end
+
 -- Is there unit work outstanding? This is what holds the roll back: a free
 -- slot, a chest with anything in it, or a spare that beats the weakest placed
 -- unit all mean the body is needed somewhere more valuable than the roller.
@@ -1036,6 +1151,8 @@ end
 -- that could still earn a slot is ever sold.
 local function manageUnits()
     if not alive() then return end
+    -- Hands off the body while a raid is running.
+    if raidActive() then STATE.mode = "raid"; return end
     if CONFIG.autoChest then drainChest() end
     placeAndSwap()
     sellSpares()
@@ -1246,22 +1363,6 @@ end
 -- 175, OniPotion (x3 luck AND money AND damage) at 250 and AngelicPotion (x5
 -- on all three) at 300. Those two potions have no Robux path at all - the
 -- castle is the only way to get them.
-local DATA = {}
-do
-    if _G.__ANIMEBOSS_DSCONN then
-        pcall(function() _G.__ANIMEBOSS_DSCONN:Disconnect() end)
-    end
-    local ds = Remotes:FindFirstChild("DataSync")
-    if ds then
-        _G.__ANIMEBOSS_DSCONN = ds.OnClientEvent:Connect(function(payload)
-            if type(payload) == "table" then
-                for k, v in pairs(payload) do DATA[k] = v end
-            end
-        end)
-    end
-    pcall(function() Remotes.RequestSync:FireServer() end)
-end
-
 -- The team the castle run is started with. It has to come from the PLACED
 -- units: the game's own "equip best" reads Backpack Tools, and with every unit
 -- sitting on a slot the backpack is empty, which is why clicking the castle
@@ -1298,6 +1399,9 @@ end
 local _castleLocal = nil
 
 local function castleStep()
+    -- The castle run is declared with the placed units, and during a raid those
+    -- are committed elsewhere - so it waits its turn too.
+    if raidActive() then return false end
     local units = castleUnits()
     if #units == 0 then return false end
 
@@ -1406,6 +1510,13 @@ end
 local _lastClick = 0
 local function farmCycle()
     if not alive() then STATE.mode = "dead"; return end
+    -- The raid owns the player until it ends. Money collection is a touch and
+    -- costs nothing, but nothing here may move or pin the character.
+    if raidActive() then
+        STATE.mode = "raid"
+        if CONFIG.autoMoney then collectMoney() end
+        return
+    end
 
     local hp, maxHp = bossHealth()
     if hp then
@@ -1481,6 +1592,7 @@ loop(90,   "autoClaims",  claimRewards)
 loop(30,   "autoCodes",   redeemCodes)
 loop(2,    "autoCastle",  castleStep)
 loop(25,   "autoItems",   useBoosts)
+loop(45,   "autoFilter",  syncSummonerSettings)
 
 -- Kill counter, read off the oracle rather than counted by us: a boss whose
 -- health was above zero and is now gone was beaten.
@@ -1514,6 +1626,8 @@ _G.__ANIMEBOSS_DBG = {
     claimRewards = claimRewards, redeemCodes = redeemCodes,
     castleStep = castleStep, castleUnits = castleUnits, castleRoom = castleRoom,
     useBoosts = useBoosts, bossEta = bossEta, rerollBoss = rerollBoss, DATA = DATA,
+    raidActive = raidActive, syncSummonerSettings = syncSummonerSettings,
+    rarityCeiling = rarityCeiling, unitWorkPending = unitWorkPending,
     money = money, parseAmount = parseAmount, totalIncome = totalIncome,
     CODES = CODES, RARITY_ORDER = RARITY_ORDER,
 }
@@ -1596,6 +1710,9 @@ cExtra:Toggle("Infinity Castle walk", CONFIG.autoCastle, function(v) CONFIG.auto
     UI.theme.good)
 cExtra:Toggle("Drink potions", CONFIG.autoItems, function(v) CONFIG.autoItems = v end,
     "Spends the potions the castle brings in instead of hoarding them")
+cExtra:Toggle("Stop useless rarities", CONFIG.autoFilter, function(v) CONFIG.autoFilter = v end,
+    "Turns a rarity off in the summoner settings once the plot has outgrown it",
+    UI.theme.good)
 cExtra:Toggle("Claim rewards", CONFIG.autoClaims, function(v) CONFIG.autoClaims = v end,
     "Offline, daily, time and quest rewards")
 cExtra:Toggle("Redeem codes once", CONFIG.autoCodes, function(v) CONFIG.autoCodes = v end,

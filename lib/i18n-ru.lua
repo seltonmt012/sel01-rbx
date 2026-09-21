@@ -8,7 +8,7 @@
 -- they are - they keep passing "Auto rebirth" and only this file decides what
 -- the player reads.
 --
--- 1998 entries.
+-- 2000 entries.
 
 return {
 	["$%s   %s/s   slots %d/%d   R%d   endurance %s"] = "%s$   %s/с   слоты %d/%d   R%d   выносливость %s",
@@ -1098,6 +1098,7 @@ return {
 	["Sticky target"] = "Удерживать цель",
 	["Stop at rebirth"] = "Стоп на ребёрне",
 	["Stop farming while the night hunts"] = "Приостанавливает фарм, пока охотится ночь",
+	["Stop useless rarities"] = "Отключать бесполезные редкости",
 	["Stopped"] = "Остановлено",
 	["Streamer mode"] = "Режим стримера",
 	["Stunde nochmal."] = "час.",
@@ -1195,6 +1196,7 @@ return {
 	["Trophies"] = "Трофеи",
 	["Tune the boost automatically"] = "Автонастройка ускорения",
 	["Turn speed cap (deg/s)"] = "Лимит скорости поворота (град/с)",
+	["Turns a rarity off in the summoner settings once the plot has outgrown it"] = "Отключает редкость в настройках призывателя, когда база её переросла",
 	["UNITS"] = "ЮНИТЫ",
 	["UNSTUCK"] = "ОТЛИПНУТЬ",
 	["UNVERIFIED - never reached in testing, the unlock alone is 1e25"] = "НЕ ПРОВЕРЕНО - в тестах не достигнуто, одна только разблокировка стоит 1e25",
