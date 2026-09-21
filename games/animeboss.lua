@@ -128,7 +128,7 @@ local Config  = ReplicatedStorage:WaitForChild("Config")
 -- --------------------------------------------------------------- game config
 -- The game's own tables. Everything about a unit's worth comes out of these
 -- three, so the script never carries a hand-written price or damage table.
-local CharCfg, MutCfg, PetLvl, StatsCfg, SummonerCfg
+local CharCfg, MutCfg, PetLvl, StatsCfg, SummonerCfg, ArtifactCfg
 do
     local function grab(name)
         local ok, m = pcall(require, Config:WaitForChild(name))
@@ -139,6 +139,7 @@ do
     PetLvl   = grab("PetLevelConfig")
     StatsCfg = grab("StatsConfig")
     SummonerCfg = grab("SummonerLuckConfig")
+    ArtifactCfg = grab("ArtifactConfig")
 end
 
 local CODES = {}
@@ -269,6 +270,8 @@ local CONFIG = {
     autoCastle      = true,   -- the Infinity Castle room walk
     autoItems       = true,   -- drink the potions instead of hoarding them
     autoFilter      = true,   -- stop rolling rarities the plot has outgrown
+    autoRaid        = true,   -- join a boss raid when one opens - the ONLY artifact source
+    autoArtifacts   = true,   -- keep the three best artifacts in the plot slots
 
     -- stuck bosses
     autoReroll      = true,   -- reroll a boss that would take all night
@@ -1070,6 +1073,143 @@ local function sellSpares()
     return sold
 end
 
+-- ------------------------------------------------------- raids, artifacts
+-- ARTIFACTS COME FROM RAIDS AND FROM NOWHERE ELSE. Proven on this account:
+-- after 711 bosses defeated and 704 Infinity Castle rooms, OwnedArtifacts was
+-- EMPTY; one raid joined at wave 1 and dead at wave 32 produced NINE, with
+-- zero raid units placed. Being in the raid is the whole requirement - the
+-- drop is rolled per wave, per player, and the other players carry the waves.
+-- They are not in the castle table, not in the crate table, not in quest
+-- rewards, and not tradeable.
+--
+-- Joining is a WORLD PROMPT, not a remote: JoinRaid:FireServer() was fired
+-- mid-raid and again at the second a raid opened, and answered nothing both
+-- times. The prompt is workspace.Center.BossRaids.Portal.Target.JoinPrompt.
+--
+-- !! THE SAME PROMPT IS ALSO A ROBUX BUTTON !!
+-- Between raids its ActionText reads "Start Raid NOW - 49" and firing it opens
+-- a 49 Robux purchase. So it is fired only when ALL of these hold: the portal
+-- timer reads "NOW", the action text says "join", and it does NOT look like
+-- the paid starter. When in doubt this does nothing at all - a missed raid
+-- costs 35 minutes, a mis-fire costs the user's money.
+local function raidPortalTarget()
+    local c = workspace:FindFirstChild("Center")
+    local br = c and c:FindFirstChild("BossRaids")
+    local p = br and br:FindFirstChild("Portal")
+    return p and p:FindFirstChild("Target")
+end
+
+local function raidTimerText()
+    local t = raidPortalTarget()
+    local bill = t and t:FindFirstChild("TimerBill")
+    local lbl = bill and bill:FindFirstChild("TimerLabel")
+    return lbl and tostring(lbl.Text) or ""
+end
+
+-- The portal billboard is the schedule oracle: it counts down, then reads
+-- "NOW!" for the whole length of the raid, so a late join still works (one was
+-- joined at wave 51 of 70). It restarts at about 24:00 the moment a raid ends.
+local function raidOpen()
+    return raidTimerText():upper():find("NOW") ~= nil
+end
+
+local function joinRaid()
+    if raidActive() or not raidOpen() then return false end
+    local t = raidPortalTarget()
+    local prompt = t and t:FindFirstChild("JoinPrompt")
+    if not prompt or not prompt.Enabled then return false end
+
+    local action = tostring(prompt.ActionText)
+    local low = action:lower()
+    -- Refuse anything that smells of the paid starter, and require the word
+    -- "join" to be there before touching it.
+    if low:find("start raid") or low:find("robux") or action:match("%-%s*%d+%s*$") then
+        note("raid prompt is the paid one, leaving it alone")
+        return false
+    end
+    if not low:find("join") then return false end
+
+    local root = hrp()
+    if not root then return false end
+    local origin
+    withUI("raid", function()
+        origin = pinAt(t.Position + Vector3.new(0, 4, 0), 1.2)
+        if not pcall(function() fireproximityprompt(prompt, 0) end) then
+            pcall(function() fireproximityprompt(prompt) end)
+        end
+        task.wait(1.2)
+        if origin then pcall(function() root.CFrame = origin end) end
+    end)
+
+    task.wait(1.5)
+    if raidActive() then
+        STATE.raids = (STATE.raids or 0) + 1
+        note("joined a boss raid")
+        return true
+    end
+    return false
+end
+
+-- Three artifact slots, each a flat multiplier on Damage, Money or Luck.
+-- Placing is a plain remote and is NOT position gated - fired from 52 studs it
+-- still set Holder.PlacedArtifactId and OwnedArtifacts[..].PlacedSlot. The
+-- ArtifactPrompt on the plot is only a UI opener and is never needed.
+local function artifactInfo(id)
+    if not ArtifactCfg or not id then return nil end
+    local ok, info = pcall(ArtifactCfg.GetInfo, id)
+    if ok and type(info) == "table" then return info end
+    local a = ArtifactCfg.Artifacts
+    return (type(a) == "table" and a[id]) or nil
+end
+
+local function placeArtifacts()
+    local owned = DATA.OwnedArtifacts
+    if type(owned) ~= "table" then
+        pcall(function() Remotes.RequestSync:FireServer() end)
+        return false
+    end
+
+    local list = {}
+    for _, a in pairs(owned) do
+        if type(a) == "table" and a.ArtifactId and a.UID then
+            local info = artifactInfo(a.ArtifactId)
+            list[#list + 1] = {
+                uid = a.UID, id = a.ArtifactId,
+                mult = (info and tonumber(info.Multiplier)) or 0,
+                effect = (info and info.EffectType) or "?",
+                slot = tonumber(a.PlacedSlot),
+            }
+        end
+    end
+    if #list == 0 then return false end
+    table.sort(list, function(x, y) return x.mult > y.mult end)
+
+    -- Best three by multiplier, never the same artifact twice - a duplicate id
+    -- is not known to stack and would waste a slot on a certainty of nothing.
+    local want, seen = {}, {}
+    for _, a in ipairs(list) do
+        if not seen[a.id] and #want < 3 then
+            seen[a.id] = true
+            want[#want + 1] = a
+        end
+    end
+
+    local placed = 0
+    for i, a in ipairs(want) do
+        if a.slot ~= i then
+            pcall(function() Remotes.PlaceArtifact:FireServer(a.uid, i) end)
+            task.wait(0.5)
+            placed = placed + 1
+            note(("placed artifact %s (x%s %s)"):format(a.id, tostring(a.mult), a.effect))
+        end
+    end
+    if placed > 0 then
+        pcall(function() Remotes.RequestSync:FireServer() end)
+        STATE.artifacts = (STATE.artifacts or 0) + placed
+    end
+    return placed > 0
+end
+
 -- ------------------------------------------------- summoner roll filter
 -- Stop useless rarities at the SOURCE instead of shovelling them out of the
 -- chest afterwards. The Summoner Settings panel carries an AutoDelete flag per
@@ -1633,6 +1773,8 @@ loop(30,   "autoCodes",   redeemCodes)
 loop(2,    "autoCastle",  castleStep)
 loop(25,   "autoItems",   useBoosts)
 loop(45,   "autoFilter",  syncSummonerSettings)
+loop(20,   "autoRaid",    joinRaid)
+loop(60,   "autoArtifacts", placeArtifacts)
 
 -- Kill counter, read off the oracle rather than counted by us: a boss whose
 -- health was above zero and is now gone was beaten.
@@ -1667,6 +1809,8 @@ _G.__ANIMEBOSS_DBG = {
     castleStep = castleStep, castleUnits = castleUnits, castleRoom = castleRoom,
     useBoosts = useBoosts, bossEta = bossEta, rerollBoss = rerollBoss, DATA = DATA,
     raidActive = raidActive, syncSummonerSettings = syncSummonerSettings,
+    joinRaid = joinRaid, raidOpen = raidOpen, raidTimerText = raidTimerText,
+    placeArtifacts = placeArtifacts, artifactInfo = artifactInfo,
     rarityCeiling = rarityCeiling, unitWorkPending = unitWorkPending,
     money = money, parseAmount = parseAmount, totalIncome = totalIncome,
     CODES = CODES, RARITY_ORDER = RARITY_ORDER,
@@ -1756,6 +1900,11 @@ cExtra:Toggle("Drink potions", CONFIG.autoItems, function(v) CONFIG.autoItems = 
 cExtra:Toggle("Stop useless rarities", CONFIG.autoFilter, function(v) CONFIG.autoFilter = v end,
     "Turns a rarity off in the summoner settings once the plot has outgrown it",
     UI.theme.good)
+cExtra:Toggle("Join boss raids", CONFIG.autoRaid, function(v) CONFIG.autoRaid = v end,
+    "Raids are the only place artifacts come from - joining is enough, you need not fight",
+    UI.theme.good)
+cExtra:Toggle("Place best artifacts", CONFIG.autoArtifacts, function(v) CONFIG.autoArtifacts = v end,
+    "Keeps the three strongest artifacts in the plot slots")
 cExtra:Toggle("Claim rewards", CONFIG.autoClaims, function(v) CONFIG.autoClaims = v end,
     "Offline, daily, time and quest rewards")
 cExtra:Toggle("Redeem codes once", CONFIG.autoCodes, function(v) CONFIG.autoCodes = v end,

@@ -8,7 +8,7 @@
 -- they are - they keep passing "Auto rebirth" and only this file decides what
 -- the player reads.
 --
--- 2000 entries.
+-- 2004 entries.
 
 return {
 	["$%s   %s/s   slots %d/%d   R%d   endurance %s"] = "%s$   %s/s   Plaetze %d/%d   R%d   Ausdauer %s",
@@ -564,6 +564,7 @@ return {
 	["It has a million health - there is nothing to fight, so leave"] = "Er hat eine Million Leben – da ist nichts zu gewinnen, also weg",
 	["Item shop"] = "Item-Shop",
 	["JUMP & SLIDE"] = "SPRUNG & RUTSCHEN",
+	["Join boss raids"] = "Boss-Raids beitreten",
 	["Jump height"] = "Sprunghöhe",
 	["Jump key"] = "Sprungtaste",
 	["Jump under s"] = "Springen unter s",
@@ -581,6 +582,7 @@ return {
 	["Keep the machines loaded"] = "Maschinen belegt halten",
 	["Keep training"] = "Weiter trainieren",
 	["Keep x price"] = "Guthaben x Preis",
+	["Keeps the three strongest artifacts in the plot slots"] = "Haelt die drei staerksten Artefakte in den Slots der Basis",
 	["Key"] = "Taste",
 	["Kill aura"] = "Kill Aura",
 	["Kill effect"] = "Kill-Effekt",
@@ -775,6 +777,7 @@ return {
 	["Pickup settle (s x10)"] = "Aufnahme-Wartezeit (s x10)",
 	["Pitch %"] = "Senkrecht %",
 	["Pixel FOV"] = "Pixel-FOV",
+	["Place best artifacts"] = "Beste Artefakte einsetzen",
 	["Place brainrots"] = "Brainrots setzen",
 	["Placement clearance"] = "Abstand beim Setzen",
 	["Plain paper"] = "Normales Papier",
@@ -809,6 +812,7 @@ return {
 	["ROLLING"] = "ROLLEN",
 	["ROUND"] = "RUNDE",
 	["RUN"] = "LAUF",
+	["Raids are the only place artifacts come from - joining is enough, you need not fight"] = "Artefakte gibt es nur aus Raids - dabei sein reicht, kaempfen musst du nicht",
 	["Rainbow"] = "Regenbogen",
 	["Range (studs)"] = "Reichweite (Studs)",
 	["Rapid Fire rate"] = "Rapid Fire Rate",

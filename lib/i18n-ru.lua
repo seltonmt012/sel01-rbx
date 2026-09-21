@@ -8,7 +8,7 @@
 -- they are - they keep passing "Auto rebirth" and only this file decides what
 -- the player reads.
 --
--- 2000 entries.
+-- 2004 entries.
 
 return {
 	["$%s   %s/s   slots %d/%d   R%d   endurance %s"] = "%s$   %s/с   слоты %d/%d   R%d   выносливость %s",
@@ -645,6 +645,7 @@ return {
 	["Item shop"] = "Магазин предметов",
 	["JUMP & SLIDE"] = "ПРЫЖОК И ПОДКАТ",
 	["Jetzt speichern"] = "Сохранить сейчас",
+	["Join boss raids"] = "Заходить в рейды боссов",
 	["Jump height"] = "Высота прыжка",
 	["Jump key"] = "Клавиша прыжка",
 	["Jump under s"] = "Прыжок быстрее с",
@@ -663,6 +664,7 @@ return {
 	["Keep the machines loaded"] = "Держать машины загруженными",
 	["Keep training"] = "Продолжать тренировку",
 	["Keep x price"] = "Запас x цена",
+	["Keeps the three strongest artifacts in the plot slots"] = "Держит три сильнейших артефакта в слотах базы",
 	["Key"] = "Клавиша",
 	["Kill aura"] = "Аура убийства",
 	["Kill effect"] = "Эффект убийства",
@@ -889,6 +891,7 @@ return {
 	["Pickups"] = "Предметы",
 	["Pitch %"] = "Вертикаль %",
 	["Pixel FOV"] = "Пиксельный FOV",
+	["Place best artifacts"] = "Ставить лучшие артефакты",
 	["Place brainrots"] = "Ставить брейнроты",
 	["Placement clearance"] = "Отступ при установке",
 	["Plain paper"] = "Обычная бумага",
@@ -927,6 +930,7 @@ return {
 	["ROLLS"] = "РОЛЛЫ",
 	["ROUND"] = "РАУНД",
 	["RUN"] = "ЗАПУСК",
+	["Raids are the only place artifacts come from - joining is enough, you need not fight"] = "Артефакты выпадают только в рейдах - достаточно просто участвовать, драться не нужно",
 	["Rainbow"] = "Радуга",
 	["Range (studs)"] = "Дальность (студы)",
 	["Rapid Fire rate"] = "Rapid Fire Rate",
