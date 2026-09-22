@@ -29,6 +29,7 @@
       "places": [
         292439477
       ],
+      "noqueue": true,
       "status": "ok",
       "note": "FREE. The first game here that fights being read: the Players SERVICE is renamed (game.Players throws), the DataModel, the two team folders, every character model and every part carry random names, and the models are destroyed and rebuilt ~3.5 times a second. Player.Character and Player.Team are nil for everyone. Identity comes out of NameTagGui.PlayerTag inside each model, the part that tag hangs on IS the head, and the team comes from the leaderboard GUI. Camera writes are thrown away within a frame, so the aim assist delivers through mousemoverel and learns the sensitivity from the player's own hand. No remote is fired: the whole client runs in an Actor VM and every send carries a rolling key that only exists in there",
       "detect": "local rs = game:GetService('ReplicatedStorage') local c = rs:FindFirstChild('Content') local pc = c and c:FindFirstChild('ProductionContent') return rs:FindFirstChild('ReadyEvent') ~= nil and rs:FindFirstChild('PlayerDataEvent') ~= nil and pc ~= nil and pc:FindFirstChild('WeaponDatabase') ~= nil"

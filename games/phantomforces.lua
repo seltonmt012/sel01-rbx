@@ -63,9 +63,30 @@
      armed.
 
   8. THE CLIENT RUNS IN AN ACTOR VM (getactors 1, getrunningscripts 0, 2702
-     loaded modules). Nothing here needs it. It also means a __namecall hook in
-     the main VM sees none of the game's traffic, so do not go looking for the
-     shot path that way.
+     loaded modules), so a __namecall hook in the main VM sees none of the
+     game's traffic - do not go looking for the shot path that way. The ESP,
+     the aim assist, the trigger and the recoil control do not need it.
+
+     THE GUN MODS AND SILENT AIM DO, and this is the single thing most likely to
+     make somebody report the script as broken. One Roblox debug flag,
+     `DebugRunParallelLuaOnMainThread`, puts that code on the main thread; a
+     flag only takes effect on a FRESH JOIN. This file therefore SETS IT WHEN IT
+     STARTS - setting it changes nothing in the running client - so the next
+     join is hookable whether or not anybody read a panel. Measured on a user's
+     client in the middle of three "silent aim does not work" reports: flag
+     false, getactors 1. It had never been switched on by anyone.
+
+  9. NOTHING OF OURS LIVES IN `_G`. With that flag on, the game's code shares
+     this Lua state, and `_G` is the table every script in a state can read.
+     All state is in `getgenv()` (debug handle: `getgenv().__SELPF_DBG`), with
+     `_G` kept only as the fallback for an executor that has no getgenv.
+
+ 10. HOOKS GO IN ONE AT A TIME, WHEN A SWITCH ASKS FOR ONE. Every patched
+     function is one more thing a client-side check could hold against its own
+     copy, so a panel with everything off patches nothing at all. And every
+     hook body is wrapped in a pcall: these run inside the game's own shot
+     pipeline, where an error is not a dead feature but a gun that stops
+     firing - which is what "it worked and then stopped" turned out to be.
 
   What is NOT in here, on purpose: nothing writes health, position, speed or a
   hitbox size, and no remote is fired. Phantom Forces validates movement server
@@ -86,14 +107,43 @@ workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function()
 end)
 
 --------------------------------------------------------------------------------
+-- where this script keeps its own state, and why it is not in _G
+--------------------------------------------------------------------------------
+--
+-- With the debug flag below, the game's own code runs in the SAME Lua state as
+-- this script - that is the whole point of the flag - and `_G` is the table
+-- every script in a state shares. A handful of `__SELPF*` keys sitting in it is
+-- something the client could look for in three lines, so none of it lives there
+-- any more. `getgenv()` is the executor's own environment: it survives a
+-- re-execute the same way and the game has no path to it.
+--
+-- `_G` stays as the fallback for an executor without getgenv, because losing the
+-- generation guard - doubled loops, stacked hooks - is worse than being visible.
+-- AND THE FALLBACK HAS TO BE STICKY. `getgenv` is not reachable from every way
+-- of starting a script: measured on this machine, a chunk loaded through the
+-- executor's own MCP channel saw no `getgenv` at all and landed in `_G`, while
+-- the same file loaded through the bridge found it. If one run then picked the
+-- executor table and the next picked `_G`, the two would be watching different
+-- generation counters - and that is the doubled-loops, stacked-hooks failure
+-- this guard exists to prevent. So: prefer getgenv, but if an earlier run of
+-- this script in this VM is already living in `_G`, stay there with it.
+local ENV
+do
+	local ok, g = pcall(function() return getgenv() end)
+	g = (ok and type(g) == "table") and g or nil
+	if g and g.__SELPF == nil and _G.__SELPF ~= nil then g = nil end
+	ENV = g or _G
+end
+
+--------------------------------------------------------------------------------
 -- generation guard
 --------------------------------------------------------------------------------
 --
 -- Re-executing does not restart the Lua VM. Every loop and render bind checks
 -- this so last run's ghosts stop themselves.
 
-_G.__SELPF = (_G.__SELPF or 0) + 1
-local GEN = _G.__SELPF
+ENV.__SELPF = (ENV.__SELPF or 0) + 1
+local GEN = ENV.__SELPF
 
 --------------------------------------------------------------------------------
 -- executor capabilities, resolved once
@@ -151,18 +201,21 @@ pcall(function() VIM = game:GetService("VirtualInputManager") end)
 -- button rather than done silently: it teleports the player back into the same
 -- server and that is not something a panel should do behind their back.
 
-local MODS = _G.__SELPF_MODS or {
+local MODS = ENV.__SELPF_MODS or {
 	noRecoil = false, noSpread = false, noSway = false, noEquipTime = false,
 	instantAds = false, rapidFire = false, fireRate = 1200,
 	noBob = false, noSuppression = false, noBolt = false, stability = false,
-	silent = false, fastReload = false, reloadFactor = 0.3,
+	silent = false, fastReload = false, reloadFactor = 0.3, silentMaxBend = 30,
+	silentChance = 85,
 }
-_G.__SELPF_MODS = MODS
+ENV.__SELPF_MODS = MODS
 
-local HOOKS = _G.__SELPF_HOOKS or { installed = false, note = "not installed",
+local HOOKS = ENV.__SELPF_HOOKS or { installed = false, note = "not installed",
 	statOverride = {}, weaponStat = false, recoil = 0, bent = {} }
 HOOKS.bent = HOOKS.bent or {}
-_G.__SELPF_HOOKS = HOOKS
+HOOKS.statOverride = HOOKS.statOverride or {}
+HOOKS.statScale = HOOKS.statScale or {}
+ENV.__SELPF_HOOKS = HOOKS
 
 local function fflagOn()
 	local get = globalFn("getfflag")
@@ -179,91 +232,152 @@ local function parallelOnMainThread()
 	return ok and n == 0
 end
 
+-- SET THE FLAG AT LOAD, and this is the single biggest reason the reports say
+-- silent aim does not work. Everything that hooks this game needs the client's
+-- code on the main thread, the flag only takes effect on a fresh join, and it
+-- used to be set by a button on the fourth page of the panel that also threw
+-- the player back into the server. Almost nobody pressed it, so almost nobody
+-- ever had silent aim, and the panel said so in a readout line nobody reads.
+--
+-- Setting it is inert by itself: it changes nothing in the running client and
+-- nothing outside Roblox's own debug flags. The next join - a server hop, a
+-- rejoin, the next session - comes up hookable without anybody doing anything.
+-- The button is still there for having it NOW.
+local function setFlag()
+	local setf = globalFn("setfflag")
+	if not setf then return false, "this executor has no setfflag" end
+	if fflagOn() then return true, "already set" end
+	local ok = pcall(setf, "DebugRunParallelLuaOnMainThread", "true")
+	if not ok then return false, "setfflag was refused" end
+	return true, "set - it takes effect on your next join"
+end
+
+local FLAG_NOTE = select(2, setFlag())
+
 -- Forward declaration: the silent aim hook is installed long before the target
 -- picker exists, and a Lua local is invisible above its own definition.
 local silentAimPoint = nil
 
--- Install once per VM. hookfunction cannot be undone and hooking twice stacks
--- handlers permanently, so every hook here is installed exactly once and reads a
--- live flag out of MODS instead of being added and removed.
--- Bumped whenever a hook BODY changes. hookfunction cannot be undone, so a
--- re-execute cannot replace an installed hook - it can only stack a second one,
--- which is worse. The honest move is to detect that the live hooks are older
--- than this file and say so, because the alternative is a panel whose switches
--- quietly drive last version's code.
-local HOOK_VERSION = 5
+-- Install once per VM, and only what is actually switched on.
+--
+-- hookfunction cannot be undone: hooking the same function twice stacks
+-- handlers permanently, so every hook here goes in exactly once and reads a live
+-- flag out of MODS instead of being added and removed.
+--
+-- LAZY, and that is a deliberate change. Every patched function is one more
+-- thing a client-side check can hold against its own copy, and the first build
+-- patched all of it - the stat lookup, the animation length, the bullet
+-- constructor, the network send and one function per recoil table - the moment
+-- the script started, for a session that usually wanted one of them. Nothing is
+-- hooked now until the switch that needs it is turned on: a silent-aim-only run
+-- patches two functions instead of six or more, and a panel sitting there with
+-- everything off patches none at all.
+--
+-- HOOK_VERSION is bumped whenever a hook BODY changes. A re-execute cannot
+-- replace an installed hook - it can only stack a second one - so the honest
+-- move is to notice that the live hooks are older than this file and say so,
+-- rather than run a panel whose switches quietly drive last version's code.
+--
+-- The whole block is one `do ... end` for the reason in header (15): Luau
+-- allows 200 locals per function, this chunk has been at that ceiling before,
+-- and the hook machinery is a dozen names that nothing outside needs. Only
+-- armHooks and hookList come back out.
+local armHooks, hookList
+do
 
-local function installHooks()
-	if HOOKS.installed then
-		if (HOOKS.version or 1) < HOOK_VERSION then
-			HOOKS.note = "hooks are from an older load - rejoin to update them"
-		end
-		return HOOKS
-	end
-	if not globalFn("hookfunction") then
-		HOOKS.note = "this executor has no hookfunction"
-		return HOOKS
-	end
-	if not parallelOnMainThread() then
-		HOOKS.note = "the client still runs its code in an Actor VM"
-		return HOOKS
-	end
+local HOOK_VERSION = 7
 
-	local hookfn = globalFn("hookfunction")
-	local firearm, bullets, net, recoilTables = nil, nil, nil, {}
+local FOUND = HOOKS.found or {}
+HOOKS.found = FOUND
+HOOKS.on = HOOKS.on or {}
+
+-- What the sweep looks for. A table is taken when its PRIMARY method is there
+-- and at least ONE companion is. Matching on a single hardcoded pair was the
+-- other fragility in here: these names are the only part of this script the
+-- game's authors can break for free, and one rename should not be allowed to
+-- take the whole toolkit down with it.
+local WANTED = {
+	firearm = { "getWeaponStat", { "fireRound", "getAnimLength", "getCurrentReloadFile" } },
+	bullets = { "newBullet",     { "cleanBullets", "updateBullets", "getBullets" } },
+	net     = { "send",          { "getPing", "getNetworkTime", "getServerTime" } },
+}
+
+-- NOT INSTALLED, JUST NOT READY. On a fresh join the hub loader runs this script
+-- before the game's own client has built its objects, so the sweep finds
+-- nothing - and writing that down as "installed" burns the only chance to hook
+-- anything for the whole session. Measured exactly that way: a join came up
+-- reading "stats false, recoil on 0 tables" and every gun mod was dead with no
+-- error anywhere. So this stays retryable, and - the bug behind one of the
+-- silent aim reports - readiness is now PER TABLE. The old code guarded only on
+-- the firearm table and then declared the whole install finished, so a sweep
+-- that happened to catch FirearmObject before BulletInterface existed left
+-- silent aim permanently off while every gun mod worked, for the rest of the
+-- session, with the panel reporting "ok".
+local function sweep()
+	if FOUND.firearm and FOUND.bullets and FOUND.net and FOUND.recoil then return true end
+	local now = os.clock()
+	if now - (FOUND.at or -99) < 5 then return FOUND.firearm ~= nil end
+	FOUND.at = now
+
+	local recoil = {}
 	local ok = pcall(function()
 		for _, v in ipairs(getgc(true)) do
 			if type(v) == "table" then
-				if not firearm and type(rawget(v, "getWeaponStat")) == "function"
-					and type(rawget(v, "fireRound")) == "function" then
-					firearm = v
-				end
-				if not net and type(rawget(v, "send")) == "function"
-					and type(rawget(v, "getPing")) == "function" then
-					net = v
-				end
-				if not bullets and type(rawget(v, "newBullet")) == "function"
-					and type(rawget(v, "cleanBullets")) == "function" then
-					bullets = v
+				for key, want in pairs(WANTED) do
+					if not FOUND[key] and type(rawget(v, want[1])) == "function" then
+						for _, companion in ipairs(want[2]) do
+							if type(rawget(v, companion)) == "function" then
+								FOUND[key] = v
+								break
+							end
+						end
+					end
 				end
 				if type(rawget(v, "applyImpulse")) == "function" then
-					recoilTables[#recoilTables + 1] = v
+					recoil[#recoil + 1] = v
 				end
 			end
 		end
 	end)
 	if not ok then
 		HOOKS.note = "the object sweep failed"
-		return HOOKS
+		return false
 	end
+	if #recoil > 0 then FOUND.recoil = recoil end
+	return FOUND.firearm ~= nil
+end
 
-	-- NOT INSTALLED, JUST NOT READY. On a fresh join the hub loader runs this
-	-- script before the game's own client has built its objects, so the sweep
-	-- finds nothing - and marking that as "installed" burns the only chance to
-	-- hook anything for the whole session. Measured exactly that way: a join came
-	-- up reading "stats false, recoil on 0 tables" and every gun mod was dead
-	-- with no error anywhere. Leave it retryable instead.
-	if not firearm then
-		HOOKS.note = "waiting for the game's client to finish loading"
-		return HOOKS
-	end
+local INSTALL = {}
 
-	-- Every gun mod except the recoil is a STAT LOOKUP. The weapon asks
-	-- `getWeaponStat("hipfirespread")` and friends on every shot, so one hook on
-	-- that single method covers spread, sway, equip time and ADS speed at once,
-	-- and adding another mod later is a table entry rather than a new hook.
-	if firearm then
-		local old
-		old = hookfn(firearm.getWeaponStat, function(self, name, ...)
-			local ovr = HOOKS.statOverride
-			if type(name) == "string" then
-				local v = ovr[name]
-				if v ~= nil then return v end
+-- Every gun mod except the recoil is a STAT LOOKUP. The weapon asks
+-- `getWeaponStat("hipfirespread")` and friends on every shot, so one hook on
+-- that single method covers spread, sway, equip time and ADS speed at once, and
+-- adding another mod later is a table entry rather than a new hook.
+-- Two tables, and the second one is what makes a strength slider possible. An
+-- OVERRIDE replaces the answer with a constant, which is all a switch needs; a
+-- SCALE multiplies the game's own answer, which is the only way to say "half
+-- the spread" without knowing what the full spread of this particular weapon
+-- is. The override wins where both exist.
+INSTALL.stat = function(hookfn)
+	local t = FOUND.firearm
+	if not t or type(rawget(t, "getWeaponStat")) ~= "function" then return end
+	local old
+	old = hookfn(t.getWeaponStat, function(self, name, ...)
+		if type(name) == "string" then
+			local v = HOOKS.statOverride[name]
+			if v ~= nil then return v end
+			local f = HOOKS.statScale[name]
+			if f ~= nil then
+				local real = old(self, name, ...)
+				if type(real) == "number" then return real * f end
+				return real
 			end
-			return old(self, name, ...)
-		end)
-		HOOKS.weaponStat = true
-	end
+		end
+		return old(self, name, ...)
+	end)
+	HOOKS.on.stat = true
+	HOOKS.weaponStat = true
+end
 
 	-- FASTER RELOAD. There is no reload TIME in the weapon stats - the duration
 	-- IS the animation, and the state machine asks `getAnimLength(name)` for it
@@ -271,30 +385,33 @@ local function installHooks()
 	-- name). Scaling the answer therefore shortens the reload state without
 	-- touching the animation system.
 	--
-	-- Scoped to the reload on purpose: the same function answers for equipping,
-	-- firing and bolt work, and shrinking all of it is how a script ends up
-	-- feeling broken in ways nobody can describe.
-	if firearm then
-		local old
-		old = hookfn(firearm.getAnimLength, function(self, name, ...)
-			local real = old(self, name, ...)
-			if not MODS.fastReload or type(real) ~= "number" or real <= 0 then
-				return real
-			end
-			local isReload = false
-			if type(name) == "string" and name:lower():find("reload", 1, true) then
+-- Scoped to the reload on purpose: the same function answers for equipping,
+-- firing and bolt work, and shrinking all of it is how a script ends up feeling
+-- broken in ways nobody can describe.
+INSTALL.reload = function(hookfn)
+	local t = FOUND.firearm
+	if not t or type(rawget(t, "getAnimLength")) ~= "function" then return end
+	local old
+	old = hookfn(t.getAnimLength, function(self, name, ...)
+		local real = old(self, name, ...)
+		if not MODS.fastReload or type(real) ~= "number" or real <= 0 then
+			return real
+		end
+		local isReload = false
+		if type(name) == "string" and name:lower():find("reload", 1, true) then
+			isReload = true
+		else
+			local okf, file = pcall(function() return self:getCurrentReloadFile() end)
+			if okf and type(file) == "table" and file.reloadName == name then
 				isReload = true
-			else
-				local okf, file = pcall(function() return self:getCurrentReloadFile() end)
-				if okf and type(file) == "table" and file.reloadName == name then
-					isReload = true
-				end
 			end
-			if not isReload then return real end
-			return real * math.clamp(MODS.reloadFactor or 0.3, 0.05, 1)
-		end)
-		HOOKS.reload = true
-	end
+		end
+		if not isReload then return real end
+		return real * math.clamp(MODS.reloadFactor or 0.3, 0.05, 1)
+	end)
+	HOOKS.on.reload = true
+	HOOKS.reload = true
+end
 
 	-- SILENT AIM, and it is the bullet that is bent - not the hit that is
 	-- claimed. The first attempt replaced the answer of `playerHitCheck`, so the
@@ -310,102 +427,314 @@ local function installHooks()
 	-- usually by rewriting the direction argument of a raycast; Phantom Forces
 	-- simulates its bullets instead of raycasting them, so the velocity is the
 	-- equivalent place.
-	if bullets then
-		local old
-		old = hookfn(bullets.newBullet, function(props, ...)
-			-- Everything this hook touches is reached through HOOKS, which lives
-			-- in _G. hookfunction cannot be undone, so after a re-execute the
-			-- INSTALLED hook is still the first run's closure: a captured local
-			-- would keep pointing at the old run's target picker and the old
-			-- run's counters, and the panel would sit there reading zero while
-			-- bullets were being bent. Measured exactly that way once.
-			-- ONLY OUR OWN BULLETS. newBullet is called for every bullet in the
-			-- world, remote players' replicated ones included - 208 of them in
-			-- twelve seconds against a handful of our own - and bending those
-			-- redirects other people's tracers on our screen for no gain.
-			-- `extra.firearmObject` is set only by our own fireRound.
-			local ours = type(props) == "table" and type(props.extra) == "table"
-				and props.extra.firearmObject ~= nil
-			if MODS.silent and ours
-				and typeof(props.velocity) == "Vector3"
-				and typeof(props.position) == "Vector3" then
-				local pick = HOOKS.aimPoint
-				local aim = pick and pick(props.position, props.velocity.Magnitude)
-				if aim then
-					local dir = aim - props.position
-					if dir.Magnitude > 0.001 then
-						local unit = dir.Unit
-						props.velocity = unit * props.velocity.Magnitude
-						HOOKS.silentShots = (HOOKS.silentShots or 0) + 1
-						-- Remember it by TICKET, because the packet that tells the
-						-- server about this shot is built separately from the
-						-- bullet object and has to be given the same direction.
-						local ticket = props.extra.bulletTicket
-						if ticket then HOOKS.bent[ticket] = unit end
-					end
-				end
-			end
-			return old(props, ...)
-		end)
-		HOOKS.silent = true
+-- Everything this reaches goes through HOOKS, which lives in ENV. hookfunction
+-- cannot be undone, so after a re-execute the INSTALLED hook is still the first
+-- run's closure: a captured local would keep pointing at the old run's target
+-- picker and the old run's counters, and the panel would sit there reading zero
+-- while bullets were being bent. Measured exactly that way once.
+local function bendBullet(props)
+	if not MODS.silent then return end
+
+	-- ONLY OUR OWN BULLETS. newBullet is called for every bullet in the world,
+	-- remote players' replicated ones included - 208 of them in twelve seconds
+	-- against a handful of our own - and bending those only redirects other
+	-- people's tracers on our screen. `extra.firearmObject` is set by our own
+	-- fireRound and by nothing else.
+	if type(props) ~= "table" or type(props.extra) ~= "table" then return end
+	if props.extra.firearmObject == nil then return end
+	if typeof(props.velocity) ~= "Vector3" or typeof(props.position) ~= "Vector3" then return end
+
+	-- NO TICKET, NO BEND, and the same for a missing packet hook. The message
+	-- that tells the server about this shot is built from its own list and
+	-- matched back to the bullet by ticket (below). Without that match the
+	-- bullet flies at the target on THIS screen while the server still has the
+	-- original direction: the hitmarker appears and nobody takes damage, which
+	-- is the most confusing way this feature can fail and is what two of the
+	-- reports describe. Refusing to bend is honest; bending anyway is the client
+	-- lying to itself.
+	local ticket = props.extra.bulletTicket
+	if ticket == nil then
+		HOOKS.noTicket = (HOOKS.noTicket or 0) + 1
+		return
+	end
+	if not HOOKS.on.send then
+		HOOKS.noSend = (HOOKS.noSend or 0) + 1
+		return
 	end
 
-	-- THE OTHER HALF OF SILENT AIM, and without it the feature is a lie that the
-	-- client tells itself. `fireRound` does not build the network packet from the
-	-- bullet object - it collects `{ direction, ticket }` pairs from its own
-	-- local and sends those:
-	--
-	--     v225[#v225 + 1] = { v232, v230 }
-	--     NetworkClient:send("newbullets", uniqueId, v226, GameClock.getTime())
-	--
-	-- So bending the bullet alone makes the CLIENT hit - the hitmarker even
-	-- appears, because the hitmarker is drawn by the client's own hit detection -
-	-- while the server still sees a shot going the original way and refuses the
-	-- damage. Reported exactly like that: "hitmarker comes, no damage". Matching
-	-- the packet to the bullet by ticket is what closes it.
-	if net then
-		local old
-		old = hookfn(net.send, function(self, name, uid, list, ...)
-			-- The payload is a WRAPPER, not the list: `{ firepos = ..., index = ...,
-			-- bullets = { {direction, ticket}, ... } }`. Iterating the wrapper
-			-- finds no pairs at all and the rewrite silently does nothing, which
-			-- read as "the bullet is bent but the packet is not" for a while.
-			if name == "newbullets" and type(list) == "table" then
-				local entries = (type(list.bullets) == "table") and list.bullets or list
-				for _, entry in pairs(entries) do
-					if type(entry) == "table" and typeof(entry[1]) == "Vector3" then
-						local bent = entry[2] and HOOKS.bent[entry[2]]
-						if bent then
-							entry[1] = bent
-							HOOKS.bent[entry[2]] = nil
-							HOOKS.sentBent = (HOOKS.sentBent or 0) + 1
-						end
-					end
-				end
-			end
-			return old(self, name, uid, list, ...)
-		end)
-		HOOKS.send = true
+	-- NOT EVERY SHOT, unless that is what was asked for. A player who never
+	-- misses is the thing a spectator notices; one who lands four of five is a
+	-- player having a good game. The roll happens before the target is even
+	-- picked, so a shot that loses it simply goes where the barrel pointed.
+	local chance = MODS.silentChance or 100
+	if chance < 100 and math.random(100) > chance then
+		HOOKS.rolledOff = (HOOKS.rolledOff or 0) + 1
+		return
 	end
 
-	-- The camera kick. Measured over an eight round burst: 2.49 deg of climb
-	-- with it, 0.01 deg with it hooked out.
-	for _, t in ipairs(recoilTables) do
-		local old
-		old = hookfn(t.applyImpulse, function(...)
-			if MODS.noRecoil then return end
-			return old(...)
-		end)
-		HOOKS.recoil = HOOKS.recoil + 1
+	local pick = HOOKS.aimPoint
+	if not pick then return end
+	local aim = pick(props.position, props.velocity.Magnitude)
+	if not aim then return end
+
+	local dir = aim - props.position
+	if dir.Magnitude <= 0.001 then return end
+	local unit = dir.Unit
+	local was = props.velocity.Unit
+
+	-- HOW FAR A SHOT MAY BEND, and this is the part that keeps the feature
+	-- quiet. The server is happy either way - the trajectory is genuine, which
+	-- is the whole reason this shape works - but a spectator is not, and in this
+	-- game a human watching is the realistic threat: a bullet leaving the muzzle
+	-- sideways is the one thing that reads as a cheat on somebody else's screen.
+	-- The cap turns "hits anything on the screen" into "never misses what you
+	-- were roughly pointing at", which is most of the benefit and a fraction of
+	-- the noise.
+	local maxCos = math.cos(math.rad(math.clamp(MODS.silentMaxBend or 30, 1, 180)))
+	if was:Dot(unit) < maxCos then
+		HOOKS.tooWide = (HOOKS.tooWide or 0) + 1
+		return
 	end
 
-	HOOKS.installed = true
-	HOOKS.version = HOOK_VERSION
-	HOOKS.note = "ok - stats " .. tostring(HOOKS.weaponStat)
-		.. ", recoil on " .. HOOKS.recoil .. " tables"
-		.. (HOOKS.silent and ", silent aim" or "")
-	return HOOKS
+	props.velocity = unit * props.velocity.Magnitude
+	HOOKS.silentShots = (HOOKS.silentShots or 0) + 1
+	-- Kept by TICKET and with the CLOCK. The clock is what stops the table
+	-- growing for the whole session when a bullet is bent and its packet never
+	-- arrives, and - the worse half - what stops a recycled ticket number
+	-- picking up the direction of a shot from half a minute ago and throwing it
+	-- somewhere nobody aimed.
+	HOOKS.bent[ticket] = { unit, os.clock() }
 end
+
+-- THE OTHER HALF, and without it the feature is a lie the client tells itself.
+-- `fireRound` does not build the network payload from the bullet object - it
+-- collects `{ direction, ticket }` pairs from its own local and sends those:
+--
+--     v225[#v225 + 1] = { v232, v230 }
+--     NetworkClient:send("newbullets", uniqueId, v226, GameClock.getTime())
+local function bendPacket(name, list)
+	if name ~= "newbullets" or type(list) ~= "table" then return end
+	-- The payload is a WRAPPER, not the list: `{ firepos = ..., index = ...,
+	-- bullets = { {direction, ticket}, ... } }`. Iterating the wrapper itself
+	-- finds no pairs at all and the rewrite does nothing, which read as "the
+	-- bullet is bent but the packet is not" for a while.
+	local entries = (type(list.bullets) == "table") and list.bullets or list
+	local now = os.clock()
+	for _, entry in pairs(entries) do
+		if type(entry) == "table" and typeof(entry[1]) == "Vector3" and entry[2] ~= nil then
+			local rec = HOOKS.bent[entry[2]]
+			if rec then
+				HOOKS.bent[entry[2]] = nil
+				if now - rec[2] < 1 then
+					-- The stored direction is a UNIT vector and this field is
+					-- not necessarily one, so the original magnitude is carried
+					-- over rather than assumed to be 1. Writing a bare unit into
+					-- a field that held a velocity is a shot at 1 stud/s.
+					entry[1] = rec[1] * entry[1].Magnitude
+					HOOKS.sentBent = (HOOKS.sentBent or 0) + 1
+				end
+			end
+		end
+	end
+	-- Anything older than a second never found its packet and never will.
+	if now - (HOOKS.bentSweptAt or 0) > 2 then
+		HOOKS.bentSweptAt = now
+		for k, rec in pairs(HOOKS.bent) do
+			if now - rec[2] > 1 then HOOKS.bent[k] = nil end
+		end
+	end
+end
+
+-- SILENT AIM, and it is the bullet that is bent - not the hit that is claimed.
+-- The first attempt replaced the answer of `playerHitCheck`, so the client
+-- reported a hit while the bullet flew somewhere else: the packets went out on
+-- a valid rolling key and the server confirmed NONE of them, because it
+-- re-validates the trajectory.
+--
+-- Rewriting `newBullet`'s velocity means the shot genuinely travels at the
+-- target. The game's own hit detection then finds the enemy the ordinary way,
+-- reports it the ordinary way, and the packet the client sends carries that
+-- same direction - there is nothing left for the server to disagree with.
+INSTALL.bullet = function(hookfn)
+	local t = FOUND.bullets
+	if not t or type(rawget(t, "newBullet")) ~= "function" then return end
+	local old
+	old = hookfn(t.newBullet, function(props, ...)
+		-- NOTHING IN HERE MAY THROW. This runs inside the game's own shot
+		-- pipeline, so an error is not a dead feature - it is a gun that stops
+		-- working, and it would be reported as "it worked and then it stopped
+		-- after a while", which is exactly one of the reports. A destroyed part
+		-- read one frame after its Parent check is enough to cause it. The whole
+		-- body is one pcall; the game's own call stays outside it.
+		pcall(bendBullet, props)
+		return old(props, ...)
+	end)
+	HOOKS.on.bullet = true
+	HOOKS.silent = true
+end
+
+INSTALL.send = function(hookfn)
+	local t = FOUND.net
+	if not t or type(rawget(t, "send")) ~= "function" then return end
+	local old
+	old = hookfn(t.send, function(self, name, uid, list, ...)
+		pcall(bendPacket, name, list)
+		return old(self, name, uid, list, ...)
+	end)
+	HOOKS.on.send = true
+	HOOKS.send = true
+end
+
+-- The camera kick. Measured over an eight round burst: 2.49 deg of climb with
+-- it, 0.01 deg with it hooked out.
+--
+-- ONE FUNCTION, not every table that has an applyImpulse, and decompiling it is
+-- what showed why:
+--
+--     RecoilSprings.applyImpulse(self, cframe, scale)   -- scale defaults to 1
+--         v.v = v.v + cframe * impulse * scale
+--     MainCameraObject.applyImpulse(self, scale)
+--         self._cameraHeadSprings:applyImpulse(nil, scale)
+--         self._cameraBodySprings:applyImpulse(nil, scale)
+--
+-- The camera's version does not apply anything itself, it forwards into the
+-- springs' version - so hooking both would have scaled the same kick twice, and
+-- hooking only the springs covers the camera, the viewmodel and anything else
+-- built on them. The third argument being a plain multiplier is also why this
+-- is a slider now instead of a switch: 40 per cent recoil is the game's own
+-- arithmetic, not an approximation of it.
+INSTALL.recoil = function(hookfn)
+	local list = FOUND.recoil
+	if type(list) ~= "table" then return end
+
+	-- the springs module, identified by a method only it has
+	local springs
+	for _, t in ipairs(list) do
+		if type(rawget(t, "applyImpulse")) == "function"
+			and type(rawget(t, "getUniformDist")) == "function" then
+			springs = t
+			break
+		end
+	end
+
+	if springs then
+		local old
+		old = hookfn(springs.applyImpulse, function(self, cf, scale, ...)
+			if MODS.noRecoil then
+				local pct = MODS.recoilPct or 100
+				if pct >= 100 then return end
+				scale = (type(scale) == "number" and scale or 1) * (1 - pct / 100)
+			end
+			return old(self, cf, scale, ...)
+		end)
+		HOOKS.recoil = 1
+		HOOKS.on.recoil = true
+		return
+	end
+
+	-- Fallback for a future rename: drop the call entirely, which is what this
+	-- did before, and say so by leaving the strength at full.
+	local n = 0
+	for _, t in ipairs(list) do
+		if type(rawget(t, "applyImpulse")) == "function" then
+			local old
+			old = hookfn(t.applyImpulse, function(...)
+				if MODS.noRecoil then return end
+				return old(...)
+			end)
+			n = n + 1
+		end
+	end
+	HOOKS.recoil = n
+	HOOKS.recoilCrude = n > 0
+	HOOKS.on.recoil = n > 0
+end
+
+function hookList()
+	local names = {}
+	for kind, on in pairs(HOOKS.on) do
+		if on then names[#names + 1] = kind end
+	end
+	table.sort(names)
+	if #names == 0 then return "none" end
+	return table.concat(names, ", ")
+end
+
+-- One hook, on demand, once.
+local function ensure(kind)
+	if HOOKS.on[kind] then return true end
+	local hookfn = globalFn("hookfunction")
+	if not hookfn then
+		HOOKS.note = "this executor has no hookfunction"
+		return false
+	end
+	if not parallelOnMainThread() then
+		HOOKS.note = "the client still runs its code in an Actor VM - see GUN MODS"
+		return false
+	end
+	if not sweep() then
+		if HOOKS.note ~= "the object sweep failed" then
+			HOOKS.note = "waiting for the game's client to finish loading"
+		end
+		return false
+	end
+	local fn = INSTALL[kind]
+	if not fn then return false end
+	local ok, err = pcall(fn, hookfn)
+	if not ok then
+		HOOKS.note = "hooking " .. kind .. " failed: " .. tostring(err)
+		return false
+	end
+	if not HOOKS.on[kind] then
+		HOOKS.note = "the game's " .. kind .. " table is not in reach yet"
+		return false
+	end
+	HOOKS.version = HOOK_VERSION
+	HOOKS.note = "ok - hooked: " .. hookList()
+	return true
+end
+
+-- Bring up exactly the hooks the live switches need and nothing else. Called
+-- from syncMods, so flipping a switch installs its hook there and then, and
+-- from a slow retry for the case where the game's client is still loading.
+-- Returns true when everything that is wanted is up.
+function armHooks()
+	-- `installed` is the marker the versions before this one set, and it has to
+	-- be honoured as well as `on`: a client still carrying those hooks has no
+	-- `on` table, so a check that only looked there would read the VM as fresh
+	-- and install a SECOND set on top of the first. hookfunction has no undo,
+	-- so that is permanent until the next join.
+	if (HOOKS.version or 0) < HOOK_VERSION
+		and (HOOKS.installed or next(HOOKS.on) ~= nil) then
+		HOOKS.note = "hooks are from an older load - rejoin to update them"
+		return true
+	end
+	local want = {}
+	if MODS.noSpread or MODS.noSway or MODS.noBob or MODS.noSuppression
+		or MODS.noBolt or MODS.stability or MODS.noEquipTime or MODS.instantAds
+		or MODS.rapidFire then
+		want[#want + 1] = "stat"
+	end
+	if MODS.fastReload then want[#want + 1] = "reload" end
+	if MODS.noRecoil then want[#want + 1] = "recoil" end
+	-- Order matters: the packet hook goes in FIRST, because bendBullet refuses
+	-- to bend anything while it is missing.
+	if MODS.silent then
+		want[#want + 1] = "send"
+		want[#want + 1] = "bullet"
+	end
+	if #want == 0 then
+		if next(HOOKS.on) == nil then HOOKS.note = "nothing switched on - nothing hooked" end
+		return true
+	end
+	local all = true
+	for _, kind in ipairs(want) do
+		if not ensure(kind) then all = false end
+	end
+	return all
+end
+
+end   -- hook machinery
 
 -- The stat table is rebuilt from the toggles rather than patched in place, so a
 -- switch turning OFF really removes its entry instead of leaving the last value
@@ -415,10 +744,19 @@ local SWAY_STATS = { "idleswayampaimmult", "idleswayamphipmult", "idleswaycycles
 	"walkswayrothipmult" }
 
 local function refreshStatOverride()
-	local o = {}
+	local o, s = {}, {}
 	if MODS.noSpread then
-		o.hipfirespread = 0
-		o.hipfirespreadrecover = 100
+		-- At full it is the old behaviour: no spread at all and an instant
+		-- recovery. Below that the game's own number is scaled instead, because
+		-- "half the spread" of an AK and of a shotgun are different numbers and
+		-- only the game knows them.
+		local pct = MODS.spreadPct or 100
+		if pct >= 100 then
+			o.hipfirespread = 0
+			o.hipfirespreadrecover = 100
+		else
+			s.hipfirespread = 1 - pct / 100
+		end
 	end
 	if MODS.noSway then
 		for _, k in ipairs(SWAY_STATS) do o[k] = 0 end
@@ -455,6 +793,7 @@ local function refreshStatOverride()
 		o.firerate = math.max(60, MODS.fireRate)
 	end
 	HOOKS.statOverride = o
+	HOOKS.statScale = s
 end
 
 --------------------------------------------------------------------------------
@@ -518,6 +857,8 @@ local CONFIG = {
 	silentVisible = true,
 	silentLead = false,       -- off until the lead is proven, it can throw a shot
 	silentCircle = true,
+	silentMaxBend = 30,       -- degrees; how far off your own aim a bullet may go
+	silentChance = 85,        -- per cent of your shots that get bent at all
 
 	-- movement and world --------------------------------------------------------
 	speed      = false,
@@ -531,7 +872,9 @@ local CONFIG = {
 
 	-- gun mods - these need the FFlag and a rejoin, see the header --------------
 	noRecoil   = false,
+	recoilPct  = 100,         -- how much of the kick is taken away, 100 = all
 	noSpread   = false,
+	spreadPct  = 100,         -- how much of the bloom is taken away
 	noSway     = false,
 	noEquipTime = false,
 	instantAds = false,
@@ -555,7 +898,7 @@ local CONFIG = {
 	trgDelayMax = 180,
 	trgRefire  = 140,
 	trgChance  = 92,
-	trgFovPx   = 4,           -- a single centre ray only ever hits a standing target
+	trgFovPx   = 8,           -- a single centre ray only ever hits a standing target
 
 	-- humanisation - THIS is the safety ------------------------------------------
 	hum        = true,
@@ -634,7 +977,9 @@ local function note(s) STATE.note = tostring(s) end
 -- the two back in step.
 local function syncMods()
 	MODS.noRecoil    = CONFIG.noRecoil
+	MODS.recoilPct   = CONFIG.recoilPct
 	MODS.noSpread    = CONFIG.noSpread
+	MODS.spreadPct   = CONFIG.spreadPct
 	MODS.noSway      = CONFIG.noSway
 	MODS.noEquipTime = CONFIG.noEquipTime
 	MODS.instantAds  = CONFIG.instantAds
@@ -645,9 +990,15 @@ local function syncMods()
 	MODS.noBolt        = CONFIG.noBolt
 	MODS.stability     = CONFIG.stability
 	MODS.silent        = CONFIG.silent
+	MODS.silentMaxBend = CONFIG.silentMaxBend
+	MODS.silentChance  = CONFIG.silentChance
 	MODS.fastReload    = CONFIG.fastReload
 	MODS.reloadFactor  = CONFIG.reloadFactor
 	refreshStatOverride()
+	-- Hooks are installed on demand, so this is where a switch that was just
+	-- turned on gets the function it needs patched - and where one that was
+	-- never touched stays unpatched for the whole session.
+	pcall(armHooks)
 end
 
 --------------------------------------------------------------------------------
@@ -867,11 +1218,20 @@ end
 
 local snapList, snapAt = {}, 0
 
+-- model -> info for the same pass. The trigger needs to go the other way round
+-- from everything else here: it starts at a part a ray hit and has to find out
+-- whose body that part belongs to. Built here so it can never disagree with
+-- what the ESP is drawing, and NOT stored on the info itself - that table is
+-- the value in a weak-keyed cache and pointing it back at its own key is the
+-- one shape that keeps a dead rig alive.
+local snapByModel = {}
+
 local function snapshot()
 	local now = os.clock()
 	if now - snapAt < 0.004 then return snapList end   -- at most once per frame
 	local root = playersRoot()
 	local byName = {}
+	local byModel = {}
 	if root then
 		for _, folder in ipairs(root:GetChildren()) do
 			for _, model in ipairs(folder:GetChildren()) do
@@ -879,14 +1239,33 @@ local function snapshot()
 				if info then
 					info.folder = folder
 					byName[info.name] = info
+					byModel[model] = info
 				end
 			end
 		end
 	end
 	local list = {}
 	for _, info in pairs(byName) do list[#list + 1] = info end
-	snapList, snapAt = list, now
+	snapList, snapAt, snapByModel = list, now, byModel
 	return list
+end
+
+-- A part a ray hit -> whose body it is, or nil. Walking up and asking
+-- modelInfo at each step does NOT work: modelInfo searches for a NameTagGui
+-- recursively, so once the walk reaches workspace it finds somebody else's tag
+-- and confidently answers with a stranger's name. Measured - a wall resolved to
+-- a player who was nowhere near it. Membership in the snapshot is the only
+-- answer that cannot do that.
+local function infoForInstance(inst)
+	snapshot()
+	local n = 0
+	while inst and inst ~= workspace and n < 12 do
+		local info = snapByModel[inst]
+		if info then return info end
+		inst = inst.Parent
+		n = n + 1
+	end
+	return nil
 end
 
 local function eachTarget(fn)
@@ -913,7 +1292,7 @@ local function hookChurn()
 		if not churnHooked[folder] then
 			churnHooked[folder] = true
 			folder.ChildAdded:Connect(function()
-				if _G.__SELPF == GEN then churnCount = churnCount + 1 end
+				if ENV.__SELPF == GEN then churnCount = churnCount + 1 end
 			end)
 		end
 	end
@@ -934,6 +1313,10 @@ end
 local rayParams = RaycastParams.new()
 rayParams.FilterType = Enum.RaycastFilterType.Exclude
 rayParams.IgnoreWater = true
+
+local trigParams = RaycastParams.new()
+trigParams.FilterType = Enum.RaycastFilterType.Exclude
+trigParams.IgnoreWater = true
 
 local filterAt = 0
 local ghosts = {}
@@ -975,6 +1358,17 @@ local function refreshFilter()
 	end
 	for _, p in ipairs(ghosts) do list[#list + 1] = p end
 	rayParams.FilterDescendantsInstances = list
+
+	-- The TRIGGER's ray is the opposite question. `visible()` asks "is the line
+	-- to this body clear", so it excludes every body; the trigger asks "what is
+	-- under my crosshair", so it has to be able to HIT one. Same exclusions
+	-- otherwise - the viewmodel above all, which sits a few studs in front of
+	-- the ray origin and would answer every shot.
+	local t = {}
+	for _, x in ipairs(list) do
+		if x ~= root then t[#t + 1] = x end
+	end
+	trigParams.FilterDescendantsInstances = t
 end
 
 local function visible(worldPos)
@@ -994,10 +1388,10 @@ local drawn, pool = {}, {}
 
 -- Last run's objects are still on screen after a re-execute with nothing driving
 -- them. The generation guard stops the LOOP; only this clears the PIXELS.
-if _G.__SELPF_POOL then
-	for _, obj in ipairs(_G.__SELPF_POOL) do pcall(function() obj:Remove() end) end
+if ENV.__SELPF_POOL then
+	for _, obj in ipairs(ENV.__SELPF_POOL) do pcall(function() obj:Remove() end) end
 end
-_G.__SELPF_POOL = pool
+ENV.__SELPF_POOL = pool
 
 local function make(kind, props)
 	if not HAS_DRAWING then return nil end
@@ -1106,10 +1500,10 @@ end)
 
 local chams = {}
 
-if _G.__SELPF_CHAMS then
-	for _, h in pairs(_G.__SELPF_CHAMS) do pcall(function() h:Destroy() end) end
+if ENV.__SELPF_CHAMS then
+	for _, h in pairs(ENV.__SELPF_CHAMS) do pcall(function() h:Destroy() end) end
 end
-_G.__SELPF_CHAMS = chams
+ENV.__SELPF_CHAMS = chams
 
 local function chamFor(name)
 	local h = chams[name]
@@ -1178,7 +1572,7 @@ local function centre()
 end
 
 local function renderPass()
-	if _G.__SELPF ~= GEN then return end
+	if ENV.__SELPF ~= GEN then return end
 	refreshFilter()
 	evaluateTeams()
 	hookChurn()
@@ -1663,7 +2057,7 @@ task.spawn(function()
 	local idx, n = {}, 0
 	for _, cat in ipairs(db:GetChildren()) do
 		for _, gun in ipairs(cat:GetChildren()) do
-			if _G.__SELPF ~= GEN then return end
+			if ENV.__SELPF ~= GEN then return end
 			for _, k in ipairs(gun:GetChildren()) do
 				if k:IsA("ModuleScript") then
 					local ok, res = pcall(require, k)
@@ -1836,7 +2230,7 @@ end
 local rawDX, rawDY = 0, 0
 
 UserInputService.InputChanged:Connect(function(i)
-	if _G.__SELPF ~= GEN then return end
+	if ENV.__SELPF ~= GEN then return end
 	if i.UserInputType == Enum.UserInputType.MouseMovement then
 		rawDX = rawDX + i.Delta.X
 		rawDY = rawDY + i.Delta.Y
@@ -1968,14 +2362,43 @@ end
 
 -- Published into HOOKS at the bottom of this block, so the installed hook always
 -- calls the CURRENT run's picker rather than the one it captured.
+-- WHICH PART THE BULLET IS SENT TO. Head and Torso are the two obvious ones;
+-- the other two exist because a bullet that goes to the same body part on every
+-- single kill is a pattern, and a pattern is what somebody watching notices.
+--
+-- Nearest is also the honest choice at range: it sends the shot at whatever
+-- part of them was already closest to the crosshair, so the correction is the
+-- smallest one that still connects. Random spreads the hits over the rig the
+-- way a real burst does.
+local function silentPartOf(info, mid)
+	local mode = CONFIG.silentPart
+	if mode == "Head" then return info.head end
+	local parts = info.parts
+	if type(parts) ~= "table" or #parts == 0 then return info.head end
+	if mode == "Torso" then return parts[2] or info.head end
+	if mode == "Random" then return parts[math.random(1, #parts)] or info.head end
+
+	-- Nearest
+	local best, bestPx
+	for _, p in ipairs(parts) do
+		if p.Parent then
+			local sp = camera:WorldToViewportPoint(p.Position)
+			if sp.Z > 0 then
+				local px = (Vector2.new(sp.X, sp.Y) - mid).Magnitude
+				if not bestPx or px < bestPx then best, bestPx = p, px end
+			end
+		end
+	end
+	return best or info.head
+end
+
 silentAimPoint = function(origin, speed)
 	if not CONFIG.silent or speed <= 0 then return nil end
 
 	local mid = centre()
 	local best, bestPx
 	eachTarget(function(info)
-		local part = (CONFIG.silentPart == "Torso") and (info.parts[2] or info.head)
-			or info.head
+		local part = silentPartOf(info, mid)
 		if not part or not part.Parent then return end
 		local dist = (origin - part.Position).Magnitude
 		if dist > CONFIG.silentMaxDist then return end
@@ -1992,8 +2415,10 @@ silentAimPoint = function(origin, speed)
 	end)
 	if not best then return nil end
 
-	local part = (CONFIG.silentPart == "Torso") and (best.parts[2] or best.head)
-		or best.head
+	-- Picked a second time on the winner, because Random has to roll once for
+	-- the shot rather than once per candidate.
+	local part = silentPartOf(best, mid)
+	if not part or not part.Parent then return nil end
 	STATE.silentTarget = best.name
 	HOOKS.silentTarget = best.name
 	local vel = CONFIG.silentLead and trackVelocity(best.name, part.Position)
@@ -2035,7 +2460,7 @@ local stickyName, lockedAt, reactUntil = nil, 0, 0
 local lastNX, lastNY = 0, 0
 
 local function aimPass(dt)
-	if _G.__SELPF ~= GEN then return end
+	if ENV.__SELPF ~= GEN then return end
 	STATE.engaged = false
 
 	local cf = camera.CFrame
@@ -2331,7 +2756,7 @@ local function movementPass()
 end
 
 task.spawn(function()
-	while _G.__SELPF == GEN do
+	while ENV.__SELPF == GEN do
 		local ok, err = pcall(movementPass)
 		if not ok then note("movement: " .. tostring(err)) end
 		task.wait(0.1)
@@ -2383,7 +2808,7 @@ end
 -- something has left the map without gravity, put it back. Cheap, and it means a
 -- crashed or replaced run cannot strand the player.
 task.spawn(function()
-	while _G.__SELPF == GEN do
+	while ENV.__SELPF == GEN do
 		if not CONFIG.fly then
 			local g = workspace.Gravity
 			if g > 0 then
@@ -2398,7 +2823,7 @@ task.spawn(function()
 end)
 
 local function flyPass(dt)
-	if _G.__SELPF ~= GEN then restoreGravity() return end
+	if ENV.__SELPF ~= GEN then restoreGravity() return end
 	if not CONFIG.fly then restoreGravity() return end
 
 	local obj = characterObject()
@@ -2454,7 +2879,7 @@ local flyConn = RunService.Heartbeat:Connect(function(dt)
 end)
 
 task.spawn(function()
-	while _G.__SELPF == GEN do task.wait(1) end
+	while ENV.__SELPF == GEN do task.wait(1) end
 	-- a re-execute must not leave the map without gravity
 	restoreGravity()
 	pcall(function() flyConn:Disconnect() end)
@@ -2493,7 +2918,7 @@ local function worldPass()
 end
 
 task.spawn(function()
-	while _G.__SELPF == GEN do
+	while ENV.__SELPF == GEN do
 		local ok, err = pcall(worldPass)
 		if not ok then note("world: " .. tostring(err)) end
 		task.wait(1)
@@ -2512,7 +2937,7 @@ local function tapNetwork()
 	local ev = RS:FindFirstChild("RemoteEvent")
 	if not ev then return end
 	ev.OnClientEvent:Connect(function(cmd, a, b, c)
-		if _G.__SELPF ~= GEN then return end
+		if ENV.__SELPF ~= GEN then return end
 		if cmd == "bulletHitConfirm" then
 			-- (victim, hitPart, position, damage, headshot, time). The headshot
 			-- flag is the SERVER's own verdict, not an echo of what the client
@@ -2572,9 +2997,23 @@ local function triggerActive()
 	return hotkeyHeld(CONFIG.trgKey)
 end
 
--- Is an enemy under the crosshair? A single centre ray only ever hits a
--- stationary target, so the centre point is tested plus a ring of six at
--- trgFovPx pixels.
+-- IS AN ENEMY UNDER THE CROSSHAIR - and this is the rewritten one.
+--
+-- The old test measured the pixel distance from the crosshair to the six
+-- 0.001-stud ANCHOR parts, which is not where a body is drawn. Measured live on
+-- a 29 player server while the report "I hover over a green one and it does not
+-- shoot" was open: a target at 211 studs was 12 px tall on screen, the nearest
+-- anchor sat 7 px from a crosshair that was visibly on him, and the window was
+-- `trgFovPx` = 4. Nothing fired, and nothing was wrong with the click path.
+--
+-- A ray through the crosshair hits the ~18 MeshParts the player can actually
+-- see. Checked against the bodies the ESP was drawing at the same moment: 6 of
+-- 6 samples between 38 and 277 studs resolved to the right player. It also
+-- makes "visible only" free - a ray stops on the wall by itself.
+--
+-- The old pixel test stays underneath it as a fallback, because a ray cannot
+-- hit a part with CanQuery off and losing a target that way would be a
+-- regression nobody could describe.
 local function underCrosshair()
 	local mid = centre()
 	local camPos = camera.CFrame.Position
@@ -2586,6 +3025,29 @@ local function underCrosshair()
 		for i = 0, 5 do
 			local a = math.rad(i * 60)
 			offsets[#offsets + 1] = Vector2.new(math.cos(a) * r, math.sin(a) * r)
+		end
+	end
+
+	local maxD = math.max(1, CONFIG.trgMaxDist)
+	for _, off in ipairs(offsets) do
+		local pt = mid + off
+		local okRay, ray = pcall(function() return camera:ViewportPointToRay(pt.X, pt.Y) end)
+		if okRay and ray then
+			local hit = workspace:Raycast(ray.Origin, ray.Direction * maxD, trigParams)
+			if hit then
+				local info = infoForInstance(hit.Instance)
+				if info and info.name ~= plr.Name and isTarget(info.folder, info)
+					and (camPos - hit.Position).Magnitude <= maxD then
+					-- Head only: the visible head mesh is 1.61 x 1.93 studs and
+					-- sits at distance 0.00 from the anchor the nametag hangs
+					-- on, so a band around that anchor's height is the head.
+					if not CONFIG.trgHeadOnly
+						or (info.head and info.head.Parent
+							and math.abs(hit.Position.Y - info.head.Position.Y) <= 1) then
+						return info.name
+					end
+				end
+			end
 		end
 	end
 
@@ -2626,7 +3088,7 @@ end
 task.spawn(function()
 	-- Its own thread rather than a render bind: it has to task.wait for the
 	-- reaction delay, and a yield inside a render binding is a problem.
-	while _G.__SELPF == GEN do
+	while ENV.__SELPF == GEN do
 		local ok, err = pcall(function()
 			if not triggerActive() then return end
 			local who = underCrosshair()
@@ -2685,13 +3147,27 @@ end
 -- panic key
 --------------------------------------------------------------------------------
 
+-- PANIC MEANS EVERYTHING NOW. It used to switch off the aim assist and the
+-- trigger and leave silent aim, every gun mod, the speed and the fly running -
+-- which is most of what somebody reaching for a panic key wants gone. The ESP
+-- stays: it draws on our own screen and moves nothing.
+local function panicOff()
+	CONFIG.aim, CONFIG.trg, CONFIG.silent = false, false, false
+	CONFIG.rcs = false
+	CONFIG.speed, CONFIG.fly = false, false
+	CONFIG.noRecoil, CONFIG.noSpread, CONFIG.noSway = false, false, false
+	CONFIG.noBob, CONFIG.noSuppression, CONFIG.noBolt = false, false, false
+	CONFIG.stability, CONFIG.noEquipTime, CONFIG.instantAds = false, false, false
+	CONFIG.rapidFire, CONFIG.fastReload = false, false
+	syncMods()
+end
+
 UserInputService.InputBegan:Connect(function(input, typing)
-	if _G.__SELPF ~= GEN or typing then return end
+	if ENV.__SELPF ~= GEN or typing then return end
 	local k = keyFromName(CONFIG.panicKey)
 	if k and input.KeyCode == k then
-		CONFIG.aim = false
-		CONFIG.trg = false
-		note("PANIC - aim and trigger off")
+		panicOff()
+		note("PANIC - everything that acts is off")
 	end
 end)
 
@@ -2709,7 +3185,7 @@ end
 
 RunService:BindToRenderStep("SeluxPFAim", Enum.RenderPriority.Camera.Value + 1,
 	function(dt)
-		if _G.__SELPF ~= GEN then
+		if ENV.__SELPF ~= GEN then
 			pcall(function() RunService:UnbindFromRenderStep("SeluxPFAim") end)
 			return
 		end
@@ -2719,7 +3195,7 @@ RunService:BindToRenderStep("SeluxPFAim", Enum.RenderPriority.Camera.Value + 1,
 
 RunService:BindToRenderStep("SeluxPFESP", Enum.RenderPriority.Camera.Value + 2,
 	function()
-		if _G.__SELPF ~= GEN then
+		if ENV.__SELPF ~= GEN then
 			pcall(function() RunService:UnbindFromRenderStep("SeluxPFESP") end)
 			hideAll()
 			hideAllChams()
@@ -2739,29 +3215,31 @@ local UI = (_G.__SEL and _G.__SEL.ui) or loadstring(readfile("ui-template.lua"))
 -- The generation counter stops last run's LOOPS; it does not take last run's
 -- PANEL off the screen. Both halves are needed: the stored handle for the normal
 -- case, the sweep by name for a window whose handle was lost.
-if _G.__SELPF_WIN then pcall(function() _G.__SELPF_WIN:Destroy() end) end
+if ENV.__SELPF_WIN then pcall(function() ENV.__SELPF_WIN:Destroy() end) end
 if UI.sweep then UI.sweep("SeluxPhantomPanel") end
 
 -- BEFORE the panel is built: the controls read their initial value out of CONFIG
 -- as they are created, so they come up on the saved state by themselves.
 UI.config("phantomforces", CONFIG)
 
--- The saved switches are in CONFIG by now, so the hooks can be installed and
--- pointed at them in one go. installHooks is a no-op when the client is still
--- running its code in an Actor VM, which is the normal case on a first join.
-pcall(installHooks)
+-- The saved switches are in CONFIG by now, so MODS can be brought in step and
+-- whatever is switched on can be hooked. Nothing is hooked for a switch that is
+-- off, and nothing is hooked at all while the client still runs its code in an
+-- Actor VM - which is the normal case until the flag below has been set and the
+-- client has rejoined once.
 pcall(syncMods)
 
--- Keep trying. The client's objects appear a few seconds into a join, and the
--- sweep is ~900 ms over half a million tables, so this is a handful of attempts
--- and then silence - not a poll that runs forever.
+-- Keep trying, because the game's own objects appear a few seconds into a join
+-- and a switch restored from the saved config is asking for them immediately.
+-- armHooks is cheap once everything it wants is up, and the sweep behind it
+-- throttles itself to once every five seconds, so this is not a busy poll.
+-- It does not stop, on purpose: a switch flipped twenty minutes in, in a client
+-- that was still loading when the panel came up, has to get its hook too. The
+-- tick costs a table lookup per wanted hook once they are in.
 task.spawn(function()
-	local tries = 0
-	while _G.__SELPF == GEN and not HOOKS.installed and tries < 20 do
+	while ENV.__SELPF == GEN do
 		task.wait(3)
-		tries = tries + 1
-		pcall(installHooks)
-		if HOOKS.installed then pcall(syncMods) end
+		pcall(armHooks)
 	end
 end)
 
@@ -2769,7 +3247,7 @@ local win = UI.Window({
 	name = "SeluxPhantomPanel",
 	title = "SELUX", accentTitle = "PHANTOM", subtitle = "seltonmt",
 })
-_G.__SELPF_WIN = win
+ENV.__SELPF_WIN = win
 
 local KEYS = { "MouseButton2", "MouseButton1", "LeftShift", "LeftAlt", "LeftControl",
 	"C", "E", "Q", "F", "V", "X", "CapsLock" }
@@ -2901,11 +3379,12 @@ trgTune:Slider("Refire lockout (ms)", 0, 1000, CONFIG.trgRefire,
 	function(v) CONFIG.trgRefire = v end)
 trgTune:Slider("Hit chance (%)", 10, 100, CONFIG.trgChance,
 	function(v) CONFIG.trgChance = v end)
-trgTune:Slider("Pixel FOV", 0, 30, CONFIG.trgFovPx, function(v) CONFIG.trgFovPx = v end,
-	"a single centre ray only ever hits a standing target")
+trgTune:Slider("Pixel FOV", 0, 60, CONFIG.trgFovPx, function(v) CONFIG.trgFovPx = v end,
+	"a ring of rays around the crosshair on top of the centre one - a single "
+	.. "ray only ever catches a target that is standing still")
 trgTune:Slider("Max distance", 50, 2000, CONFIG.trgMaxDist,
 	function(v) CONFIG.trgMaxDist = v end)
-trgOut = trgTune:Readout(3)
+trgOut = trgTune:Readout(4)
 
 end
 
@@ -2918,9 +3397,17 @@ local modCard = modPage:Card("GUN MODS", 1):Accent()
 modCard:Toggle("No Recoil", CONFIG.noRecoil, function(v)
 	CONFIG.noRecoil = v syncMods()
 end, "measured: 2.49 deg of climb over a burst becomes 0.01", UI.theme.good)
+modCard:Slider("Recoil taken away (%)", 0, 100, CONFIG.recoilPct,
+	function(v) CONFIG.recoilPct = v syncMods() end,
+	"the game's own recoil call takes a multiplier, so this is exact. 100 is a "
+	.. "gun that does not move at all, which is also what everyone watching sees.")
 modCard:Toggle("No Spread", CONFIG.noSpread, function(v)
 	CONFIG.noSpread = v syncMods()
 end, "measured: 1.02 deg of bloom becomes 0.06", UI.theme.good)
+modCard:Slider("Spread taken away (%)", 0, 100, CONFIG.spreadPct,
+	function(v) CONFIG.spreadPct = v syncMods() end,
+	"below 100 the weapon's own bloom is scaled instead of zeroed, so a shotgun "
+	.. "stays a shotgun")
 modCard:Toggle("No Sway", CONFIG.noSway, function(v) CONFIG.noSway = v syncMods() end)
 modCard:Toggle("No Equip Time", CONFIG.noEquipTime,
 	function(v) CONFIG.noEquipTime = v syncMods() end)
@@ -2955,14 +3442,33 @@ local modInfo = modPage:Card("REQUIREMENTS", 2)
 modOut = modInfo:Readout(5)
 modInfo:Label("This game runs its client in an Actor VM, where nothing can be "
 	.. "hooked from outside. One Roblox debug flag moves that code onto the main "
-	.. "thread, and then all of the above works. It only takes effect on a fresh "
-	.. "join, so the button below sets it and puts you back into the SAME server.")
-modInfo:Button("Enable and rejoin this server", function()
-	local setf = globalFn("setfflag")
-	if not setf then note("this executor has no setfflag") return end
-	local ok = pcall(setf, "DebugRunParallelLuaOnMainThread", "true")
-	if not ok then note("setfflag was refused") return end
-	note("flag set - rejoining")
+	.. "thread, and then all of the above works - including Silent Aim. The "
+	.. "script sets the flag by itself when it starts, and a flag only takes "
+	.. "effect on a fresh join, so your NEXT join is hookable either way. The "
+	.. "button is only for having it now: it puts you back into the SAME server.")
+modInfo:Button("Rejoin this server now", function()
+	local ok, why = setFlag()
+	if not ok then note(why) return end
+	note("rejoining")
+	-- The panel is brought back BY HAND here, because the hub no longer follows
+	-- this game across a join (`noqueue` in index.json) - a server hop used to
+	-- start the script again on its own, which is the "it keeps running by
+	-- itself, I do not want to use the script" report. That means this one
+	-- deliberate rejoin has to carry the panel itself, gated on the place so it
+	-- cannot land anywhere else, and armed once so a double press does not build
+	-- two panels.
+	if not ENV.__SELPF_REQUEUED then
+		ENV.__SELPF_REQUEUED = true
+		local q = globalFn("queue_on_teleport")
+		if q then
+			pcall(q, 'if game.PlaceId ~= 292439477 then return end '
+				.. '_G.__SEL_TP = "phantomforces" '
+				.. 'pcall(function() getgenv().__SEL_TP = "phantomforces" end) '
+				.. 'pcall(function() writefile("selux-queue.txt", "phantomforces") end) '
+				.. 'loadstring(game:HttpGet("https://raw.githubusercontent.com/'
+				.. 'seltonmt012/sel01-rbx/main/loader.lua"))()')
+		end
+	end
 	task.spawn(function()
 		task.wait(0.6)
 		pcall(function()
@@ -2983,13 +3489,24 @@ silCard:Toggle("Silent Aim", CONFIG.silent, function(v)
 	CONFIG.silent = v syncMods()
 	HOOKS.silentShots = 0
 end, "shoot normally, the bullet goes to the target", UI.theme.bad)
-silCard:Dropdown("Hit part", { "Head", "Torso" }, CONFIG.silentPart,
-	function(v) CONFIG.silentPart = v end)
-silCard:Slider("FOV (pixels)", 20, 800, CONFIG.silentFov,
+silCard:Dropdown("Hit part", { "Head", "Torso", "Nearest", "Random" }, CONFIG.silentPart,
+	function(v) CONFIG.silentPart = v end,
+	"Nearest sends the shot to whichever part was already closest to your "
+	.. "crosshair - the smallest correction that still connects. Random spreads "
+	.. "them over the body. Head every single time is a pattern.")
+silCard:Slider("Hit chance (%)", 1, 100, CONFIG.silentChance,
+	function(v) CONFIG.silentChance = v syncMods() end,
+	"how many of your shots get bent at all - the rest go exactly where you "
+	.. "pointed. 100 never misses, and never missing is what gets noticed.")
+silCard:Slider("FOV (pixels)", 1, 800, CONFIG.silentFov,
 	function(v) CONFIG.silentFov = v end,
 	"how far from your crosshair a target may be")
 silCard:Slider("Max distance", 100, 3000, CONFIG.silentMaxDist,
 	function(v) CONFIG.silentMaxDist = v end)
+silCard:Slider("Max bend (degrees)", 1, 180, CONFIG.silentMaxBend,
+	function(v) CONFIG.silentMaxBend = v syncMods() end,
+	"how far off your own aim a bullet may go - the server never minds, the "
+	.. "player watching your killcam does")
 silCard:Toggle("Visible only", CONFIG.silentVisible,
 	function(v) CONFIG.silentVisible = v end,
 	"a wall still stops the bullet, so bending it into one wastes the shot",
@@ -3003,7 +3520,43 @@ silCard:Toggle("Show FOV circle", CONFIG.silentCircle,
 silCard:Colour("FOV colour", CONFIG.colSilentFov,
 	function(c) CONFIG.colSilentFov = c end)
 
-silOut = silPage:Card("WHAT THE SERVER SEES", 2):Readout(6)
+silOut = silPage:Card("WHAT THE SERVER SEES", 2):Readout(7)
+
+-- The requirement used to be a readout line on the GUN MODS page and nothing
+-- else, which is why the reports read "silent aim does not work" rather than
+-- "silent aim needs a rejoin". It is the first thing on this page now.
+local silReq = silPage:Card("NEEDS ONE REJOIN", 2)
+silReq:Label("This game keeps its client in an Actor VM and nothing there can "
+	.. "be touched from outside. The script sets the Roblox debug flag that "
+	.. "moves that code onto the main thread when it starts, but a flag only "
+	.. "takes effect on a FRESH JOIN - so silent aim is dead in the session you "
+	.. "first run it in and alive in every one after. The line above says which "
+	.. "of the two you are in right now.")
+silReq:Button("Rejoin this server now", function()
+	local ok, why = setFlag()
+	if not ok then note(why) return end
+	note("rejoining")
+	if not ENV.__SELPF_REQUEUED then
+		ENV.__SELPF_REQUEUED = true
+		local q = globalFn("queue_on_teleport")
+		if q then
+			pcall(q, 'if game.PlaceId ~= 292439477 then return end '
+				.. '_G.__SEL_TP = "phantomforces" '
+				.. 'pcall(function() getgenv().__SEL_TP = "phantomforces" end) '
+				.. 'pcall(function() writefile("selux-queue.txt", "phantomforces") end) '
+				.. 'loadstring(game:HttpGet("https://raw.githubusercontent.com/'
+				.. 'seltonmt012/sel01-rbx/main/loader.lua"))()')
+		end
+	end
+	task.spawn(function()
+		task.wait(0.6)
+		pcall(function()
+			game:GetService("TeleportService")
+				:TeleportToPlaceInstance(game.PlaceId, game.JobId, plr)
+		end)
+	end)
+end, UI.theme.warn)
+
 silPage:Card("HOW THIS ONE WORKS", 2):Label(
 	"It bends the BULLET, it does not claim a hit. The first version replaced the "
 	.. "game's answer to 'what did I hit' - the packets went out correctly and the "
@@ -3096,7 +3649,36 @@ humCard:Slider("Speed ceiling (deg/s)", 30, 1200, CONFIG.humMaxDegS,
 	function(v) CONFIG.humMaxDegS = v end, "the single most important number here",
 	UI.theme.warn)
 humCard:Dropdown("Panic key", { "F1", "F2", "F3", "F4" }, CONFIG.panicKey,
-	function(v) CONFIG.panicKey = v end)
+	function(v) CONFIG.panicKey = v end,
+	"switches off everything that acts - aim, trigger, silent aim, every gun "
+	.. "mod, speed and fly. The ESP stays, it only draws on your screen.")
+
+-- A WAY OUT THAT IS NOT A REJOIN. One of the reports was simply "I do not want
+-- to use the script", and until now the only answers were the panic key, which
+-- left the panel and every loop running, or closing the game.
+local offCard = humPage:Card("STOP", 0)
+offCard:Label("Everything off and the panel gone. The hooks themselves cannot "
+	.. "be taken back out - hookfunction has no undo - but with every switch off "
+	.. "they hand every call straight back to the game and do nothing else. A "
+	.. "rejoin clears them for real, and the hub no longer starts this script by "
+	.. "itself when you change servers.")
+offCard:Button("Stop and close", function()
+	panicOff()
+	pcall(restoreGravity)
+	note("stopped")
+	-- Bumping the generation is what every loop, render bind and connection in
+	-- this file checks, so they all exit on their own next tick.
+	ENV.__SELPF = GEN + 1
+	task.delay(0.15, function()
+		pcall(function() win:Destroy() end)
+		if ENV.__SELPF_CHAMS then
+			for _, h in pairs(ENV.__SELPF_CHAMS) do pcall(function() h:Destroy() end) end
+		end
+		for _, d in pairs(drawn) do
+			pcall(function() for _, o in pairs(d) do pcall(function() o:Remove() end) end end)
+		end
+	end)
+end, UI.theme.bad)
 
 end
 
@@ -3136,7 +3718,7 @@ win:Refresh()
 
 task.spawn(function()
 	probeClick()
-	while _G.__SELPF == GEN do
+	while ENV.__SELPF == GEN do
 		local ok, err = pcall(function()
 			STATE.panelOpen = win.open == true
 
@@ -3170,18 +3752,33 @@ task.spawn(function()
 			for _ in pairs(HOOKS.statOverride) do nOvr = nOvr + 1 end
 			modOut:set(table.concat({
 				"flag      " .. (fflagOn() == nil and "no setfflag here"
-					or (fflagOn() and "set" or "not set")),
+					or (fflagOn() and "set" or "not set")) .. "   " .. tostring(FLAG_NOTE),
 				"client    " .. (parallelOnMainThread()
 					and "main thread - hooks possible" or "Actor VM - hooks impossible"),
-				"hooks     " .. HOOKS.note,
+				"hooks     " .. HOOKS.note .. " (" .. hookList() .. ")",
 				"stats     " .. nOvr .. " overridden right now",
 				"hits      " .. STATE.snapHits .. " confirmed by the server",
 			}, "\n"))
 
+			-- WHY it is not armed, not just that it is not. The mode dropdown
+			-- sitting on "Always" while the Trigger switch above it is off
+			-- looks identical to a broken trigger, and that is what it was
+			-- reported as.
+			local why
+			if not CONFIG.trg then
+				why = "no - the Trigger switch above is off"
+			elseif CONFIG.hum and CONFIG.humPanelOff and STATE.panelOpen then
+				why = "no - this panel is open (Humaniser setting)"
+			elseif CONFIG.trgActive ~= "Always" and not hotkeyHeld(CONFIG.trgKey) then
+				why = "no - hold " .. tostring(CONFIG.trgKey)
+			else
+				why = "yes"
+			end
 			trgOut:set(table.concat({
 				"click     " .. STATE.clickWay,
 				"shots     " .. STATE.shots,
-				"armed     " .. (triggerActive() and "yes" or "no"),
+				"armed     " .. why,
+				"under     " .. (triggerActive() and (underCrosshair() or "nobody") or "-"),
 			}, "\n"))
 
 			rcsOut:set(table.concat({
@@ -3193,11 +3790,33 @@ task.spawn(function()
 
 			STATE.silentShots = HOOKS.silentShots or 0
 			STATE.silentTarget = HOOKS.silentTarget or "-"
+			local bent, sent = STATE.silentShots, (HOOKS.sentBent or 0)
+			-- One line that answers "why is it not working". The states are in
+			-- the order they are reached, so whatever it says is the next thing
+			-- to do rather than a symptom to interpret.
+			local state
+			if HOOKS.on.bullet and HOOKS.on.send then
+				state = CONFIG.silent and "armed" or "hooked, switch it on"
+			elseif not globalFn("hookfunction") then
+				state = "this executor has no hookfunction"
+			elseif not parallelOnMainThread() then
+				state = fflagOn() and "flag is set - REJOIN and it works"
+					or ("flag not set (" .. tostring(FLAG_NOTE) .. ")")
+			else
+				state = HOOKS.note
+			end
 			silOut:set(table.concat({
-				"hook      " .. (HOOKS.silent and "installed" or "NOT installed - needs the FFlag"),
+				"state     " .. state,
 				"target    " .. STATE.silentTarget,
-				"bent      " .. STATE.silentShots .. " bullets redirected",
-				"packets   " .. (HOOKS.sentBent or 0) .. " sent with the new direction",
+				"bent      " .. bent .. " bullets redirected",
+				-- Bent with no packet behind it is the "hitmarker, no damage"
+				-- failure, and it is worth naming rather than leaving as two
+				-- numbers that happen to differ.
+				"packets   " .. sent .. " sent with the new direction"
+					.. ((bent > 3 and sent == 0) and "   <- the server is NOT seeing them" or ""),
+				"held      " .. (HOOKS.tooWide or 0) .. " past the bend limit, "
+					.. (HOOKS.rolledOff or 0) .. " left to your own aim, "
+					.. (HOOKS.noTicket or 0) .. " with no ticket",
 				"confirms  " .. STATE.snapHits .. " hits the server accepted",
 				"of those  " .. STATE.snapPartHits .. " counted as headshots",
 			}, "\n"))
@@ -3278,7 +3897,7 @@ end)
 -- debug handle
 --------------------------------------------------------------------------------
 
-_G.__SELPF_DBG = {
+ENV.__SELPF_DBG = {
 	CONFIG = CONFIG, STATE = STATE, PRESETS = PRESETS,
 	modelInfo = modelInfo, healthOf = healthOf, footOf = footOf,
 	readBoards = readBoards, evaluateTeams = evaluateTeams, isTarget = isTarget,
@@ -3286,7 +3905,8 @@ _G.__SELPF_DBG = {
 	visible = visible, screenBox = screenBox, renderPass = renderPass,
 	aimPass = aimPass, deliverMode = deliverMode, underCrosshair = underCrosshair,
 	pullTrigger = pullTrigger, probeClick = probeClick, hudRead = hudRead,
-	syncMods = syncMods, installHooks = installHooks, MODS = MODS, HOOKS = HOOKS,
+	syncMods = syncMods, armHooks = armHooks, hookList = hookList,
+	setFlag = setFlag, MODS = MODS, HOOKS = HOOKS,
 	heldWeapon = heldWeapon, predictPoint = predictPoint,
 	boardOf = function() return boardOf end, folderTeam = function() return folderTeam end,
 	drawn = drawn,
