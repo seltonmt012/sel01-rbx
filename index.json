@@ -266,6 +266,16 @@
       "detect": "local rs = game:GetService('ReplicatedStorage') local sh = rs:FindFirstChild('Shared') if not sh then return false end return sh:FindFirstChild('KickBagConstants') ~= nil and sh:FindFirstChild('WallHealth') ~= nil and sh:FindFirstChild('RewardZoneConfig') ~= nil"
     },
     {
+      "alias": "aimclick",
+      "name": "[W3] +1 Aim Per Click",
+      "file": "games/aimclick.lua",
+      "places": [
+        70990741130622
+      ],
+      "status": "ok",
+      "detect": "local rs = game:GetService('ReplicatedStorage') local m = rs:FindFirstChild('Modules') local rem = rs:FindFirstChild('Remotes') return m ~= nil and m:FindFirstChild('GunConfig') ~= nil and m:FindFirstChild('ShootingRanges') ~= nil and rem ~= nil and rem:FindFirstChild('GunFire') ~= nil and rem:FindFirstChild('SellRequest') ~= nil"
+    },
+    {
       "alias": "strengthclick",
       "name": "[💪] +1 Strength Per Click",
       "file": "games/strengthclick.lua",
