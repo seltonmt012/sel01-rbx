@@ -427,33 +427,43 @@ end
 
 -- Every few minutes the server drops a free sword somewhere on the map and
 -- announces it ("A sword has fallen from the sky - find it first to collect
--- it!").  It is a race against everyone in the server and it despawns in about
--- two minutes, so a warp wins it every time.  The pickup is whatever the model
--- carries - a prompt if there is one, otherwise the touch - and both are tried.
+-- it!").  It is a race against the whole server and it despawns in about two
+-- minutes, so a warp wins it.  The folder holds a FallenSword model, a pile of
+-- CraterRock parts and - this is the part that matters - a SwordDropAnchor part
+-- carrying CollectSwordPrompt.  The prompt is a SIBLING of the sword model, not
+-- a descendant of it, which is why the first version stood in the crater and
+-- collected nothing.
 local function collectSwordDrop()
-    if not CONFIG.autoDrop then return end
+    if not CONFIG.autoDrop then return false end
     local folder = workspace:FindFirstChild("ActiveSwordDrop")
     if not folder then return false end
-    local drop
-    for _, child in ipairs(folder:GetChildren()) do
-        if child:IsA("BasePart") or child:IsA("Model") then drop = child break end
-    end
-    if not drop then return false end
 
-    local ok, position = pcall(function()
-        return drop:IsA("BasePart") and drop.Position or drop:GetPivot().Position
-    end)
-    if not ok or not position then return false end
+    local prompt
+    for _, item in ipairs(folder:GetDescendants()) do
+        if item:IsA("ProximityPrompt") then prompt = item break end
+    end
+    if not prompt then return false end
+
+    local anchor = prompt.Parent
+    if not (anchor and anchor:IsA("BasePart")) then return false end
+
+    local before = #(LocalPlayer:FindFirstChild("SwordUnlocks")
+        and LocalPlayer.SwordUnlocks:GetChildren() or {})
 
     STATE.phase = "grabbing the dropped sword"
-    pin(position + Vector3.new(0, 3, 0), 1.2)
-    for _, item in ipairs(drop:GetDescendants()) do
-        if item:IsA("ProximityPrompt") then pcall(fireproximityprompt, item) end
-    end
-    task.wait(1.0)
+    pin(anchor.Position + Vector3.new(0, 3, 0), 1.4)
+    pcall(fireproximityprompt, prompt)
+    task.wait(math.max(prompt.HoldDuration or 0, 0.8))
     unpin()
+
+    local after = #(LocalPlayer:FindFirstChild("SwordUnlocks")
+        and LocalPlayer.SwordUnlocks:GetChildren() or {})
     STATE.drops = (STATE.drops or 0) + 1
-    note("went for the dropped sword")
+    if after > before then
+        note("collected the dropped sword")
+    else
+        note("went for the dropped sword (%d in the case)", after)
+    end
     return true
 end
 
