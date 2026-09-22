@@ -534,6 +534,17 @@
       "detect": "local rs = game:GetService('ReplicatedStorage') local s = rs:FindFirstChild('Shared') local c = s and s:FindFirstChild('Configs') return c ~= nil and c:FindFirstChild('Grass') ~= nil and c:FindFirstChild('Zone') ~= nil and c:FindFirstChild('AntiCheat') ~= nil and game.Workspace:FindFirstChild('Zones') ~= nil"
     },
     {
+      "alias": "choptrees",
+      "name": "+1 Chop Trees for Treasure",
+      "file": "games/choptrees.lua",
+      "places": [
+        110730550789828
+      ],
+      "status": "ok",
+      "note": "FREE. Train on a pad for Strength, cross a StartLine to open a chop run, and the trees pay wood plus TREASURE - treasure is carried home (cap 3 plus the backpack upgrade), banked by the return call and sold at the market for Cash, which is the only currency any shop here checks. TrainHit is position gated and the server credits about 3.0 hits/s whatever the fire rate (48/s and 264/s both measured 3.00), so the levers are the pad reward, the chopper multiplier and the rebirth count. The tree HP is simulated entirely in the client and ChopTreeHit takes an ARRAY OF ZONE NUMBERS: the server validates neither the zone nor the position and caps the count at 13, so a zone-52 claim made from zone 1 pays 483M wood and drops treasure worth 7.6e21 against 11 in zone 1. That is the TURBO page - off by default, in no preset, with the measurements printed next to it. A rebirth resets Strength, the LEVEL and EVERY AXE although the game only warns about Strength. The XP curve caps the ladder: level 225 is instant, 275 about ninety seconds and 400 roughly 3.4 years, so rebirth ~11 and Candyland (level 200) are the practical ceiling while Frost (400) and Cyber (600) are not reachable.",
+      "detect": "local rs = game:GetService('ReplicatedStorage') local s = rs:FindFirstChild('Shared') if not s then return false end return s:FindFirstChild('TreeZonesData') ~= nil and rs:FindFirstChild('ChopTreeHit') ~= nil and rs:FindFirstChild('TrainHit') ~= nil and rs:FindFirstChild('AxeDataSync') ~= nil"
+    },
+    {
       "alias": "redliner",
       "name": "REDLINER",
       "file": "games/redliner.lua",
