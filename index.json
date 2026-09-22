@@ -589,6 +589,17 @@
       "status": "ok",
       "note": "carry-and-place plot income with the progression moved into JUMP POWER: squat on the barbell for Jump XP, Jump Power gates which area you may enter, steal an egg, carry it home, place it in the pen and it hatches into an animal paying cash per second. A near relative of stealegg but with NO anti-cheat (sweeps over 5-7k live functions found nothing), so plain CFrame warping is used. The trap that makes the whole farm look broken: while the player attribute IsSquatting is true the egg CollectPrompt silently never pays out, so StopSquattingRequest has to be fired first, every time. Starting to squat is position gated and needs a Heartbeat pin; continuing is not revalidated, so the travel legs are free training. Never burst SquatTrainingRequest - the client already fires it ~4x/s and a flood makes the server refuse training for 40-60s in silence",
       "detect": "local rs = game:GetService('ReplicatedStorage') local r = rs:FindFirstChild('Remotes') if not r then return false end local m = game.Workspace:FindFirstChild('Map') return r:FindFirstChild('StopSquattingRequest') ~= nil and r:FindFirstChild('PlaceEggRequest') ~= nil and r:FindFirstChild('SquatTrainingRequest') ~= nil and m ~= nil and m:FindFirstChild('Stages') ~= nil"
+    },
+    {
+      "alias": "slashclick",
+      "name": "[SWORDS] +1 Slash Per Click!",
+      "file": "games/slashclick.lua",
+      "places": [
+        101558013317432
+      ],
+      "status": "ok",
+      "note": "FREE. Slash for Power, Power breaks a personal wall row, the stage's win pad pays Wins, Wins buy swords, auras and lucky-block pets, a rebirth resets Power and Level and multiplies everything. PunchRequest:FireServer(Vector3) is the one engine call, credited ~2.6/s, and a slash deals exactly the current Power as damage WITH ACCUMULATION - so depth is a number of slashes, never a wall that cannot fall. THE PAD IS THE PAYOUT AND THE ROW IS THE PROOF OF WORK: teleporting onto a deep pad without breaking it pays exactly 0 (stages 6, 10 and 15 all measured at +0) and a pad already paid pays 0 again, so the script picks the stage with the best wins-per-slash, breaks every row up to it and claims that one pad. Measured 4.9 wins/s against 2.5 wins/s for the game's own free Auto Win, which is on the panel as the walk-it-legit mode. Lucky blocks are the cheapest multiplier in the game (10 wins, pets x1.1-x3.6, PetMultiplier is their sum) but the server validates the ring position, so the body is pinned on Heartbeat. Worlds are gated by the last stage's pad, not by rebirths: claiming stage 15 unlocked world 2 and the Prepare/Commit pair moved the whole map over. Never the x5/x10/x20 win pads, the gamepass AFK pads, VIP Fists, SkipRebirth or the Robux offline double",
+      "detect": "local rs = game:GetService('ReplicatedStorage') local c = rs:FindFirstChild('PunchEscapeConfig') local r = rs:FindFirstChild('PunchEscapeRemotes') if not c or not r then return false end return r:FindFirstChild('PunchRequest') ~= nil and r:FindFirstChild('RebirthRequest') ~= nil and game.Workspace:FindFirstChild('PunchEscapePersonalWalls') ~= nil"
     }
   ]
 }
