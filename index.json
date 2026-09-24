@@ -23,6 +23,17 @@
       "note": "The fallback the loader runs when no other entry matches this place. Deliberately has NO places and NO detect, so pick() can never select it - loadGame reaches it by alias from the dispatch. ESP over Drawing plus a camera-side aim assist, both of which need no remote and no per-game knowledge. noqueue because a script that fits every game is the last one that should follow you into the next. Team detection is a chain (Player.Team, Team attribute, TeamColor, nameplate colour), each link sanity-checked and the first that holds up wins"
     },
     {
+      "alias": "animedice",
+      "name": "Anime Dice",
+      "file": "games/animedice.lua",
+      "places": [
+        113290951185459
+      ],
+      "status": "ok",
+      "note": "Idle roll-and-place gacha. Free RollDice RemoteFunction (~2s server cooldown, no batch) drops anime units into the inventory; EquipBest banks every plot slot balance into Money AND places the best-income units in one call - the whole money engine. Income is driven by rarity (base Uncommon 100 up to Heavenly 1e23), so luck matters: the dice ladder (BuyDice/EquipDice) buys permanent luck. Rebirth wipes ONLY money, keeps units/dice/slots, and grants a permanent x money and x luck multiplier plus one more slot (1-4 free, up to 15 by rb12). All state is read from DataController.___X, the live server-mirrored table, so every number is real. Codes and offline/daily/group claims automated; Tower combat and SellInventory left out of v1",
+      "detect": "local rs = game:GetService('ReplicatedStorage') local n = rs:FindFirstChild('Network') local roll = n and n:FindFirstChild('RollService') return roll ~= nil and n:FindFirstChild('DiceShopService') ~= nil and rs:FindFirstChild('Framework') ~= nil"
+    },
+    {
       "alias": "phantomforces",
       "name": "Phantom Forces",
       "file": "games/phantomforces.lua",
