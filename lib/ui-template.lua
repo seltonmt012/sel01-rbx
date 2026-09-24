@@ -95,7 +95,7 @@ local UI = {}
 -- ever opened a panel keeps its old copy and the new controls come up untranslated.
 -- 3.10: the Hypershot panel's strings. 3.11: its WORLD / MISC / GUN additions.
 -- 3.12: Steal An Egg's offline money / rift switches.
-UI.VERSION = "3.12"
+UI.VERSION = "3.13"
 UI.BRAND = "SELUX"
 UI.DISCORD = "discord.gg/ARdpzFuKMm"
 UI.REPO = "seltonmt012/sel01-rbx"
@@ -1416,6 +1416,62 @@ local function frame(parent, size, position, color, transparency)
 	f.BorderSizePixel = 0
 	f.Parent = parent
 	return f
+end
+
+-- One horizontal drag, shared by the slider and the colour bars, and it has to
+-- be ONE because the old per-control version was wrong in the same way twice.
+-- It armed on MouseButton1Down and disarmed only on an InputEnded of type
+-- MouseButton1 - but a finger ends as UserInputType.Touch, so on a phone the
+-- drag never ended: every later swipe ANYWHERE on the screen kept moving the
+-- last slider touched (reported by phone users, 2026-09-25).
+--
+-- So the drag is bound to the InputObject that started it: a finger is followed
+-- by its own InputObject (Roblox reuses it for the whole touch), the mouse by
+-- MouseMovement, and the drag ends when THAT input ends. A state check on every
+-- change heals a missed InputEnded, which a finger lifted over the top bar can
+-- cause. The position is read off the input itself instead of GetMouseLocation,
+-- which on a touch client is wherever the last finger happened to be.
+local function dragX(hit, track, onAlpha, allowed)
+	local active = nil
+	local function follow(pos)
+		if not track.Parent then active = nil return end
+		if allowed and not allowed() then return end
+		local a = (pos.X - track.AbsolutePosition.X) / math.max(1, track.AbsoluteSize.X)
+		onAlpha(math.clamp(a, 0, 1))
+	end
+	local function over(input)
+		local ok, state = pcall(function() return input.UserInputState end)
+		return (not ok) or state == Enum.UserInputState.End
+			or state == Enum.UserInputState.Cancel
+	end
+	hit.InputBegan:Connect(function(input)
+		local t = input.UserInputType
+		if t == Enum.UserInputType.MouseButton1 or t == Enum.UserInputType.Touch then
+			active = input
+			follow(input.Position)
+		end
+	end)
+	local changed = UserInputService.InputChanged:Connect(function(input)
+		if not active then return end
+		if over(active) then active = nil return end
+		if input == active or (active.UserInputType == Enum.UserInputType.MouseButton1
+			and input.UserInputType == Enum.UserInputType.MouseMovement) then
+			follow(input.Position)
+		end
+	end)
+	local ended = UserInputService.InputEnded:Connect(function(input)
+		if not active then return end
+		if input == active or input.UserInputType == active.UserInputType then
+			active = nil
+		end
+	end)
+	-- The panel is rebuilt on a reload; without this every old control would keep
+	-- two global connections alive for the rest of the session.
+	track.Destroying:Connect(function()
+		active = nil
+		changed:Disconnect()
+		ended:Disconnect()
+	end)
 end
 
 local function label(parent, text, size, font, color, alpha)
@@ -2826,19 +2882,7 @@ function UI.Window(options)
 				end
 				apply((value - minValue) / math.max(1, maxValue - minValue), false)
 
-				local dragging = false
-				hit.MouseButton1Down:Connect(function() dragging = true end)
-				UserInputService.InputEnded:Connect(function(input)
-					if input.UserInputType == Enum.UserInputType.MouseButton1 then
-						dragging = false
-					end
-				end)
-				RunService.RenderStepped:Connect(function()
-					if not dragging or not track.Parent then return end
-					local mouse = UserInputService:GetMouseLocation()
-					local a = (mouse.X - track.AbsolutePosition.X) / math.max(1, track.AbsoluteSize.X)
-					apply(a, true)
-				end)
+				dragX(hit, track, function(a) apply(a, true) end)
 
 				return { set = function(a, b)
 					local v = arg(a, b)
@@ -2953,22 +2997,11 @@ function UI.Window(options)
 						knob.Position = UDim2.new(math.clamp(get(), 0, 1), -3, 0, -3)
 					end
 
-					local dragging = false
-					hit.MouseButton1Down:Connect(function() dragging = true end)
-					UserInputService.InputEnded:Connect(function(input)
-						if input.UserInputType == Enum.UserInputType.MouseButton1 then
-							dragging = false
-						end
-					end)
-					RunService.RenderStepped:Connect(function()
-						if not dragging or not track.Parent or not panel.Visible then return end
-						local mouse = UserInputService:GetMouseLocation()
-						local a = (mouse.X - track.AbsolutePosition.X)
-							/ math.max(1, track.AbsoluteSize.X)
-						set(math.clamp(a, 0, 1))
+					dragX(hit, track, function(a)
+						set(a)
 						emit(true)
 						repaint()
-					end)
+					end, function() return panel.Visible end)
 					return repaint
 				end
 

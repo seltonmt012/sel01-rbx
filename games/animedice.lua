@@ -83,12 +83,14 @@ local CONFIG = {
 	auto        = false,  -- master switch; nothing below runs while it is off
 
 	autoRoll    = true,   -- fire RollDice on the server cooldown
+	autoSpins   = true,   -- activate Lucky/Jackpot Spins (x100/x1000 on the next roll)
 	autoCollect = true,   -- EquipBest: collect every slot + place the best units
 	smartPlace  = true,   -- place by level-free potential, not the game's EquipBest
 	autoLevel   = true,   -- pour a share of money into placed-slot levels
 	levelShare  = 0.3,    -- fraction of money slot-leveling may spend each pass
 	levelPayback = 10,    -- only buy a level that pays itself back within N minutes
-	saveMinutes = 5,      -- skip leveling while the next dice/rebirth is this close
+	saveMinutes = 15,     -- skip leveling/fusing while the next dice/rebirth is
+	                      -- this close; at 5 the fuse machine ate every rebirth
 	-- Grade/trait odds come from the configs' weights. Grades: D 45%, C 28%, B 15%,
 	-- A 8%, A+ 3%, S 0.9%, S+ 0.11%, Z 0.03%, 神 0.002%. Waiting for S costs ~100
 	-- Gems per unit on average; "A or better" (12%) costs ~8, so that is the default.
@@ -99,7 +101,8 @@ local CONFIG = {
 	traitMin    = 1.5,    -- keep traits worth >= this income x (Money II and better)
 	autoBoost   = true,   -- activate owned Luck/Income boosts
 	autoFuse    = true,   -- fuse spare units three at a time into rarer ones
-	fuseShare   = 0.35,   -- share of money one fusion may cost
+	fuseShare   = 0.35,   -- share of money one fusion may cost...
+	fuseSeconds = 30,     -- ...and never more than this many seconds of income
 	autoTower   = true,   -- farm a tower for boosts, gems and trait rerolls
 	tower       = "Auto (best)",  -- or a fixed tower name
 	towerBoosts = true,   -- fire Damage boosts right before a tower run
@@ -178,6 +181,7 @@ local R = {
 	CancelTower     = svc("Towers.RF.CancelTower"),
 	BestTowerTeam   = svc("Towers.RE.EquipBestTowerTeam"),
 	InteractSlot    = svc("PlotService.RE.InteractSlot"),
+	UseSpin         = svc("SpinService.RE.Use"),
 	EquipUnit       = svc("UnitService.RF.Equip"),
 	Fuse            = svc("FusingService.RE.Fuse"),
 	FuseResult      = svc("FusingService.RE.Result"),
@@ -189,6 +193,8 @@ local Rebirths       = require(Framework.Features.Rebirth.Rebirths)
 local PlotConfig     = require(Framework.Features.Plot.PlotConfig)
 local MonetConfig    = require(Framework.Features.Monetization.MonetizationConfig)
 local UpgradeConfig  = require(Framework.Features.Upgrades.Upgrades)
+local UpgradeTree
+pcall(function() UpgradeTree = require(Framework.Features.Upgrades.TreeStructure) end)
 local UnitConfig     = require(Framework.Features.Inventory.Kinds.Unit.UnitConfig)
 local Grades         = require(Framework.Features.Grades.Grades)
 local Traits         = require(Framework.Features.Traits.Traits)
@@ -289,11 +295,13 @@ local function ownedLuck()
 end
 
 -- The single strongest die we can pay for right now and do not already own.
-local function bestAffordableDice()
+-- reserve: money that must stay untouched (a rebirth waiting for it).
+local function bestAffordableDice(reserve)
 	local d = data()
 	local pick
+	local spendable = d.Money - (reserve or 0)
 	for _, die in ipairs(DICE) do
-		if die.price and not d.OwnedDice[die.key] and d.Money >= die.price then
+		if die.price and not d.OwnedDice[die.key] and spendable >= die.price then
 			if not pick or die.luck > pick.luck then pick = die end
 		end
 	end
@@ -336,11 +344,21 @@ do
 	end
 end
 
--- The lowest-tier upgrade in a category we do not yet own.
+-- The lowest-tier upgrade in a category we do not yet own - IF it can be bought.
+-- The pads are a tree (TreeStructure.GetParent) and BuyUpgrade silently refuses
+-- a node whose parent is not owned. Health I hangs off Damage III, so the old
+-- "cheapest next tier" picked Health I (1k) every tick, the server dropped it,
+-- and not one other upgrade was bought for the whole session after that.
 local function nextTier(cat)
 	local owned = data().Upgrades
 	for _, up in ipairs(UPGRADE_LINES[cat] or {}) do
-		if not owned[up.name] then return up end
+		if not owned[up.name] then
+			local parent = UpgradeTree and select(2, pcall(UpgradeTree.GetParent, up.name))
+			if type(parent) == "string" and parent ~= "Start" and not owned[parent] then
+				return nil                     -- locked behind another line
+			end
+			return up
+		end
 	end
 	return nil
 end
@@ -349,9 +367,10 @@ end
 -- Damage/Health lines only matter to the tower, so they join while it is farmed.
 local TOWER_CATS = { "Damage", "Health" }
 
-local function bestUpgrade()
+local function bestUpgrade(reserve)
 	local d = data()
 	local pick
+	local spendable = d.Money - (reserve or 0)
 	local cats = UPGRADE_CATS
 	if CONFIG.autoTower then
 		cats = {}
@@ -360,7 +379,7 @@ local function bestUpgrade()
 	end
 	for _, cat in ipairs(cats) do
 		local up = nextTier(cat)
-		if up and d.Money >= up.price then
+		if up and spendable >= up.price then
 			if not pick or up.price < pick.price then pick = up end
 		end
 	end
@@ -401,10 +420,41 @@ end
 
 ------------------------------------------------------------------- actions -----
 
+-- Spins (SpinService, readable): Use(name) moves one Lucky Spin (x100) / Jackpot
+-- Spin (x1000) into ActiveEntries, and the next RollDice multiplies its luck by it
+-- and consumes it. The codes alone hand a new account ~20 Lucky Spins - luck 200
+-- instead of 2 in the first minute. One is armed at a time, right before a roll.
+local SPINS = { "Jackpot Spin", "Lucky Spin" }
+local function armSpin()
+	if not (CONFIG.autoSpins and R.UseSpin) then return end
+	local d = data()
+	for _, name in ipairs(SPINS) do
+		local active = d.ActiveEntries and d.ActiveEntries[name]
+		if active then return end                 -- one is already waiting
+	end
+	for _, name in ipairs(SPINS) do
+		local item = d.Inventory[name]
+		if item and (tonumber(item.amount) or 0) >= 1 then
+			R.UseSpin:FireServer(name)
+			STATE.note = "armed " .. name
+			task.wait(0.25)
+			return
+		end
+	end
+end
+
 local function doRoll()
 	if not R.RollDice then return end
+	pcall(armSpin)
 	local ok = pcall(function() return R.RollDice:InvokeServer() end)
 	if ok then STATE.rolled = STATE.rolled + 1 end
+end
+
+-- The server's own roll cooldown: the Roll Duration buff (2.5s base, -0.15s per
+-- Roll Speed pad). A fixed interval rolls slower than allowed once those land.
+local function rollInterval()
+	local dur = tonumber(select(2, pcall(BuffController.GetBuff, "Roll Duration"))) or 2.5
+	return math.max(0.3, dur + 0.05)
 end
 
 -- Placement by POTENTIAL. The game's EquipBest ranks by income WITH level, so a
@@ -493,8 +543,8 @@ local function doCollectPlace()
 	if gained > 0 then STATE.collected = STATE.collected + gained end
 end
 
-local function doDice()
-	local pick = bestAffordableDice()
+local function doDice(reserve)
+	local pick = bestAffordableDice(reserve)
 	if pick then
 		local curLuck = ownedLuck()
 		if pick.luck > curLuck then
@@ -511,7 +561,7 @@ local function doDice()
 	end
 end
 
-local function doUpgrade()
+local function doUpgrade(reserve)
 	if not R.BuyUpgrade then return end
 	local owned = data().Upgrades
 	-- "Start" (price 0) unlocks the roll area; buy it once.
@@ -519,7 +569,7 @@ local function doUpgrade()
 		R.BuyUpgrade:FireServer("Start")
 		task.wait(0.15)
 	end
-	local up = bestUpgrade()
+	local up = bestUpgrade(reserve)
 	if up then
 		R.BuyUpgrade:FireServer(up.name)
 		STATE.upgradesBought = STATE.upgradesBought + 1
@@ -910,6 +960,11 @@ if R.FuseResult then
 	end)
 end
 
+-- Trios the server refused for good ("No balanced fusion" once the sum outgrows
+-- the rarest units, locked/limited units). Without this the top trio of a late
+-- account is retried every pass and blocks every trio below it.
+local badTrio = {}
+
 local function doFuse()
 	if not R.Fuse then return false end   -- the savings gate sits in the loop
 	local d = data()
@@ -937,13 +992,18 @@ local function doFuse()
 	end
 	table.sort(pile, function(a, b) return a.ch > b.ch end)
 
-	local budget = d.Money * math.clamp(CONFIG.fuseShare, 0, 1)
+	-- A share of the balance alone starves the rebirth: at 1e12 in the bank 35%
+	-- was 350B per fusion, three fusions in 20s, and money fell while earning
+	-- 8B/s. Capping by income-seconds keeps fusing proportional to what comes in.
+	local budget = math.min(d.Money * math.clamp(CONFIG.fuseShare, 0, 1),
+		math.max(STATE.incomePerSec, 0) * CONFIG.fuseSeconds)
 	for i = 1, #pile - 2 do
 		local a, b, c = pile[i], pile[i + 1], pile[i + 2]
 		local sum = a.ch + b.ch + c.ch
 		-- Only a balanced trio pays: the expected result must beat its best input,
 		-- otherwise one strong unit gets diluted by two weak ones.
-		if sum * FusingConfig.AverageMultiplier >= a.ch then
+		local key = a.id .. b.id .. c.id
+		if not badTrio[key] and sum * FusingConfig.AverageMultiplier >= a.ch then
 			local cost = FusingConfig.GetCost(sum)
 			if cost <= budget then
 				fuseResult = nil
@@ -964,7 +1024,14 @@ local function doFuse()
 					STATE.note = "fused -> " .. STATE.fuseLast
 					return true
 				end
-				STATE.note = "fuse: " .. tostring(r and r.err or "no answer")
+				local err = tostring(r and r.err or "no answer")
+				STATE.note = "fuse: " .. err
+				-- "Please wait" is the server-wide 3s lock and money errors fix
+				-- themselves; anything else about THESE units is permanent.
+				if r and r.err and not err:find("wait") and not err:find("money")
+					and not err:find("trade") and not err:find("ready") then
+					badTrio[key] = true
+				end
 				return false
 			end
 		end
@@ -1137,7 +1204,8 @@ end
 local autoPage = win:Page("AUTO", UI.icon.bolt)
 
 local rollCard = autoPage:Card("ROLLING", 1):Accent()
-toggle(rollCard, "Auto Roll", "autoRoll", "rolls on the ~2s server cooldown")
+toggle(rollCard, "Auto Roll", "autoRoll", "rolls exactly on the server cooldown")
+toggle(rollCard, "Use Lucky Spins", "autoSpins", "x100 / x1000 luck on the next roll")
 rollCard:Button("Roll once", function() doRoll() end)
 
 local incomeCard = autoPage:Card("INCOME", 1)
@@ -1251,7 +1319,7 @@ toggle(fuseCard, "Auto Fuse", "autoFuse",
 	"3 spare units -> 1 about twice as rare; climbs toward Legendary")
 fuseCard:Slider("Fuse budget %", 5, 90, math.floor(CONFIG.fuseShare * 100),
 	function(v) CONFIG.fuseShare = v / 100 end,
-	"share of money one fusion may cost")
+	"share of money one fusion may cost (and at most 30s of income)")
 local fuseLabel = fuseCard:Label("fused -")
 fuseCard:Button("Fuse now", function() task.spawn(doFuse) end)
 
@@ -1292,7 +1360,7 @@ applyAutoSell()
 task.spawn(function()
 	while _G.__ANIMEDICE == generation do
 		if CONFIG.auto and CONFIG.autoRoll then pcall(doRoll) end
-		task.wait(2.1)
+		task.wait(rollInterval())
 	end
 end)
 
@@ -1357,9 +1425,33 @@ task.spawn(function()
 			STATE.phase = "spending"
 			-- Dice (permanent luck) and one upgrade tier (money/luck/roll speed/
 			-- storage) each pass, then rebirth (permanent x mult + slot).
-			if CONFIG.autoDice then pcall(doDice) end
-			if CONFIG.autoUpgrade then pcall(doUpgrade) end
-			if CONFIG.autoRebirth then pcall(doRebirth) end
+			-- The rebirth is the one purchase that wipes the balance, so it gets
+			-- the money first. Once it is affordable, only the EXCESS it would wipe
+			-- is spent on dice/upgrades, then it fires. Before that, a dice priced
+			-- at or above the rebirth must wait, otherwise it takes the money the
+			-- moment both are affordable (Solar 5e12 beat rebirth 5 that way) and
+			-- the rebirth - x4/3 on every later second of income - slips again.
+			local cost = CONFIG.autoRebirth and nextRebirthCost() or nil
+			local need = cost and cost * math.max(1, CONFIG.rebirthMult) or nil
+			if need and data().Money >= need then
+				if CONFIG.autoDice then pcall(doDice, need) end
+				if CONFIG.autoUpgrade then pcall(doUpgrade, need) end
+				pcall(doRebirth)
+			else
+				local diceReserve, upReserve = 0, 0
+				if need then
+					local nextDice
+					for _, die in ipairs(DICE) do
+						if die.price and not data().OwnedDice[die.key] and die.luck > ownedLuck() then
+							if not nextDice or die.price < nextDice then nextDice = die.price end
+						end
+					end
+					if nextDice and nextDice >= need then diceReserve = need end
+				end
+				if savingForLuck() then upReserve = nextLuckGoal() or 0 end
+				if CONFIG.autoDice then pcall(doDice, diceReserve) end
+				if CONFIG.autoUpgrade then pcall(doUpgrade, upReserve) end
+			end
 			-- Leveling comes last so dice/upgrades/rebirth get first claim on the
 			-- money; it then pours its share of whatever is left into the slots.
 			if CONFIG.autoLevel then pcall(levelSlots) end

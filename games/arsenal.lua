@@ -56,6 +56,43 @@
   against the client's copy of that part is not something this session could
   measure (the account was in the lobby the whole time), so it ships with a
   readout that says so and it restores every part it touched when switched off.
+
+  ---- 2026-09-25: Arsenal was rebuilt, and most of the above moved ----------
+
+  * **No Actor any more.** `getactors()` is 0 and the whole client is plain
+    ModuleScripts under `ReplicatedFirst.Client` - the shot path is readable
+    from the main VM without the FFlag.
+  * **The real HP is `Player.NRPBS.Health`.** `Humanoid.Health` reads 100 on
+    everybody, dead ones included (-10.99 in NRPBS, 100 on the Humanoid), so
+    the health bar was always full and a corpse counted as a live target.
+  * **`Player.NRPBS.EquippedTool` names everybody's weapon, in every mode.**
+    The level ladder only works in the gun-game modes: in "Randomizer" the
+    `Levels` folder is EMPTY, so the old weaponInfo() answered nil, the
+    "Firearms only" gate (on by default) stayed shut, and the aim and the
+    trigger never ran at all. That was the "aimbot does not work" report.
+  * **`ReplicatedStorage.wkspc.FFA` is the free-for-all flag** (next to
+    `TwoTeams`, `gametype`). Randomizer is a TEAM mode that no word list knew,
+    so every team mate was drawn as an enemy.
+  * **The shot is `GeneralFunctions.cast(ray, ignoreList)`**, called from the
+    `FireBullet` handler in `Client.Game.BulletsAndProjectiles` with a ~1000
+    stud ray from the camera. It holds `workspace.Raycast` as an upvalue, so a
+    `__namecall` spy never sees it - `hookfunction` does. The hit then goes out
+    through the game's own NetClient (`HitPart` = packet 0 on
+    `ReplicatedStorage.###zzz###`). Bending that ray is the silent aim, and it
+    was measured against the server: 3 of 4 bent shots with the crosshair
+    67-181 px off the target came back as a kill (target Deaths +1, own Kills
+    +1, own Headshots +1); the fourth enemy was killed by somebody else.
+  * **Recoil is `ShakeCam`**, a local of the same handler (it reads
+    `RecoilControl` and `ads`); hooking it to return early leaves the shot
+    intact. **`Spread.calcspread` must NOT be hooked to return 0** - the ammo
+    goes down and no ray is ever cast. No spread is done inside the cast hook
+    instead, by pointing the ray down the crosshair.
+  * **`FireRate` / `Ammo` / `ReloadTime` are read live off
+    `ReplicatedStorage.Weapons.<gun>`**: a quarter of the AK74's FireRate put
+    30 rays out in one second instead of ~13. Whether the SERVER credits a
+    faster cadence was not measured - the panel says so.
+  * **`Humanoid.WalkSpeed` is reset by the game within 2 s** (31 -> 23), so the
+    speed boost moves the root part instead of writing WalkSpeed.
 ]]
 
 local Players           = game:GetService("Players")
@@ -205,6 +242,42 @@ local CONFIG = {
 	hbTrans    = 100,      -- % transparency; 100 = fully invisible
 	hbEnemy    = true,     -- enemies only
 	hbEvery    = 0.5,      -- seconds between refreshes
+
+	-- silent aim ---------------------------------------------------------------
+	-- Bends the game's own shot ray toward the target; the game then reports its
+	-- own hit. OFF by default and in no preset - see the genre file.
+	sa         = false,
+	saActive   = "Always", -- Always | Hotkey | With aim key
+	saKey      = "E",
+	saPart     = "Head",   -- Head | Torso | Random
+	saFov      = 160,
+	saVisible  = true,
+	saHitPct   = 100,
+	saCircle   = true,
+	colSa      = Color3.fromRGB(255, 120, 200),
+
+	-- gun mods -----------------------------------------------------------------
+	noRecoil   = false,    -- the game's ShakeCam returns early
+	noSpread   = false,    -- the shot ray points down the crosshair
+	rapid      = false,    -- FireRate of the gun in hand divided by rapidMul
+	rapidMul   = 2,
+	infAmmo    = false,    -- the magazine is topped up on the client
+	fastReload = false,    -- ReloadTime of the gun in hand cut to 10%
+
+	-- movement -----------------------------------------------------------------
+	speed      = false,    -- extra studs/s along the move direction
+	speedAdd   = 12,
+	fly        = false,
+	flySpeed   = 50,
+	flyKey     = "X",
+	infJump    = false,
+
+	-- world --------------------------------------------------------------------
+	fullbright = false,
+	noFog      = false,
+	fovOn      = false,
+	fovValue   = 90,
+	antiAfk    = false,
 }
 
 -- There is no master switch on this panel and there deliberately is not one:
@@ -306,6 +379,28 @@ local function statusTeam(p)
 	return tostring(pv(p, "Status", "Team", ""))
 end
 
+-- The HP the server keeps. Humanoid.Health reads 100 on every player, the dead
+-- included, so everything that shows or compares health reads this instead and
+-- only falls back to the Humanoid when a player has no NRPBS folder yet.
+local function hpOf(p, hum)
+	local v = tonumber(pv(p, "NRPBS", "Health", nil))
+	if v then return v end
+	return hum and hum.Health or 0
+end
+
+local function maxHpOf(p, hum)
+	local v = tonumber(pv(p, "NRPBS", "MaxHealth", nil))
+	if v and v > 0 then return v end
+	return hum and hum.MaxHealth or 100
+end
+
+-- Everybody's weapon, in every mode. The level ladder below is only right in the
+-- gun-game modes; in Randomizer its folder is empty.
+local function toolOf(p)
+	local v = pv(p, "NRPBS", "EquippedTool", "")
+	return v and tostring(v) or ""
+end
+
 local function levelOf(p)
 	return tonumber(pv(p, "Status", "Level", 0)) or 0
 end
@@ -351,6 +446,8 @@ local function alive(p)
 	local root = char:FindFirstChild("HumanoidRootPart")
 	if not root then return nil end
 	if pv(p, "Status", "Alive", true) == false then return nil end
+	-- The Humanoid never dies here - NRPBS.Health is the one that goes to zero.
+	if hpOf(p, hum) <= 0 then return nil end
 	return char, hum, root
 end
 
@@ -386,6 +483,12 @@ local TEAM_MODE_WORDS = {
 local function ffaNow()
 	if CONFIG.teamMode == "Everyone (FFA)" then return true end
 	if CONFIG.teamMode == "Team check" then return false end
+	-- The server's own flag, next to TwoTeams and gametype. Measured: FFA = false
+	-- in Randomizer, which is a two-team mode that no word list below knew, and
+	-- that is why every team mate was drawn as an enemy.
+	local w = ReplicatedStorage:FindFirstChild("wkspc")
+	local flag = w and w:FindFirstChild("FFA")
+	if flag and flag:IsA("BoolValue") then return flag.Value end
 	local mode = string.lower(STATE.mode or "")
 	for _, word in ipairs(TEAM_MODE_WORDS) do
 		if mode:find(word, 1, true) then return false end
@@ -651,21 +754,21 @@ local function chamFor(p)
 	return hl
 end
 
-local function chamColour(base, hum)
+local function chamColour(base, hum, p)
 	if CONFIG.chamRainbow then
 		return Color3.fromHSV((os.clock() * 0.25) % 1, 0.85, 1)
 	end
 	if CONFIG.chamByHealth and hum then
-		local frac = math.clamp(hum.Health / math.max(hum.MaxHealth, 1), 0, 1)
+		local frac = math.clamp(hpOf(p, hum) / math.max(maxHpOf(p, hum), 1), 0, 1)
 		return COLOUR.hpBad:Lerp(COLOUR.hpGood, frac)
 	end
 	if CONFIG.colChamOwn then return CONFIG.colCham end
 	return base
 end
 
-local function applyCham(hl, base, hum)
+local function applyCham(hl, base, hum, p)
 	local style = CHAM_STYLES[CONFIG.chamStyle] or CHAM_STYLES["Fill"]
-	local col = chamColour(base, hum)
+	local col = chamColour(base, hum, p)
 	if style.boost then
 		local h, s, v = Color3.toHSV(col)
 		col = Color3.fromHSV(h, math.clamp(s * (style.boost > 1 and 0.75 or 1), 0, 1),
@@ -863,8 +966,9 @@ local function renderPass()
 
 					set.hpBg.Visible = CONFIG.health
 					set.hp.Visible   = CONFIG.health
+					local hpNow = hpOf(p, hum)
 					if CONFIG.health then
-						local frac = math.clamp(hum.Health / math.max(hum.MaxHealth, 1), 0, 1)
+						local frac = math.clamp(hpNow / math.max(maxHpOf(p, hum), 1), 0, 1)
 						set.hpBg.Position = Vector2.new(minX - 6, minY)
 						set.hpBg.Size     = Vector2.new(3, h)
 						set.hp.Position   = Vector2.new(minX - 6, minY + h * (1 - frac))
@@ -896,14 +1000,15 @@ local function renderPass()
 						table.insert(bits, "L" .. tostring(lvl))
 					end
 					if CONFIG.weapon then
-						local wep = weaponForLevel(lvl)
+						local wep = toolOf(p)
+						if wep == "" then wep = weaponForLevel(lvl) end
 						if wep ~= "" then table.insert(bits, wep) end
 					end
 					if CONFIG.distance then
 						table.insert(bits, string.format("%dm", math.floor(dist)))
 					end
 					if CONFIG.hpText then
-						table.insert(bits, string.format("%d", math.floor(hum.Health)))
+						table.insert(bits, string.format("%d", math.floor(hpNow)))
 					end
 					if CONFIG.kills then
 						local k = tonumber(pv(p, "ScoreFolder", "Kills", 0)) or 0
@@ -963,7 +1068,7 @@ local function renderPass()
 					if CONFIG.chams then
 						local hl = chamFor(p)
 						hl.Adornee = char
-						applyCham(hl, base, hum)
+						applyCham(hl, base, hum, p)
 					else
 						local hl = highlights[p]
 						if hl then hl.Enabled = false hl.Adornee = nil end
@@ -1006,11 +1111,35 @@ local function resolveKey(name)
 	return entry
 end
 
+-- Mouse buttons are tracked from their own InputBegan/InputEnded, not only
+-- polled. Reported 2026-09-25: aim key on MouseButton2, one click of
+-- MouseButton1 and the aim dropped out until the right button was pressed
+-- AGAIN - the poll read the right button as released while it was still held.
+-- A button is held from its own InputBegan to its own InputEnded, whatever
+-- the other buttons do; the poll is kept as a second opinion, so a press that
+-- began before this script ran still counts.
+local mouseDown = {}
+UserInputService.InputBegan:Connect(function(input)
+	if input.UserInputType.Name:sub(1, 11) == "MouseButton" then
+		mouseDown[input.UserInputType] = true
+	end
+end)
+UserInputService.InputEnded:Connect(function(input)
+	if input.UserInputType.Name:sub(1, 11) == "MouseButton" then
+		mouseDown[input.UserInputType] = nil
+	end
+end)
+-- Alt-tab eats the InputEnded; without this a button could stay "held".
+UserInputService.WindowFocusReleased:Connect(function() mouseDown = {} end)
+
 local function keyHeld(name)
 	if not name or name == "" then return false end
 	local spec = resolveKey(name)
 	if not spec then return false end
-	if spec.mouse then return UserInputService:IsMouseButtonPressed(spec.mouse) end
+	if spec.mouse then
+		return mouseDown[spec.mouse] == true
+			or UserInputService:IsMouseButtonPressed(spec.mouse)
+	end
 	return UserInputService:IsKeyDown(spec.key)
 end
 
@@ -1055,7 +1184,9 @@ UserInputService.InputBegan:Connect(function(input, typing)
 		local spec = resolveKey(CONFIG.humPanicKey)
 		if spec and spec.key and input.KeyCode == spec.key then
 			CONFIG.aim, CONFIG.trig, CONFIG.rcs, CONFIG.aimFire = false, false, false, false
-			note("PANIC - aim, trigger, rcs and auto fire off")
+			CONFIG.sa, CONFIG.rapid, CONFIG.infAmmo = false, false, false
+			CONFIG.fly, CONFIG.speed = false, false
+			note("PANIC - aim, trigger, rcs, auto fire, silent aim, rapid fire, fly and speed off")
 		end
 	end
 end)
@@ -1187,8 +1318,23 @@ local MeleesFolder  = ReplicatedStorage:FindFirstChild("Melees")
 
 local weaponCache = {}
 
+-- The gun in hand. NRPBS.EquippedTool first - it is right in every mode and
+-- follows a weapon switch - then the viewmodel's own `Real` attribute, and the
+-- level ladder only as the last resort. The ladder alone answered "" in
+-- Randomizer, which kept the Firearms-only gate shut and the aim dead.
+local function heldName()
+	local name = toolOf(plr)
+	if name ~= "" then return name end
+	local ok, real = pcall(function()
+		local arms = camera:FindFirstChild("Arms")
+		return arms and arms:GetAttribute("Real")
+	end)
+	if ok and type(real) == "string" and real ~= "" then return real end
+	return weaponForLevel(levelOf(plr))
+end
+
 local function weaponInfo()
-	local name = weaponForLevel(levelOf(plr))
+	local name = heldName()
 	if name == "" then return nil, "" end
 	local cached = weaponCache[name]
 	if cached ~= nil then return cached or nil, name end
@@ -1431,7 +1577,7 @@ local function pickTarget()
 								if CONFIG.aimPick == "Closest" then
 									score = (camPos - root.Position).Magnitude
 								elseif CONFIG.aimPick == "Lowest HP" then
-									score = hum.Health
+									score = hpOf(p, hum)
 								elseif CONFIG.aimPick == "Lowest level" then
 									score = levelOf(p)
 								else
@@ -1939,7 +2085,7 @@ task.spawn(function()
 				local char = p.Character
 				local hum = char and char:FindFirstChildOfClass("Humanoid")
 				local was = seen[p]
-				local now = hum and hum.Health or 0
+				local now = hum and hpOf(p, hum) or 0
 				if was and was > 0 and now <= 0 and p == stickyTarget then
 					lastKillAt = os.clock() * 1000
 					stickyTarget = nil
@@ -2041,6 +2187,469 @@ task.spawn(function()
 	pcall(hbRestoreAll)
 end)
 
+--------------------------------------------------------------------------------
+-- the game's own shot path
+--------------------------------------------------------------------------------
+--
+-- Everything below the camera-side toolkit reaches into Arsenal's client, and
+-- every reference is found by CONTENT, never by position: the weapon state is
+-- the upvalue table that carries `ammocount` and `currentspread`, the event bus
+-- is the one with a `FireBullet` signal, ShakeCam is the upvalue that NAMES
+-- itself ShakeCam. Upvalue indices shift with every game update; those three
+-- facts do not.
+--
+-- The whole block sits in a do..end and hands its entry points out through EXT:
+-- this file was already close to Luau's 200-locals-per-function ceiling, and
+-- forty more top-level locals took it past (214 lines of them).
+
+local EXT = {}
+do
+
+local GAMEREF = { tried = false }
+
+local function upvalueWhere(fn, pred)
+	local ok, ups = pcall(debug.getupvalues, fn)
+	if not ok or type(ups) ~= "table" then return nil end
+	for _, v in pairs(ups) do
+		local hit = false
+		pcall(function() hit = pred(v) end)
+		if hit then return v end
+	end
+	return nil
+end
+
+local function resolveGame()
+	if GAMEREF.state and GAMEREF.GF then return true end
+	local ok, err = pcall(function()
+		local client = game:GetService("ReplicatedFirst"):FindFirstChild("Client")
+		local wmod = client and client:FindFirstChild("Game") and client.Game:FindFirstChild("Weapons")
+		local W = wmod and require(wmod)
+		if type(W) == "table" and type(W.reload) == "function" then
+			GAMEREF.state = upvalueWhere(W.reload, function(v)
+				return type(v) == "table" and rawget(v, "ammocount") ~= nil
+					and rawget(v, "currentspread") ~= nil
+			end)
+			local bus = upvalueWhere(W.reload, function(v)
+				return type(v) == "table" and type(rawget(v, "FireBullet")) == "table"
+			end)
+			local head = bus and bus.FireBullet._handlerListHead
+			local fb = head and head._fn
+			if type(fb) == "function" then
+				GAMEREF.shake = upvalueWhere(fb, function(v)
+					return type(v) == "function" and debug.info(v, "n") == "ShakeCam"
+				end)
+			end
+		end
+		local gf = ReplicatedStorage:FindFirstChild("Modules")
+			and ReplicatedStorage.Modules:FindFirstChild("GeneralFunctions")
+		GAMEREF.GF = gf and require(gf)
+	end)
+	if not ok then GAMEREF.err = tostring(err) end
+	GAMEREF.tried = true
+	return GAMEREF.state ~= nil and GAMEREF.GF ~= nil
+end
+
+-- The gun in hand as the INSTANCE the game reads its numbers from.
+local function heldGun()
+	local st = GAMEREF.state
+	local g = st and rawget(st, "gun")
+	if typeof(g) == "Instance" and g.Parent then return g end
+	local name = heldName()
+	return name ~= "" and WeaponsFolder and WeaponsFolder:FindFirstChild(name) or nil
+end
+
+--------------------------------------------------------------------------------
+-- silent aim
+--------------------------------------------------------------------------------
+--
+-- The shot is `GeneralFunctions.cast(ray, ignoreList)` with a ~1000 stud ray out
+-- of the camera. Pointing that ray at the target is the whole feature: the game
+-- then finds its own hit and sends its own HitPart packet, so nothing is forged
+-- and the server grades an ordinary shot. Measured 2026-09-25: 3 of 4 bent shots
+-- with the crosshair 67-181 px off the target were kills on the server (target
+-- Deaths +1, own Kills +1, own Headshots +1). A wall still stops the ray - this
+-- bends, it does not shoot through.
+--
+-- `cast` keeps workspace.Raycast as an upvalue, which is why a __namecall hook
+-- never sees the shot: it takes hookfunction. Installed ONCE per VM behind a _G
+-- guard, and only when one of the features that needs it is first switched on;
+-- the hook itself only forwards to whatever handler the current run put in
+-- _G.__ARS_CAST_H, so a re-execute swaps the logic without stacking hooks.
+
+local saPart = nil        -- the part the next shot goes to, chosen every frame
+local saCircle = make("Circle", { Thickness = 1, NumSides = 48, Filled = false,
+	Transparency = 0.5, ZIndex = 1 })
+STATE.saTarget, STATE.saBent, STATE.saLanded = "-", 0, 0
+STATE.hooks = "not installed"
+
+local function saActive()
+	if not CONFIG.sa then return false end
+	if CONFIG.hum and CONFIG.humPanelOff and STATE.panelOpen then return false end
+	if CONFIG.saActive == "Hotkey" then return hotkeyHeld(CONFIG.saKey) end
+	if CONFIG.saActive == "With aim key" then return hotkeyHeld(CONFIG.aimKey) end
+	return true
+end
+
+local function saPartOf(char)
+	local want = CONFIG.saPart
+	if want == "Random" then want = (math.random() < 0.5) and "Head" or "Torso" end
+	if want == "Torso" then
+		return char:FindFirstChild("UpperTorso") or char:FindFirstChild("HumanoidRootPart")
+	end
+	return char:FindFirstChild("HeadHB") or char:FindFirstChild("Head")
+end
+
+local function saPick()
+	local mid = centre()
+	local best, bestPx
+	for _, p in ipairs(Players:GetPlayers()) do
+		if isEnemy(p) then
+			local char = alive(p)
+			local part = char and saPartOf(char)
+			if part then
+				local sp = camera:WorldToViewportPoint(part.Position)
+				if sp.Z > 0 then
+					local px = (Vector2.new(sp.X, sp.Y) - mid).Magnitude
+					if px <= CONFIG.saFov and (not bestPx or px < bestPx)
+						and ((not CONFIG.saVisible) or visible(part.Position)) then
+						best, bestPx = { player = p, part = part }, px
+					end
+				end
+			end
+		end
+	end
+	return best
+end
+
+local function saStep()
+	saCircle.Visible = CONFIG.sa and CONFIG.saCircle
+	if saCircle.Visible then
+		saCircle.Position = centre()
+		saCircle.Radius = CONFIG.saFov
+		saCircle.Color = CONFIG.colSa
+	end
+	if not saActive() or not gunGate(true) then
+		saPart = nil
+		STATE.saTarget = "-"
+		return
+	end
+	local pick = saPick()
+	saPart = pick and pick.part or nil
+	STATE.saTarget = pick and pick.player.Name or "-"
+end
+
+-- Only OUR shot: a long ray that starts at the camera. Other players' bullets
+-- and the short ground probes the game casts for footsteps never qualify.
+local function ourShot(ray)
+	return typeof(ray) == "Ray" and ray.Direction.Magnitude > 100
+		and (ray.Origin - camera.CFrame.Position).Magnitude < 12
+end
+
+local function castHandler(old, ray, list, ...)
+	if _G.__ARSENAL ~= GEN then return old(ray, list, ...) end
+	local ok, newRay = pcall(function()
+		if not ourShot(ray) then return nil end
+		local len = ray.Direction.Magnitude
+		if saPart and saPart.Parent and math.random(100) <= CONFIG.saHitPct then
+			STATE.saBent = STATE.saBent + 1
+			return Ray.new(ray.Origin, (saPart.Position - ray.Origin).Unit * len), true
+		end
+		if CONFIG.noSpread then
+			local m = UserInputService:GetMouseLocation()
+			local aim = camera:ViewportPointToRay(m.X, m.Y)
+			if TOUCH or UserInputService.MouseBehavior == Enum.MouseBehavior.LockCenter then
+				aim = camera:ViewportPointToRay(camera.ViewportSize.X / 2, camera.ViewportSize.Y / 2)
+			end
+			return Ray.new(ray.Origin, aim.Direction.Unit * len)
+		end
+		return nil
+	end)
+	if ok and newRay then
+		local r = { old(newRay, list, ...) }
+		if saPart and r[1] and saPart.Parent and r[1]:IsDescendantOf(saPart.Parent) then
+			STATE.saLanded = STATE.saLanded + 1
+		end
+		return unpack(r)
+	end
+	return old(ray, list, ...)
+end
+
+local function installHooks()
+	if not resolveGame() then
+		STATE.hooks = "game client not found" .. (GAMEREF.err and (": " .. GAMEREF.err) or "")
+		return false
+	end
+	if not hookfunction then STATE.hooks = "executor has no hookfunction" return false end
+	if not _G.__ARS_CASTHOOK then
+		local ok = pcall(function()
+			local old
+			old = hookfunction(GAMEREF.GF.cast, function(...)
+				local h = _G.__ARS_CAST_H
+				if h then return h(old, ...) end
+				return old(...)
+			end)
+			_G.__ARS_CAST_OLD = old
+		end)
+		if ok then _G.__ARS_CASTHOOK = true end
+	end
+	if GAMEREF.shake and not _G.__ARS_SHAKEHOOK then
+		local ok = pcall(function()
+			local old
+			old = hookfunction(GAMEREF.shake, function(...)
+				if _G.__ARS_NORECOIL then return end
+				return old(...)
+			end)
+		end)
+		if ok then _G.__ARS_SHAKEHOOK = true end
+	end
+	_G.__ARS_CAST_H = castHandler
+	STATE.hooks = (_G.__ARS_CASTHOOK and "shot" or "NO shot")
+		.. " + " .. (_G.__ARS_SHAKEHOOK and "recoil" or "NO recoil")
+	return true
+end
+
+-- If a previous run already installed the hooks in this VM, take them over at
+-- once; otherwise wait until something that needs them is switched on.
+if _G.__ARS_CASTHOOK then installHooks() end
+
+--------------------------------------------------------------------------------
+-- gun mods
+--------------------------------------------------------------------------------
+--
+-- FireRate, Ammo and ReloadTime are read live off ReplicatedStorage.Weapons.<gun>
+-- every shot, so they are changed there - on this client only - and every value
+-- ever touched is put back when its switch goes off or the gun changes. Measured:
+-- a quarter of the AK74's FireRate put 30 rays out in a second instead of ~13.
+-- What the SERVER makes of the faster cadence was NOT measured, and the panel
+-- says exactly that.
+
+local modSaved = {}       -- [ValueBase] = original value
+
+local function modSet(v, value)
+	if modSaved[v] == nil then modSaved[v] = v.Value end
+	if v.Value ~= value then v.Value = value end
+end
+
+local function modRestore(keep)
+	for v, orig in pairs(modSaved) do
+		if not (keep and keep[v]) then
+			pcall(function() if v.Parent then v.Value = orig end end)
+			modSaved[v] = nil
+		end
+	end
+end
+
+local function modStep()
+	_G.__ARS_NORECOIL = CONFIG.noRecoil and true or false
+	if (CONFIG.sa or CONFIG.noSpread or CONFIG.noRecoil) and not _G.__ARS_CAST_H then
+		installHooks()
+	end
+	local gun = heldGun()
+	local keep = {}
+	if gun then
+		local fr = gun:FindFirstChild("FireRate")
+		if CONFIG.rapid and fr and fr:IsA("ValueBase") then
+			local orig = modSaved[fr] ~= nil and modSaved[fr] or fr.Value
+			modSet(fr, orig / math.max(1, CONFIG.rapidMul))
+			keep[fr] = true
+		end
+		local rt = gun:FindFirstChild("ReloadTime")
+		if CONFIG.fastReload and rt and rt:IsA("ValueBase") then
+			local orig = modSaved[rt] ~= nil and modSaved[rt] or rt.Value
+			modSet(rt, orig * 0.1)
+			keep[rt] = true
+		end
+		local st = GAMEREF.state
+		local mag = gun:FindFirstChild("Ammo")
+		if CONFIG.infAmmo and st and mag and tonumber(mag.Value) then
+			local cur = rawget(st, "ammocount")
+			if type(cur) == "number" and cur < mag.Value then st.ammocount = mag.Value end
+		end
+	end
+	modRestore(keep)
+end
+
+--------------------------------------------------------------------------------
+-- movement
+--------------------------------------------------------------------------------
+--
+-- Humanoid.WalkSpeed is put back by the game within two seconds (31 -> 23), so
+-- the speed boost moves the root part itself along the move direction. Fly is
+-- the Hypershot recipe: the root's velocity written every Heartbeat, no
+-- BodyMover instance, one frame of gravity paid back in advance.
+
+local flyWas = false
+
+local function moveStep(dt)
+	local char = plr.Character
+	local root = char and char:FindFirstChild("HumanoidRootPart")
+	local hum = char and char:FindFirstChildOfClass("Humanoid")
+	local living = root and hum and hpOf(plr, hum) > 0
+	if CONFIG.fly and living then
+		flyWas = true
+		local cf = camera.CFrame
+		local look = cf.LookVector
+		local flat = Vector3.new(look.X, 0, look.Z)
+		flat = flat.Magnitude > 1e-3 and flat.Unit or Vector3.new(0, 0, -1)
+		local rightFlat = Vector3.new(cf.RightVector.X, 0, cf.RightVector.Z)
+		rightFlat = rightFlat.Magnitude > 1e-3 and rightFlat.Unit or Vector3.new(1, 0, 0)
+		local md = hum.MoveDirection
+		local dir = look * md:Dot(flat) + rightFlat * md:Dot(rightFlat)
+		if not TOUCH then
+			if UserInputService:IsKeyDown(Enum.KeyCode.Space) then dir = dir + Vector3.new(0, 1, 0) end
+			if UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) then dir = dir - Vector3.new(0, 1, 0) end
+		end
+		local vel = (dir.Magnitude > 1e-3) and dir.Unit * CONFIG.flySpeed or Vector3.new(0, 0, 0)
+		vel = vel + Vector3.new(0, workspace.Gravity * math.max(dt, 1 / 240), 0)
+		pcall(function() root.AssemblyLinearVelocity = vel end)
+		return
+	end
+	if flyWas and root then
+		pcall(function() root.AssemblyLinearVelocity = Vector3.new(0, 0, 0) end)
+	end
+	flyWas = false
+	if CONFIG.speed and living then
+		local md = hum.MoveDirection
+		if md.Magnitude > 0.05 then
+			root.CFrame = root.CFrame + Vector3.new(md.X, 0, md.Z) * CONFIG.speedAdd * dt
+		end
+	end
+end
+
+UserInputService.JumpRequest:Connect(function()
+	if _G.__ARSENAL ~= GEN or not CONFIG.infJump then return end
+	local hum = plr.Character and plr.Character:FindFirstChildOfClass("Humanoid")
+	if hum and hum:GetState() == Enum.HumanoidStateType.Freefall then
+		hum:ChangeState(Enum.HumanoidStateType.Jumping)
+	end
+end)
+
+-- The panel is built further down; its fly switch is handed in here so the
+-- hotkey can move it too.
+local FLY_UI = {}
+
+UserInputService.InputBegan:Connect(function(input, processed)
+	if _G.__ARSENAL ~= GEN or processed or capturing then return end
+	if input.UserInputType ~= Enum.UserInputType.Keyboard then return end
+	local spec = resolveKey(CONFIG.flyKey or "")
+	if not spec or not spec.key or input.KeyCode ~= spec.key then return end
+	CONFIG.fly = not CONFIG.fly
+	if FLY_UI.handle then pcall(function() FLY_UI.handle:set(CONFIG.fly) end) end
+	note(CONFIG.fly and "fly on" or "fly off")
+end)
+
+--------------------------------------------------------------------------------
+-- world
+--------------------------------------------------------------------------------
+
+local Lighting = game:GetService("Lighting")
+local LIGHTORIG, lightWas = {}, {}
+local atmoOrig = setmetatable({}, { __mode = "k" })
+local fovOrig = nil
+
+local function lightCapture(group, fields)
+	if LIGHTORIG[group] then return end
+	local t = {}
+	for _, f in ipairs(fields) do t[f] = Lighting[f] end
+	LIGHTORIG[group] = t
+end
+
+local function lightRestore(group)
+	local t = LIGHTORIG[group]
+	if not t then return end
+	for f, v in pairs(t) do pcall(function() Lighting[f] = v end) end
+	LIGHTORIG[group] = nil
+end
+
+local function worldStep()
+	if CONFIG.fullbright then
+		lightCapture("bright", { "Brightness", "GlobalShadows", "Ambient", "OutdoorAmbient" })
+		Lighting.Brightness = 2
+		Lighting.GlobalShadows = false
+		Lighting.Ambient = Color3.new(1, 1, 1)
+		Lighting.OutdoorAmbient = Color3.new(1, 1, 1)
+	elseif lightWas.bright then lightRestore("bright") end
+	lightWas.bright = CONFIG.fullbright
+
+	local atm = Lighting:FindFirstChildOfClass("Atmosphere")
+	if CONFIG.noFog then
+		lightCapture("fog", { "FogEnd", "FogStart" })
+		Lighting.FogEnd = 1e9
+		Lighting.FogStart = 1e9 - 1
+		if atm then
+			if not atmoOrig[atm] then atmoOrig[atm] = { atm.Density, atm.Haze } end
+			atm.Density, atm.Haze = 0, 0
+		end
+	elseif lightWas.fog then
+		lightRestore("fog")
+		if atm and atmoOrig[atm] then
+			atm.Density, atm.Haze = atmoOrig[atm][1], atmoOrig[atm][2]
+			atmoOrig[atm] = nil
+		end
+	end
+	lightWas.fog = CONFIG.noFog
+end
+
+-- Per frame, after the game's camera step, and never while aiming down sights:
+-- the scope zoom IS a field of view change and must win.
+local function fovStep()
+	local st = GAMEREF.state
+	local ads = st and rawget(st, "ads") == true
+	if CONFIG.fovOn and not ads then
+		if fovOrig == nil then fovOrig = camera.FieldOfView end
+		camera.FieldOfView = CONFIG.fovValue
+	elseif fovOrig ~= nil and not CONFIG.fovOn then
+		camera.FieldOfView = fovOrig
+		fovOrig = nil
+	end
+end
+
+-- Anti-AFK: Roblox's own idle kick fires Player.Idled after two minutes without
+-- input; a synthetic right click answers it.
+STATE.afkNudges = 0
+pcall(function()
+	local vu = game:GetService("VirtualUser")
+	plr.Idled:Connect(function()
+		if _G.__ARSENAL ~= GEN or not CONFIG.antiAfk then return end
+		pcall(function()
+			vu:CaptureController()
+			vu:ClickButton2(Vector2.new())
+		end)
+		STATE.afkNudges = STATE.afkNudges + 1
+	end)
+end)
+
+task.spawn(function()
+	while _G.__ARSENAL == GEN do
+		local ok, err = pcall(modStep)
+		if not ok then note("gun mods: " .. tostring(err)) end
+		local ok2, err2 = pcall(worldStep)
+		if not ok2 then note("world: " .. tostring(err2)) end
+		task.wait(0.1)
+	end
+	pcall(modRestore)
+	pcall(lightRestore, "bright")
+	pcall(lightRestore, "fog")
+end)
+
+local moveConn
+moveConn = RunService.Heartbeat:Connect(function(dt)
+	if _G.__ARSENAL ~= GEN then
+		if moveConn then moveConn:Disconnect() end
+		return
+	end
+	local ok, err = pcall(moveStep, dt)
+	if not ok then note("move: " .. tostring(err)) end
+end)
+
+EXT.GAMEREF, EXT.resolveGame, EXT.heldGun = GAMEREF, resolveGame, heldGun
+EXT.installHooks, EXT.castHandler = installHooks, castHandler
+EXT.saStep, EXT.saPick, EXT.saActive = saStep, saPick, saActive
+EXT.modStep, EXT.modRestore, EXT.modSaved = modStep, modRestore, modSaved
+EXT.fovStep, EXT.FLY_UI = fovStep, FLY_UI
+
+end -- EXT
+
 Players.PlayerRemoving:Connect(function(p)
 	local set = drawn[p]
 	if set then hideSet(set) end
@@ -2068,6 +2677,9 @@ RunService:BindToRenderStep("SeluxArsenalAim", Enum.RenderPriority.Camera.Value 
 			rcsPass(dt)
 		end)
 		if not ok then note("aim: " .. tostring(err)) end
+		local ok2, err2 = pcall(EXT.saStep)
+		if not ok2 then note("silent aim: " .. tostring(err2)) end
+		pcall(EXT.fovStep)
 	end)
 
 RunService:BindToRenderStep("SeluxArsenalESP", Enum.RenderPriority.Camera.Value + 2,
@@ -2157,7 +2769,7 @@ drawCard:Toggle("Health number", CONFIG.hpText, function(v) CONFIG.hpText = v en
 drawCard:Toggle("Level", CONFIG.level, function(v) CONFIG.level = v end,
 	"the gun game level - this is what decides the match", UI.theme.good)
 drawCard:Toggle("Weapon", CONFIG.weapon, function(v) CONFIG.weapon = v end,
-	"read from the level ladder; EquippedWep never replicates", UI.theme.good)
+	"what everybody is holding, in every mode", UI.theme.good)
 drawCard:Toggle("Distance", CONFIG.distance, function(v) CONFIG.distance = v end)
 drawCard:Toggle("Kills / streak", CONFIG.kills, function(v) CONFIG.kills = v end)
 drawCard:Toggle("Head dot", CONFIG.headDot, function(v) CONFIG.headDot = v end,
@@ -2565,6 +3177,148 @@ end, UI.theme.band)
 local hbOut = hbPage:Card("WHAT THIS IS", 2):Readout(9)
 
 --------------------------------------------------------------------------------
+-- SILENT AIM page
+--------------------------------------------------------------------------------
+
+-- In a do..end for the same reason as EXT: the 200-locals ceiling.
+do
+local installHooks, heldGun, GAMEREF, FLY_UI =
+	EXT.installHooks, EXT.heldGun, EXT.GAMEREF, EXT.FLY_UI
+
+local saPage = win:Page("SILENT", UI.icon.sword)
+
+local saCard = saPage:Card("SILENT AIM", 1):Accent()
+saCard:Toggle("Silent aim", CONFIG.sa, function(v)
+	CONFIG.sa = v
+	if v then installHooks() end
+	note(v and "silent aim on" or "silent aim off")
+end, "bends the game's own shot toward the target - the camera does not move", UI.theme.bad)
+saCard:Dropdown("Active", { "Always", "Hotkey", "With aim key" }, CONFIG.saActive,
+	function(v) CONFIG.saActive = v end)
+bindButton(saCard, "SILENT KEY", function() return CONFIG.saKey end,
+	function(v) CONFIG.saKey = v end)
+saCard:Dropdown("Hit part", { "Head", "Torso", "Random" }, CONFIG.saPart,
+	function(v) CONFIG.saPart = v end)
+saCard:Slider("FOV (pixels)", 10, 800, CONFIG.saFov, function(v) CONFIG.saFov = v end,
+	"only enemies inside this circle are taken")
+saCard:Slider("Hit chance %", 1, 100, CONFIG.saHitPct, function(v) CONFIG.saHitPct = v end,
+	"below 100 leaves some shots where you aimed them")
+saCard:Toggle("Visible only", CONFIG.saVisible, function(v) CONFIG.saVisible = v end,
+	"a wall stops the bent shot anyway - this skips targets behind one", UI.theme.good)
+saCard:Toggle("Draw silent FOV", CONFIG.saCircle, function(v) CONFIG.saCircle = v end)
+saCard:Colour("Silent FOV colour", CONFIG.colSa, function(c) CONFIG.colSa = c end)
+
+local saOut = saPage:Card("MEASURED", 2):Readout(9)
+
+--------------------------------------------------------------------------------
+-- GUN MODS page
+--------------------------------------------------------------------------------
+
+local gunPage = win:Page("GUN MODS", UI.icon.wrench)
+
+local gunCard = gunPage:Card("GUN MODS", 1):Accent()
+gunCard:Toggle("No recoil", CONFIG.noRecoil, function(v)
+	CONFIG.noRecoil = v
+	if v then installHooks() end
+end, "the game's own camera kick is skipped - the shot still fires", UI.theme.good)
+gunCard:Toggle("No spread", CONFIG.noSpread, function(v)
+	CONFIG.noSpread = v
+	if v then installHooks() end
+end, "every bullet leaves exactly down the crosshair", UI.theme.good)
+gunCard:Toggle("Rapid fire", CONFIG.rapid, function(v) CONFIG.rapid = v end,
+	"divides the fire rate of the gun in hand - server acceptance not measured",
+	UI.theme.warn)
+gunCard:Slider("Rapid fire x", 2, 6, CONFIG.rapidMul, function(v) CONFIG.rapidMul = v end)
+gunCard:Toggle("Infinite ammo", CONFIG.infAmmo, function(v) CONFIG.infAmmo = v end,
+	"tops the magazine up on your client - server acceptance not measured",
+	UI.theme.warn)
+gunCard:Toggle("Fast reload", CONFIG.fastReload, function(v) CONFIG.fastReload = v end,
+	"reload time of the gun in hand cut to 10%", UI.theme.warn)
+
+local gunOut = gunPage:Card("STATE", 2):Readout(8)
+
+--------------------------------------------------------------------------------
+-- MOVE page
+--------------------------------------------------------------------------------
+
+local movePage = win:Page("MOVE", UI.icon.loop)
+
+local speedCard = movePage:Card("SPEED", 1):Accent()
+speedCard:Toggle("Speed boost", CONFIG.speed, function(v) CONFIG.speed = v end,
+	"moves the body itself - the game resets WalkSpeed within two seconds",
+	UI.theme.warn)
+speedCard:Slider("Extra speed", 2, 60, CONFIG.speedAdd, function(v) CONFIG.speedAdd = v end,
+	"studs per second on top of normal running")
+speedCard:Toggle("Air jump", CONFIG.infJump, function(v) CONFIG.infJump = v end,
+	"jump again while in the air")
+
+local flyCard = movePage:Card("FLY", 2)
+FLY_UI.handle = flyCard:Toggle("Fly", CONFIG.fly, function(v) CONFIG.fly = v end,
+	"look where you want to go; Space up, Ctrl down", UI.theme.warn)
+flyCard:Slider("Fly speed", 10, 150, CONFIG.flySpeed, function(v) CONFIG.flySpeed = v end)
+bindButton(flyCard, "FLY KEY", function() return CONFIG.flyKey end,
+	function(v) CONFIG.flyKey = v end)
+flyCard:Label("No server movement check was measured in Arsenal. Other games "
+	.. "here kicked for warping - keep it short and out of sight.")
+
+--------------------------------------------------------------------------------
+-- WORLD page
+--------------------------------------------------------------------------------
+
+local worldPage = win:Page("WORLD", UI.icon.map)
+
+local visCard = worldPage:Card("VISUALS", 1):Accent()
+visCard:Toggle("Fullbright", CONFIG.fullbright, function(v) CONFIG.fullbright = v end,
+	"every corner lit, no shadows", UI.theme.good)
+visCard:Toggle("No fog", CONFIG.noFog, function(v) CONFIG.noFog = v end)
+visCard:Toggle("Custom field of view", CONFIG.fovOn, function(v) CONFIG.fovOn = v end,
+	"off while aiming down sights, so the scope zoom still works")
+visCard:Slider("Field of view", 60, 120, CONFIG.fovValue, function(v) CONFIG.fovValue = v end)
+
+local miscCard = worldPage:Card("MISC", 2)
+miscCard:Toggle("Anti AFK", CONFIG.antiAfk, function(v) CONFIG.antiAfk = v end,
+	"answers Roblox's two-minute idle check")
+
+-- the four readouts above, on their own slower loop
+task.spawn(function()
+	while _G.__ARSENAL == GEN do
+		pcall(function()
+			saOut:set({
+				"  target   " .. tostring(STATE.saTarget),
+				string.format("  shots bent %d   landed on target %d", STATE.saBent, STATE.saLanded),
+				"  hooks    " .. tostring(STATE.hooks),
+				"",
+				"  MEASURED 2026-09-25, live server:",
+				"  3 of 4 bent shots, crosshair 67-181 px",
+				"  off the target, came back as kills",
+				"  (their Deaths +1, your Kills +1).",
+				"  A killcam shows the shot, not a flick.",
+			})
+		end)
+		pcall(function()
+			local gun = heldGun()
+			local fr = gun and gun:FindFirstChild("FireRate")
+			local rt = gun and gun:FindFirstChild("ReloadTime")
+			local st = GAMEREF.state
+			gunOut:set({
+				"  gun      " .. (gun and gun.Name or "-"),
+				string.format("  fire rate %s   reload %s",
+					fr and string.format("%.3fs", fr.Value) or "-",
+					rt and string.format("%.2fs", rt.Value) or "-"),
+				"  ammo     " .. tostring(st and rawget(st, "ammocount") or "-"),
+				"  hooks    " .. tostring(STATE.hooks),
+				"",
+				"  no recoil / no spread: client only, real",
+				"  rapid fire / ammo / reload: faster on your",
+				"  client, what the server credits: unmeasured",
+			})
+		end)
+		task.wait(0.4)
+	end
+end)
+end -- new pages
+
+--------------------------------------------------------------------------------
 -- MATCH page
 --------------------------------------------------------------------------------
 
@@ -2616,8 +3370,8 @@ task.spawn(function()
 					line = string.format(" %-2d %-15s %-4s %-9s %-5s %d/%d%s",
 						lvl,
 						p.Name:sub(1, 15),
-						char and (math.floor(hum.Health) .. "") or "DEAD",
-						weaponForLevel(lvl):sub(1, 9),
+						char and (math.floor(hpOf(p, hum)) .. "") or "DEAD",
+						(toolOf(p) ~= "" and toolOf(p) or weaponForLevel(lvl)):sub(1, 9),
 						dist and (dist .. "m") or "-",
 						kills, streak,
 						(lvl == topLvl and lvl > 0) and "  <<" or ""),
@@ -2814,6 +3568,8 @@ _G.__ARSENAL_DBG = {
 	clearChams = clearChams, note = note, pv = pv,
 	TOUCH = TOUCH, screenHeld = screenHeld, reachable = reachable,
 	hotkeyHeld = hotkeyHeld, aimActive = aimActive, trigActive = trigActive,
+	hpOf = hpOf, toolOf = toolOf, heldName = heldName, EXT = EXT,
+	mouseDown = function() return mouseDown end,
 }
 
 if TOUCH then

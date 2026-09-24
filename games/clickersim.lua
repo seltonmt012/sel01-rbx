@@ -69,8 +69,6 @@ local CONFIG = {
     clickGap      = 0.1,    -- the game's own click interval is 0.096
     eggBias       = 1.5,    -- eggs are preferred by this factor over rebirths
     keepPets      = 50,     -- purge weak pets once the inventory holds this many
-    eggRange      = 400,    -- only pads this close (horizontal studs) ...
-    levelBand     = 60,     -- ... and on the same level are considered
     eggWait       = 60,     -- an egg may cost at most this many seconds of income
                             -- beyond the balance, or it is not a candidate
     minChance     = 0.01,   -- pets rarer than this are a lottery, not value
@@ -89,7 +87,7 @@ local STATE = {
     bestEgg = "-", eggGain = 0, eggCost = 0,
     hatched = 0, deleted = 0, rebirthsDone = 0, claimed = 0, gemBuys = 0,
     lastBuy = "-", island = "-", nextIsland = "-", nextIslandCost = 0, islandsBought = 0,
-    milestones = 0,
+    milestones = 0, padMethod = "-",
 }
 
 local function note(fmt, ...)
@@ -376,6 +374,40 @@ local function maxHatch(name)
     return (ok and tonumber(n)) and math.max(1, math.floor(n)) or 1
 end
 
+-- Which island a pad belongs to. The Directory does not say (no Island field
+-- on any egg), but the islands are stacked at least ~700 studs apart
+-- (Spawn 166, Winter 921, Forest 2145 ... Hell 17187), so the island whose
+-- height is nearest to the pad's is its island. That holds wherever the
+-- game's teleport happens to set the body down, which a "within 60 studs of
+-- the body" test did not.
+local islandHeights
+
+local function buildIslandHeights()
+    local list = {}
+    local folder = workspace:FindFirstChild("_MAP") and workspace._MAP:FindFirstChild("Islands")
+    if not folder then return list end
+    for _, isl in ipairs(folder:GetChildren()) do
+        local ref = isl:FindFirstChild("Hitbox")
+        ref = ref and ref:FindFirstChildWhichIsA("BasePart", true)
+        if not ref then
+            local inter = isl:FindFirstChild("Interact")
+            ref = inter and inter:FindFirstChildWhichIsA("BasePart", true)
+        end
+        if ref then list[#list + 1] = { id = isl.Name, y = ref.Position.Y } end
+    end
+    return list
+end
+
+local function islandOfY(y)
+    if not islandHeights or #islandHeights == 0 then islandHeights = buildIslandHeights() end
+    local best, bestD
+    for _, i in ipairs(islandHeights) do
+        local dd = math.abs(i.y - y)
+        if not bestD or dd < bestD then best, bestD = i.id, dd end
+    end
+    return best
+end
+
 -- Value of an egg = expected rise of the team's summed Clicks stat per hatch,
 -- i.e. sum over the pool of chance * how far that pet beats the weakest seat.
 --
@@ -388,8 +420,9 @@ local function eggList(team)
     local out = {}
     local hrp = root()
     local folder = eggFolder()
-    if not (hrp and folder and team) then return out end
-    local here = hrp.Position
+    local d = data()
+    if not (hrp and folder and team and d) then return out end
+    local island = d.CurrentIsland or islandOfY(hrp.Position.Y)
     local reach = cur("Clicks") + math.max(0, STATE.rate) * CONFIG.eggWait
     for _, m in ipairs(folder:GetChildren()) do
         local e = Directory.Eggs[m.Name]
@@ -397,9 +430,7 @@ local function eggList(team)
             and not isPaidEgg(m.Name) and (eggBackoff[m.Name] or 0) < os.clock() then
             local okp, pos = pcall(function() return m:GetPivot().Position end)
             if okp and pos then
-                local dy = math.abs(pos.Y - here.Y)
-                local dxz = (Vector3.new(pos.X, 0, pos.Z) - Vector3.new(here.X, 0, here.Z)).Magnitude
-                if dy <= CONFIG.levelBand and dxz <= CONFIG.eggRange then
+                if islandOfY(pos.Y) == island then
                     local cost = eggCost(m.Name, e.Info)
                     if cost <= reach then
                         local W, gain = 0, 0
@@ -444,6 +475,110 @@ local function waitUiFree(cap)
     return uiLocks() == 0
 end
 
+-- Getting to a pad, measured on every unlocked island. Six of seven were a
+-- plain walk (2-6s). On Volcano the game's teleport sets the body down 160
+-- studs away with the ROBUX egg's podium square on the line, so the walk
+-- stalls against it - and PathfindingService:ComputeAsync never returned
+-- there at all (it parked the bridge for over a minute), which inside the
+-- decision loop is a farm that silently stops. So, cheapest first:
+--   1. walk straight at the near side of the pad
+--   2. walk a detour past the middle of the line, left then right
+--   3. pathfinding, computed in its own thread behind a 3s wall clock
+--   4. last resort: raised hops of at most 40 studs, only within 250 studs -
+--      never a long warp, repeated 2000-stud warps froze the session once
+local PathfindingService = game:GetService("PathfindingService")
+-- 5, not 12: at 12 the walk stopped 10-15 studs from the pad, and the hatch
+-- is only measured working from ~7 (the spot beside the pad)
+local REACHED = 5
+
+local function walkTo(hum, hrp, target, cap)
+    hum:MoveTo(target)
+    local t = 0
+    while t < cap and (hrp.Position - target).Magnitude > REACHED do
+        task.wait(0.2)
+        t = t + 0.2
+    end
+    return (hrp.Position - target).Magnitude <= REACHED
+end
+
+local function flatUnit(v)
+    local f = Vector3.new(v.X, 0, v.Z)
+    return f.Magnitude > 0.5 and f.Unit or Vector3.new(0, 0, 1)
+end
+
+-- the side of the pad facing the body, not a fixed offset: on Volcano "+6 Z"
+-- was the far side of the pad
+local function padSpot(padPos, from)
+    return padPos + flatUnit(from - padPos) * 6 + Vector3.new(0, 3, 0)
+end
+
+local function computePath(from, to)
+    local done, path = false, nil
+    task.spawn(function()
+        pcall(function()
+            local p = PathfindingService:CreatePath({ AgentRadius = 2, AgentHeight = 5, AgentCanJump = true })
+            p:ComputeAsync(from, to)
+            path = p
+        end)
+        done = true
+    end)
+    local t = 0
+    while not done and t < 3 do
+        task.wait(0.1)
+        t = t + 0.1
+    end
+    if done and path and path.Status == Enum.PathStatus.Success then return path end
+    return nil
+end
+
+local function goToPad(padPos)
+    local hrp = root()
+    local hum = hrp and hrp.Parent and hrp.Parent:FindFirstChildOfClass("Humanoid")
+    if not (hrp and hum) then return false, "no body" end
+    local spot = padSpot(padPos, hrp.Position)
+    if (hrp.Position - spot).Magnitude <= REACHED then return true, "already there" end
+
+    -- 1
+    if walkTo(hum, hrp, spot, 6) then return true, "walked" end
+
+    -- 2
+    local from = hrp.Position
+    local dir = flatUnit(spot - from)
+    local perp = Vector3.new(-dir.Z, 0, dir.X)
+    local mid = from:Lerp(spot, 0.5)
+    for _, side in ipairs({ 1, -1 }) do
+        local via = Vector3.new(mid.X, from.Y, mid.Z) + perp * side * 30
+        walkTo(hum, hrp, via, 4)
+        spot = padSpot(padPos, hrp.Position)
+        if walkTo(hum, hrp, spot, 5) then return true, "detour" end
+    end
+
+    -- 3
+    local path = computePath(hrp.Position, spot)
+    if path then
+        local t0 = os.clock()
+        for _, wp in ipairs(path:GetWaypoints()) do
+            if os.clock() - t0 > 15 then break end
+            if wp.Action == Enum.PathWaypointAction.Jump then hum.Jump = true end
+            walkTo(hum, hrp, wp.Position, 2)
+            if (hrp.Position - spot).Magnitude <= REACHED then return true, "pathfinding" end
+        end
+    end
+
+    -- 4
+    local dist = (hrp.Position - spot).Magnitude
+    if dist > 250 then return false, string.format("%.0f studs away", dist) end
+    local start = hrp.Position
+    local steps = math.max(1, math.ceil(dist / 40))
+    for i = 1, steps do
+        local p = start:Lerp(spot, i / steps)
+        hrp.CFrame = CFrame.new(i < steps and (p + Vector3.new(0, 10, 0)) or p)
+        task.wait(0.3)
+    end
+    task.wait(0.8)
+    return (hrp.Position - spot).Magnitude <= REACHED + 4, "short hops"
+end
+
 local function hatch(egg)
     local hrp = root()
     if not hrp then return false end
@@ -462,29 +597,16 @@ local function hatch(egg)
         end
     end
 
-    -- Stand beside the pad. The body WALKS there (Humanoid:MoveTo) - the game
-    -- validates positions and big warps froze the session once. Only a short
-    -- hop is allowed as a fallback when the walk gets stuck. The body then
-    -- stays at the pad, so repeated hatches never move it again.
-    local spot = egg.pos + Vector3.new(0, 3, 6)
-    if (hrp.Position - spot).Magnitude > 14 then
-        local hum = hrp.Parent and hrp.Parent:FindFirstChildOfClass("Humanoid")
-        if hum then
-            hum:MoveTo(spot)
-            local w = 0
-            while w < 10 and (hrp.Position - spot).Magnitude > 12 do
-                task.wait(0.25)
-                w = w + 0.25
-            end
+    -- Stand beside the pad; the body then stays there, so repeated hatches
+    -- never move it again.
+    if (hrp.Position - padSpot(egg.pos, hrp.Position)).Magnitude > 14 then
+        local ok, how = goToPad(egg.pos)
+        if not ok then
+            eggBackoff[egg.name] = os.clock() + 30
+            note("%s: pad not reached (%s)", egg.name, how)
+            return false
         end
-        if (hrp.Position - spot).Magnitude > 12 then
-            if (hrp.Position - spot).Magnitude > 150 then
-                eggBackoff[egg.name] = os.clock() + 60
-                note("%s: pad not reachable on foot", egg.name)
-                return false
-            end
-            hrp.CFrame = CFrame.new(spot)
-        end
+        STATE.padMethod = how
         task.wait(1.0)
     end
 
@@ -1045,7 +1167,7 @@ _G.__CLICKSIM_DBG = {
     teamInfo = teamInfo, eggList = eggList, hatch = hatch, purge = purge,
     equipBest = equipBest, rebirthPick = rebirthPick, doRebirth = doRebirth,
     rebirthCost = rebirthCost, claimQuests = claimQuests, spendGems = spendGems,
-    claimMilestones = claimMilestones,
+    claimMilestones = claimMilestones, goToPad = goToPad, islandOfY = islandOfY,
     ensureAutoclicker = ensureAutoclicker, decide = decide,
     islandInfo = islandInfo, goBestIsland = goBestIsland, buyIsland = buyIsland,
     nextRebirthButton = nextRebirthButton, ownsRebirthButton = ownsRebirthButton,
