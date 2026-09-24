@@ -74,8 +74,12 @@ local CONFIG = {
     eggWait       = 60,     -- an egg may cost at most this many seconds of income
                             -- beyond the balance, or it is not a candidate
     minChance     = 0.01,   -- pets rarer than this are a lottery, not value
-    islandWait    = 120,    -- save for the next island once it is this many
-                            -- seconds of income away
+    islandSave    = 600,    -- save for the next island once it is this many
+                            -- seconds of income away. 120 was too short: at
+                            -- Sakura the rebirths reset the balance every
+                            -- second and Volcano (15Q at 3.3T/s) never came
+                            -- inside the window, so it was never saved for
+    hatchPause    = 0.5,    -- pause after a hatch animation so the HUD shows
 }
 
 local STATE = {
@@ -129,6 +133,7 @@ local EggsFrontend  = need(Client:WaitForChild("EggsFrontend", 10))
 local Mastery       = need(Client:WaitForChild("MasteryFrontend", 10))
 local PetsFrontend  = need(Client:WaitForChild("Pets", 10))
 local CustomGUI     = need(Client:WaitForChild("CustomGUI", 10))
+local Settings      = need(Client:WaitForChild("Settings", 10))
 local AchUtil       = Library:FindFirstChild("Utils")
     and need(Library.Utils:FindFirstChild("AchievementsUtil"), 5)
 local Directory     = need(Library:WaitForChild("Directory", 10))
@@ -418,9 +423,33 @@ local function eggList(team)
     return out
 end
 
+-- Every OpenEgg request takes Settings.ShowUI:Lock() and the HUD stays hidden
+-- until that request's animation has played. Firing a hatch every second while
+-- one animation lasts several queued them up: the lock count sat at 2-4 for a
+-- full 20s sample and the player saw the HUD come back "after a long time".
+-- So the next hatch waits for the lock to be free - hatching runs at the
+-- speed of the animation, like a player's would.
+local function uiLocks()
+    if not (Settings and Settings.ShowUI) then return 0 end
+    local ok, n = pcall(function() return Settings.ShowUI._count end)
+    return ok and tonumber(n) or 0
+end
+
+local function waitUiFree(cap)
+    local t = 0
+    while uiLocks() > 0 and t < cap do
+        task.wait(0.2)
+        t = t + 0.2
+    end
+    return uiLocks() == 0
+end
+
 local function hatch(egg)
     local hrp = root()
     if not hrp then return false end
+    -- something else may hold the lock (a menu the player opened); never
+    -- stall on it for good
+    waitUiFree(8)
     local count = math.min(maxHatch(egg.name), math.floor(cur("Clicks") / egg.cost))
     if count < 1 then return false end
 
@@ -483,7 +512,9 @@ local function hatch(egg)
     end
     STATE.hatched = STATE.hatched + got
     note("hatched %d x %s", got, egg.name)
+    waitUiFree(10)
     if CONFIG.autoEquip then equipBest() end
+    task.wait(CONFIG.hatchPause)
     return true
 end
 
@@ -867,7 +898,7 @@ end
 -- the button price and burned 1.3M of a 1.5M balance on a 10-rebirth button.
 --
 -- Islands come first of all: a gate is permanent, raises every click and
--- opens the next eggs, so once one is within islandWait seconds of income
+-- opens the next eggs, so once one is within islandSave seconds of income
 -- nothing else may touch the balance.
 ----------------------------------------------------------------------------
 
@@ -885,8 +916,9 @@ local function islandStep()
             STATE.phase = "unlocking " .. info.next.id
             if buyIsland(info.next) and CONFIG.bestIsland then goBestIsland() end
             return true
-        elseif info.next.cost <= clicks + math.max(0, STATE.rate) * CONFIG.islandWait then
-            STATE.phase = "saving for " .. info.next.id
+        elseif info.next.cost <= clicks + math.max(0, STATE.rate) * CONFIG.islandSave then
+            local eta = math.floor((info.next.cost - clicks) / math.max(1, STATE.rate))
+            STATE.phase = string.format("saving for %s (~%ds)", info.next.id, eta)
             if CONFIG.bestIsland then goBestIsland(info) end
             return true
         end
@@ -1071,6 +1103,9 @@ end)
 tuning:Slider("Keep pets up to", 10, 190, CONFIG.keepPets, function(v)
     CONFIG.keepPets = math.floor(v)
 end)
+tuning:Slider("Save for island (min)", 1, 30, CONFIG.islandSave / 60, function(v)
+    CONFIG.islandSave = math.floor(v) * 60
+end)
 tuning:Button("Equip best now", function() task.spawn(equipBest) end)
 tuning:Button("Delete weak pets now", function() task.spawn(function() purge(true) end) end)
 tuning:Button("Claim quests now", function() task.spawn(claimQuests) end)
@@ -1109,8 +1144,8 @@ task.spawn(function()
                     abbreviate(STATE.teamSum), abbreviate(STATE.worst), STATE.slots, STATE.pets, STATE.petMax),
                 string.format("  best egg %s   +%.2f per hatch   costs %s",
                     STATE.bestEgg, STATE.eggGain, abbreviate(STATE.eggCost)),
-                string.format("  hatched %d   deleted %d   rebirths %d   quests %d   gem buys %d",
-                    STATE.hatched, STATE.deleted, STATE.rebirthsDone, STATE.claimed, STATE.gemBuys),
+                string.format("  hatched %d   deleted %d   rebirths %d   quests %d   milestones %d   gem buys %d",
+                    STATE.hatched, STATE.deleted, STATE.rebirthsDone, STATE.claimed, STATE.milestones, STATE.gemBuys),
                 "NOTE",
                 "  " .. tostring(STATE.note),
             })

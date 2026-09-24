@@ -908,6 +908,30 @@ local function raceScore(classId, level)
 	return s
 end
 
+-- A roll fired from here still plays the game's LuckAnim (ShowLuckResultRE),
+-- which ends in OpenScreenMain("Class") and leaves the camera Scriptable - it
+-- assumes the player opened the screen first. ClassGUI.close() then does nothing
+-- because its open-flag was never set, so this repeats close() by hand.
+local function closeRaceUI()
+	pcall(function()
+		local UIC = require(ReplicatedStorage.Utils.UIController)
+		local LPU = require(ReplicatedStorage.Utils.LocalPlayerUtils)
+		local Cam = require(ReplicatedStorage.Utils.CameraUtils)
+		local pg = plr:FindFirstChild("PlayerGui")
+		UIC.CloseScreenMain("Class")
+		local sm = pg and pg:FindFirstChild("ScreenMain")
+		local cls = sm and sm:FindFirstChild("Class")
+		local info = cls and cls:FindFirstChild("Info")
+		if info then info.Visible = false end
+		LPU.EnablePlrAction(true)
+		for _, name in ipairs({ "Hud", "Main", "UIVFX" }) do
+			local g = pg and pg:FindFirstChild(name)
+			if g then g.Enabled = true end
+		end
+		Cam.BackToPlr(0)
+	end)
+end
+
 local function racePass()
 	if not ClassData then return end
 	local d = data()
@@ -971,7 +995,9 @@ local function racePass()
 		if not target then return end
 
 		pcall(function() ClassData.LuckOnce(target.slot) end)
-		task.wait(2)
+		-- the result animation runs ~3s (2.72s camera tween plus the spin)
+		task.wait(4)
+		closeRaceUI()
 		local d2 = data()
 		local cl2 = d2 and d2.Class
 		local left = cl2 and tonumber(cl2.luckTimes) or rolls
@@ -1007,7 +1033,7 @@ _G.__LOOTTOFORGE_DBG = {
 	rebirthPass = rebirthPass, unstuck = unstuck, pin = pin, unpin = unpin,
 	indexPass = indexPass, towerRun = towerRun, dailyTicketPass = dailyTicketPass,
 	enchantPass = enchantPass, gearValue = gearValue, bestNormal = bestNormal,
-	racePass = racePass, raceScore = raceScore,
+	racePass = racePass, raceScore = raceScore, closeRaceUI = closeRaceUI,
 }
 
 --------------------------------------------------------------------------------

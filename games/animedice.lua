@@ -101,7 +101,8 @@ local CONFIG = {
 	autoFuse    = true,   -- fuse spare units three at a time into rarer ones
 	fuseShare   = 0.35,   -- share of money one fusion may cost
 	autoTower   = true,   -- farm a tower for boosts, gems and trait rerolls
-	tower       = "Dragon Tower",
+	tower       = "Auto (best)",  -- or a fixed tower name
+	towerBoosts = true,   -- fire Damage boosts right before a tower run
 	autoDice    = true,   -- buy the best affordable dice we do not own, equip best
 	autoUpgrade = true,   -- buy the cheapest affordable world-pad upgrade tier
 	autoRebirth = true,   -- rebirth once money reaches nextCost x factor
@@ -114,8 +115,8 @@ local CONFIG = {
 	autoClaim   = true,   -- claim offline / daily / group rewards
 }
 
--- Which world-pad upgrade lines auto-buy. Damage/Health are tower-only and
--- Walkspeed is irrelevant to an idle build, so they are left out on purpose.
+-- Which world-pad upgrade lines auto-buy. Damage/Health join them while the tower
+-- is farmed (TOWER_CATS); Walkspeed is irrelevant to an idle build.
 local UPGRADE_CATS = { "Money", "Luck", "Fortune", "Roll Speed", "Unit Storage", "Sell" }
 local INV_CAP_BASE = 100   -- Unit Storage buff default; each owned tier adds +5
 
@@ -133,6 +134,7 @@ local STATE = {
 	gradeRolls = 0, traitRolls = 0, boostsUsed = 0, luck = 0,
 	towerRuns = 0, towerFloors = 0, towerBest = 0, towerFloor = 0, towerDrops = 0,
 	fused = 0, fuseLast = "-", fuseBestChance = 0,
+	towerPick = "-", towerPredict = 0, towerRate = 0,
 	codesDone = 0, claims = 0,
 	phase = "idle", note = "-", uiOwner = "-",
 }
@@ -344,10 +346,19 @@ local function nextTier(cat)
 end
 
 -- Across the enabled categories, the cheapest next tier we can pay for now.
+-- Damage/Health lines only matter to the tower, so they join while it is farmed.
+local TOWER_CATS = { "Damage", "Health" }
+
 local function bestUpgrade()
 	local d = data()
 	local pick
-	for _, cat in ipairs(UPGRADE_CATS) do
+	local cats = UPGRADE_CATS
+	if CONFIG.autoTower then
+		cats = {}
+		for _, c in ipairs(UPGRADE_CATS) do cats[#cats + 1] = c end
+		for _, c in ipairs(TOWER_CATS) do cats[#cats + 1] = c end
+	end
+	for _, cat in ipairs(cats) do
 		local up = nextTier(cat)
 		if up and d.Money >= up.price then
 			if not pick or up.price < pick.price then pick = up end
@@ -681,6 +692,135 @@ end
 -- the player still has a run, and CancelTower does NOT end a run - it only queues
 -- the ending, which the server carries out on the next CompleteTowerFloor. A run
 -- that is cancelled and then left alone therefore blocks every new run forever.
+-- Tower choice by simulation. TowerClass (server, ships to the client) is fully
+-- deterministic except for the drop rolls: the team fights in order, a member
+-- hits (damage), and if the enemy survives it hits back (enemyDamage); health
+-- carries across floors and a fallen member hands the SAME enemy to the next.
+-- A one-hit kill costs the member nothing. Member damage/health =
+-- damage/health(attributes) x Damage/Health Multiplier - level and grade play no
+-- part. Nothing is saved between runs and no tower is locked, so the only
+-- question is which tower pays the most per second for THIS team. Drop tiers are
+-- cumulative: from its minFloor on, every tier rolls on every floor.
+local TOWER_WAIT = { initial = 0.76, transition = 0.38, hit = 0.62, done = 0.24, fall = 0.32 }
+
+-- Rough worth of a drop in "luck-seconds": a boost is worth (mult - 1) x
+-- duration, weighted by what that buff does for us. Luck decides rarity, so it
+-- leads; gems and trait rerolls feed the income rerolls.
+local DROP_WEIGHT = { Luck = 1, ["Money Multiplier"] = 0.5, ["Damage Multiplier"] = 0.15 }
+local function dropValue(name)
+	if name == "Gems" then return 40 end
+	if name == "Trait Reroll" then return 25 end
+	local def = BOOSTS[name]
+	if type(def) ~= "table" or type(def.buffs) ~= "table" then return 0 end
+	local v = 0
+	for buff, b in pairs(def.buffs) do
+		local w = DROP_WEIGHT[buff] or 0
+		v = v + w * math.max(0, (tonumber(b.amount) or 1) - 1) * (tonumber(def.duration) or 0)
+	end
+	return v
+end
+
+local function towerTeam()
+	local d = data()
+	local dmgMul = tonumber(select(2, pcall(BuffController.GetBuff, "Damage Multiplier"))) or 1
+	local hpMul = tonumber(select(2, pcall(BuffController.GetBuff, "Health Multiplier"))) or 1
+	local team = {}
+	for i = 1, 4 do
+		local id = d.TowerTeam and d.TowerTeam[i]
+		local u = id and d.Inventory[id]
+		local e = u and UnitConfig.entries[u.name]
+		if e then
+			local a = u.attributes or {}
+			team[#team + 1] = {
+				dmg = (tonumber(select(2, pcall(e.damage, a))) or 0) * dmgMul,
+				hp = (tonumber(select(2, pcall(e.health, a))) or 0) * hpMul,
+			}
+		end
+	end
+	return team
+end
+
+-- Returns floors cleared, seconds the server will make us wait, expected value.
+local function simulateTower(tw, team)
+	if #team == 0 then return 0, 0, 0 end
+	local members = {}
+	for i, m in ipairs(team) do members[i] = { dmg = m.dmg, hp = m.hp } end
+	local cap = tw.maxFloors or 300          -- Infinity has none
+	local floor, cur, secs, value = 1, 1, 0, 0
+	while floor <= cap do
+		local enemy = tonumber(select(2, pcall(tw.enemyHealth, floor))) or math.huge
+		local hit = tonumber(select(2, pcall(tw.enemyDamage, floor))) or math.huge
+		secs = secs + (floor == 1 and TOWER_WAIT.initial or TOWER_WAIT.transition)
+		local cleared = false
+		for _ = 1, 2000 do
+			local m = members[cur]
+			if not m then break end
+			enemy = enemy - m.dmg
+			secs = secs + TOWER_WAIT.hit
+			if enemy <= 0 then cleared = true; break end
+			m.hp = m.hp - hit
+			secs = secs + TOWER_WAIT.hit
+			if m.hp <= 0 then
+				cur = cur + 1
+				secs = secs + TOWER_WAIT.fall + TOWER_WAIT.transition
+			end
+		end
+		if not cleared then break end
+		secs = secs + TOWER_WAIT.done
+		for _, tier in ipairs(tw.drops or {}) do
+			if (tier.minFloor or 1) <= floor then
+				for _, en in ipairs(tier.entries or {}) do
+					value = value + (tonumber(en.chance) or 0) / 100
+						* (tonumber(en.amount) or 1) * dropValue(en.name)
+				end
+			end
+		end
+		floor = floor + 1
+	end
+	return floor - 1, secs, value
+end
+
+-- The tower with the best expected value per second for the current team.
+local function pickTower()
+	if CONFIG.tower ~= "Auto (best)" then return CONFIG.tower end
+	local team = towerTeam()
+	local all = select(2, pcall(TowersConfig.GetAll))
+	local best, bestRate, bestFloors = nil, -1, 0
+	if type(all) == "table" then
+		for name, tw in pairs(all) do
+			local floors, secs, value = simulateTower(tw, team)
+			local rate = secs > 0 and value / (secs + 4) or 0     -- +4s run overhead
+			if floors > 0 and rate > bestRate then
+				best, bestRate, bestFloors = name, rate, floors
+			end
+		end
+	end
+	STATE.towerPick = best or "Dragon Tower"
+	STATE.towerPredict = bestFloors
+	STATE.towerRate = bestRate
+	return STATE.towerPick
+end
+
+-- Damage boosts only help inside the tower, so they are fired at the start of a
+-- run, one per category, never over a running one of the same category.
+local function useTowerBoosts()
+	if not (CONFIG.towerBoosts and R.BoostUse) then return end
+	local d = data()
+	for key, item in pairs(d.Inventory) do
+		local def = type(key) == "string" and BOOSTS[key]
+		if type(def) == "table" and type(def.buffs) == "table" and def.buffs["Damage Multiplier"]
+			and (tonumber(item.amount) or 0) >= 1 then
+			local cat = def.category or key
+			if (boostUntil[cat] or 0) < os.clock() then
+				R.BoostUse:FireServer(key)
+				boostUntil[cat] = os.clock() + (tonumber(def.duration) or 120) + 1
+				STATE.boostsUsed = STATE.boostsUsed + 1
+				task.wait(0.3)
+			end
+		end
+	end
+end
+
 local function drainTower()
 	if not R.CancelTower then return end
 	local okC, queued = pcall(function() return R.CancelTower:InvokeServer() end)
@@ -698,12 +838,18 @@ end
 
 local function towerRun()
 	if not (R.PlayTower and R.CompleteFloor) then return end
-	if R.BestTowerTeam then R.BestTowerTeam:FireServer(); task.wait(0.5) end
-	local ok, started = pcall(function() return R.PlayTower:InvokeServer(CONFIG.tower) end)
+	if R.BestTowerTeam then R.BestTowerTeam:FireServer(); task.wait(0.6) end
+	-- Boosts first: the run snapshots Damage Multiplier at PlayTower, so the
+	-- simulation must see the same multiplier or it undershoots (56 predicted vs
+	-- ~100 reached before this order was fixed).
+	useTowerBoosts()
+	task.wait(0.4)
+	local tower = pickTower()
+	local ok, started = pcall(function() return R.PlayTower:InvokeServer(tower) end)
 	if not (ok and started) then
 		drainTower()                                  -- a stale run is in the way
 		task.wait(3.2)                                -- PlayTower's 3s debounce
-		ok, started = pcall(function() return R.PlayTower:InvokeServer(CONFIG.tower) end)
+		ok, started = pcall(function() return R.PlayTower:InvokeServer(tower) end)
 		if not (ok and started) then STATE.note = "tower refused"; return end
 	end
 	STATE.towerRuns = STATE.towerRuns + 1
@@ -958,6 +1104,7 @@ _G.__ANIMEDICE_DBG = {
 	doUpgrade = doUpgrade, sellJunk = sellJunk, levelSlots = levelSlots,
 	doRerolls = doRerolls, useBoosts = useBoosts, towerRun = towerRun, drainTower = drainTower,
 	doFuse = doFuse, savingForLuck = savingForLuck, placeBest = placeBest,
+	pickTower = pickTower, simulateTower = simulateTower, towerTeam = towerTeam,
 	baseIncome = baseIncome, curIncome = curIncome, levelPayback = levelPayback,
 	nextLuckGoal = nextLuckGoal, placedUnits = placedUnits,
 	doRebirth = doRebirth, doLevel = doLevel, doCodes = doCodes,
@@ -1090,9 +1237,12 @@ rrCard:Button("Reroll now", function() task.spawn(doRerolls) end)
 local towerCard = boostPage:Card("TOWER", 2):Accent()
 toggle(towerCard, "Auto Tower", "autoTower",
 	"skips the fight animation; drops boosts, gems, trait rerolls")
-towerCard:Dropdown("Tower", { "Dragon Tower", "Cursed Tower", "Pirate Tower",
+towerCard:Dropdown("Tower", { "Auto (best)", "Dragon Tower", "Cursed Tower", "Pirate Tower",
 	"Hidden Leaf Tower", "Slayer Tower", "Infinity Tower" }, CONFIG.tower,
 	function(choice) CONFIG.tower = choice end)
+toggle(towerCard, "Damage boosts on start", "towerBoosts",
+	"fires owned Damage boosts right before each run")
+local towerPickLabel = towerCard:Label("pick -")
 local towerLabel = towerCard:Label("tower -")
 towerCard:Button("Run tower now", function() task.spawn(towerRun) end)
 
@@ -1282,6 +1432,8 @@ task.spawn(function()
 		bagLabel:set(string.format("bag: %d / %d", STATE.invCount, STATE.invCap))
 		rrLabel:set(string.format("gems %d   trait rerolls %d   rolls %d/%d",
 			itemAmount("Gems"), itemAmount("Trait Reroll"), STATE.gradeRolls, STATE.traitRolls))
+		towerPickLabel:set(string.format("%s   predicted floor %d",
+			STATE.towerPick, STATE.towerPredict))
 		towerLabel:set(string.format("floor %d   best %d   runs %d   drops %d",
 			STATE.towerFloor, STATE.towerBest, STATE.towerRuns, STATE.towerDrops))
 		luckLabel:set(string.format("roll luck %s   boosts used %d", fmt(STATE.luck), STATE.boostsUsed))

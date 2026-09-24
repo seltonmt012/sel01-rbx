@@ -8,7 +8,7 @@
 -- they are - they keep passing "Auto rebirth" and only this file decides what
 -- the player reads.
 --
--- 2249 entries.
+-- 2254 entries.
 
 return {
 	["$%s   %s/s   slots %d/%d   R%d   endurance %s"] = "%s$   %s/с   слоты %d/%d   R%d   выносливость %s",
@@ -364,6 +364,7 @@ return {
 	["Claim free rewards"] = "Забирать бесплатные награды",
 	["Claim group reward"] = "Забрать награду группы",
 	["Claim index"] = "Забирать индекс",
+	["Claim milestones"] = "Забирать вехи",
 	["Claim now"] = "Забрать сейчас",
 	["Claim offline earnings"] = "Забирать офлайн-доход",
 	["Claim offline money"] = "Забирать офлайн-деньги",
@@ -435,6 +436,7 @@ return {
 	["Daily spin"] = "Ежедневный спин",
 	["Daily ticket"] = "Ежедневный билет",
 	["Damage before Wins, never more than 20% of the balance"] = "Урон важнее побед, не больше 20% баланса",
+	["Damage boosts on start"] = "Бусты урона при старте",
 	["Damage first"] = "Сначала урон",
 	["Damage first, then luck and summoner"] = "Сначала урон, потом удача и призыватель",
 	["Damage is a flat 100 and every character has 100 HP, so the head pays nothing extra. BodyHitbox is 4.8x4.6x2.2 against the head's 3.2 cube - the body is simply the bigger target for the same kill."] = "Урон ровно 100, а у всех 100 HP, поэтому голова не даёт ничего сверх. BodyHitbox 4.8x4.6x2.2 против куба 3.2 у головы - тело просто больше при том же убийстве.",
@@ -1155,6 +1157,7 @@ return {
 	["STOCK"] = "АССОРТИМЕНТ",
 	["STOP"] = "СТОП",
 	["SURVIVAL"] = "ВЫЖИВАНИЕ",
+	["Save for island (min)"] = "Копить на остров (мин)",
 	["Scale by hand"] = "Масштаб вручную",
 	["Scan hops"] = "Прыжки сканирования",
 	["Scan the field"] = "Сканировать поле",
@@ -1606,6 +1609,7 @@ return {
 	["chest"] = "сундук",
 	["chests"] = "сундуки",
 	["claims a headshot on the best target through the game's own hit remote"] = "заявляет хедшот по лучшей цели через игровой hit-remote",
+	["claims every reached stage in the Milestones panel"] = "Забирает каждую достигнутую ступень в окне вех.",
 	["claims the deepest finished stage; a claim resets the run"] = "забирает глубочайший готовый этап; сбор сбрасывает забег",
 	["claims the free gnome as soon as its timer is up"] = "забирает бесплатного гнома, как только истечёт таймер",
 	["claims tokens (free) and buys Rebirth +1: flat 500, unlimited, compounding"] = "собирает токены (бесплатно) и покупает Rebirth +1: ровно 500, без лимита",
@@ -1689,6 +1693,7 @@ return {
 	["fires only when the ray lands on HeadHB or Head"] = "стреляет, только если луч попал в HeadHB или Head",
 	["fires only when the ray lands on the Head part"] = "стреляет только когда луч попал в часть Head",
 	["fires only when the ray lands on the head"] = "стреляет только когда луч попадает в голову",
+	["fires owned Damage boosts right before each run"] = "Включает имеющиеся бусты урона перед каждым забегом.",
 	["fires the Neon (Robux) roll type, which costs nothing - up to x20"] = "запускает Neon-ролл (Robux), который ничего не стоит - до x20",
 	["fires the click at the game's own rate, 10 a second"] = "Кликает с темпом самой игры, 10 раз в секунду.",
 	["fires the slot's PlacePrompt - it reports disabled and works anyway"] = "вызывает PlacePrompt слота - пишет disabled и всё равно работает",

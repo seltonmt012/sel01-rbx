@@ -8,7 +8,7 @@
 -- they are - they keep passing "Auto rebirth" and only this file decides what
 -- the player reads.
 --
--- 2249 entries.
+-- 2254 entries.
 
 return {
 	["$%s   %s/s   slots %d/%d   R%d   endurance %s"] = "%s$   %s/s   Plaetze %d/%d   R%d   Ausdauer %s",
@@ -321,6 +321,7 @@ return {
 	["Claim free rewards"] = "Gratis-Belohnungen holen",
 	["Claim group reward"] = "Gruppenbelohnung holen",
 	["Claim index"] = "Index abholen",
+	["Claim milestones"] = "Milestones abholen",
 	["Claim now"] = "Jetzt abholen",
 	["Claim offline earnings"] = "Offline-Einnahmen abholen",
 	["Claim offline money"] = "Offline-Geld abholen",
@@ -386,6 +387,7 @@ return {
 	["Daily spin"] = "Tägliches Drehen",
 	["Daily ticket"] = "Tägliches Ticket",
 	["Damage before Wins, never more than 20% of the balance"] = "Schaden vor Wins, nie mehr als 20% des Guthabens",
+	["Damage boosts on start"] = "Damage-Boosts beim Start",
 	["Damage first"] = "Schaden zuerst",
 	["Damage first, then luck and summoner"] = "Schaden zuerst, dann Glück und Beschwörer",
 	["Damage is a flat 100 and every character has 100 HP, so the head pays nothing extra. BodyHitbox is 4.8x4.6x2.2 against the head's 3.2 cube - the body is simply the bigger target for the same kill."] = "Der Schaden ist glatt 100 und jeder Charakter hat 100 HP, der Kopf bringt also nichts extra. BodyHitbox ist 4,8x4,6x2,2 gegen den 3,2er Würfel am Kopf - der Körper ist schlicht das größere Ziel für denselben Kill.",
@@ -1018,6 +1020,7 @@ return {
 	["STATS"] = "WERTE",
 	["STOCK"] = "BESTAND",
 	["STOP"] = "STOPP",
+	["Save for island (min)"] = "Auf Insel sparen (Min)",
 	["Scale by hand"] = "Skalierung von Hand",
 	["Scan hops"] = "Scan-Sprünge",
 	["Scan the field"] = "Feld scannen",
@@ -1431,6 +1434,7 @@ return {
 	["chest"] = "Truhe",
 	["chests"] = "Kisten",
 	["claims a headshot on the best target through the game's own hit remote"] = "claimt einen Kopftreffer auf das beste Ziel über das spieleigene Hit-Remote",
+	["claims every reached stage in the Milestones panel"] = "Holt jede erreichte Stufe im Milestones-Fenster ab.",
 	["claims the deepest finished stage; a claim resets the run"] = "holt die tiefste fertige Stage; ein Claim setzt den Lauf zurück",
 	["claims the free gnome as soon as its timer is up"] = "holt den Gratis-Gnom, sobald sein Timer abgelaufen ist",
 	["claims tokens (free) and buys Rebirth +1: flat 500, unlimited, compounding"] = "holt Tokens (gratis) und kauft Rebirth +1: pauschal 500, unbegrenzt",
@@ -1514,6 +1518,7 @@ return {
 	["fires only when the ray lands on HeadHB or Head"] = "feuert nur wenn der Strahl auf HeadHB oder Head trifft",
 	["fires only when the ray lands on the Head part"] = "feuert nur wenn der Strahl das Kopf-Teil trifft",
 	["fires only when the ray lands on the head"] = "feuert nur, wenn der Ray auf dem Kopf landet",
+	["fires owned Damage boosts right before each run"] = "Zündet vorhandene Damage-Boosts direkt vor jedem Run.",
 	["fires the Neon (Robux) roll type, which costs nothing - up to x20"] = "feuert den Neon-Rolltyp (Robux), der nichts kostet - bis x20",
 	["fires the click at the game's own rate, 10 a second"] = "Klickt im spieleigenen Tempo, 10 Mal pro Sekunde.",
 	["fires the slot's PlacePrompt - it reports disabled and works anyway"] = "feuert den PlacePrompt des Slots - meldet disabled und geht trotzdem",
