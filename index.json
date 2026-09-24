@@ -34,6 +34,17 @@
       "detect": "local rs = game:GetService('ReplicatedStorage') local n = rs:FindFirstChild('Network') local roll = n and n:FindFirstChild('RollService') return roll ~= nil and n:FindFirstChild('DiceShopService') ~= nil and rs:FindFirstChild('Framework') ~= nil"
     },
     {
+      "alias": "clickersim",
+      "name": "[NEW] Clicker Simulator!",
+      "file": "games/clickersim.lua",
+      "places": [
+        134719268825886
+      ],
+      "status": "ok",
+      "note": "Clicks + pets, not a wall game. Remotes are all blank; Library.Client.Network names them (Channel(ch):FireServer(name,...)). Click channel at 0.1s plus the game's own autoclicker (mini upgrade), eggs through OpenEgg.Request beside the pad ranked by team gain per click with the lottery tail cut, EquipBest, DeletePetsBulk for plain low-rarity pets that cannot make the team, rebirth by button index valued against the WHOLE balance (it resets to zero), gem-bought rebirth buttons, island gates bought with clicks and travelled with Portals:TeleportToIsland (never a CFrame warp across islands - that froze a session), quest claims and gem upgrades through the game's own panel buttons. Honeypot channels gJKGFsvsjdhgvsiduzgvu / RNG2Rebirths.R3birth refused by name",
+      "detect": "local rs = game:GetService('ReplicatedStorage') local l = rs:FindFirstChild('Library') if not l then return false end local c = l:FindFirstChild('Client') local d = l:FindFirstChild('Directory') return c ~= nil and d ~= nil and c:FindFirstChild('ClickFrontend') ~= nil and c:FindFirstChild('OpenEgg') ~= nil and d:FindFirstChild('RebirthShop') ~= nil and d:FindFirstChild('ClickSkins') ~= nil"
+    },
+    {
       "alias": "phantomforces",
       "name": "Phantom Forces",
       "file": "games/phantomforces.lua",
@@ -574,7 +585,7 @@
         118805555015549
       ],
       "status": "ok",
-      "note": "FREE. Train by standing in a train area (the game trains by itself; firing TrainOnceRE by hand is UUID-gated at ~6.7/s and a second loop made the server roll power back), clear a stage, collect the ore and RETURN - ExitFightBE(true) fires ClaimedAllOreRE, and only then does the ore exist server side. The deepest stage is the whole game: stage 5 ore forged Train 500, stage 27 ore forged Train 150M. ForgeRF wants ConfigType 'Weapon' (the category, not 'Katana'), at most 4 ore types and at least 4 ore - a wrong payload is not refused, it eats the ore. Coins come from selling the weaker forged weapons (a Train 25M one sold for 5.04M), and buy the OrePack / Train / Luck upgrades. Rebirth at level 25 x (rebirth+1) keeps coins and weapons. bridge spy BREAKS this game (StageFinishedRF stops returning, nothing drops) - the script hooks nothing.",
+      "note": "FREE. Train by standing in a train area (the game trains by itself; firing TrainOnceRE by hand is UUID-gated at ~6.7/s and a second loop made the server roll power back), clear a stage, collect the ore and RETURN - ExitFightBE(true) fires ClaimedAllOreRE, and only then does the ore exist server side. The deepest stage is the whole game: stage 5 ore forged Train 500, stage 27 ore forged Train 150M. ForgeRF wants ConfigType 'Weapon' (the category, not 'Katana'), at most 4 ore types and at least 4 ore - a wrong payload is not refused, it eats the ore. Coins come from selling the weaker forged weapons (a Train 25M one sold for 5.04M), and buy the OrePack / Train / Luck upgrades. Rebirth at level 25 x (rebirth+1) keeps coins and weapons. Every other forge is 'Armor' (a hat is a Train boost, LHat_14 +70%); gear is valued like BalanceUtils does it, including the BestPercent pieces. The index pays EXP for every first weapon/armor/ore (TryClaimIndexExpRF(type,id), then TryClaimLevelRewardRF per rank: 22 entries took rank 6 -> 12). The Frozen Tower (rebirth 2+) runs all 30 rounds on one ticket in 129s for ~25 enchant stones; enchant stones are combat effects (EnchantRE, 5,000 coins). Races are the Class system: LuckOnceRE(slot) rolls the worst slot while rolls are left (0 left = Robux prompt, never fired), the race with the best Train/Luck is worn. bridge spy BREAKS this game (StageFinishedRF stops returning, nothing drops) - the script hooks nothing.",
       "detect": "local rs = game:GetService('ReplicatedStorage') local r = rs:FindFirstChild('Remote') local c = rs:FindFirstChild('CTRL') if not r or not c then return false end local f = r:FindFirstChild('Forge') local t = r:FindFirstChild('Train') return f ~= nil and f:FindFirstChild('ForgeRF') ~= nil and t ~= nil and t:FindFirstChild('TrainOnceRE') ~= nil and c:FindFirstChild('TrainCTRL') ~= nil and game.Workspace:FindFirstChild('CanAttackFolder') ~= nil"
     },
     {

@@ -41,8 +41,31 @@
     StageFinishedRF stopped returning, FinishStage waited forever and nothing
     dropped. Nothing in this file hooks anything.
 
+  * GEAR IS VALUED THE WAY BalanceUtils VALUES IT. Weapon = flat Train (config
+    MainAffix of the ID), Hat = Train BOOST (LHat_14 = +70%), Armor = Defence.
+    "BestPercent" pieces are worth a percentage of the best NORMAL piece owned, so
+    that piece is never sold even when something better is worn.
+
+  * THE INDEX PAYS FOR EVERY FIRST ITEM. TryClaimIndexExpRF(type, id) per
+    unlocked entry ("Weapon-K_23", "Hat-LHat_14", "Ore-Ore_41"), then
+    TryClaimLevelRewardRF() per rank. Measured: 22 entries, rank 6 -> 12.
+
+  * THE FROZEN TOWER (rebirth 2+) RUNS ALL 30 ROUNDS ON ONE TICKET. Its enemies
+    die through the same EnemyHitBE; CompleteRoundRF credits each round directly
+    (no pickup). Measured: 129s, 23-26 enchant stones, plus coins and ore.
+
+  * ENCHANT STONES ARE COMBAT EFFECTS (burn, freeze, chain, poison): EnchantRE
+    (gear, stone, slot), 5,000 coins each. They help fights played by hand; the
+    farm kills by client authority and gains nothing from them.
+
+  * RACES ("Class"): LuckOnceRE(slot) rerolls a slot, a repeat raises that race's
+    level, only the worn slot counts. Human L2 = Train +4% beats Skeleton's Crit
+    +3%, so the ranking weighs Train and Luck. With 0 rolls the game opens a Robux
+    prompt, so the count is checked before every roll.
+
   Never spends Robux: the IsPay train areas (9-11) are filtered, rebirth skip
-  products and gamepasses are never touched, Dev.* remotes are never fired.
+  products, race rolls, ticket packs and gamepasses are never touched, Dev.*
+  remotes are never fired.
 ]]
 
 local Players = game:GetService("Players")
@@ -85,6 +108,7 @@ local CONFIG = {
 	dailyTicket = true,  -- the free daily tower ticket
 	enchant = true,      -- fill empty enchant slots on the worn gear
 	element = "Fire",    -- preferred stone element; the tier always comes first
+	race = true,         -- unlock free race slots, spend race rolls, wear the best race
 }
 
 local STATE = {
@@ -99,6 +123,7 @@ local STATE = {
 	indexLevel = 0, indexClaimed = 0, indexRanks = 0,
 	tickets = 0, towerRuns = 0, towerRound = 0, stones = 0, enchants = 0, lastTower = "-",
 	forgeFlip = false,
+	race = "-", raceLevel = 0, raceRolls = 0, rolled = 0, lastRoll = "-",
 	busy = false,
 }
 
@@ -148,6 +173,8 @@ local RebirthHelper = safeRequire(wfc(wfc(Config, "Rebirth"), "Helper"))
 local WeaponHelper = safeRequire(wfc(wfc(Config, "Weapon"), "Helper"))
 local ArmorHelper = safeRequire(wfc(wfc(Config, "Armor"), "Helper"))
 local DungeonData = safeRequire(wfc(LocalData, "DungeonData"))
+local ClassData = safeRequire(wfc(LocalData, "ClassData"))
+local ClassHelper = safeRequire(wfc(wfc(Config, "Class"), "Helper"))
 
 local R_index = wfc(Remote, "Index")
 R.indexExp = wfc(R_index, "TryClaimIndexExpRF")
@@ -854,6 +881,112 @@ local function enchantPass()
 	end
 end
 
+--------------------------------------------------------------------------------
+-- races (the game calls them Class): roll the worst slot, wear the best race
+--------------------------------------------------------------------------------
+-- Store "Class": have = {[slot] = "Class_N"}, equiped = slot, recored[Class_N]
+-- .Level (kept even when the race is rolled away), lock = {[slot] = true},
+-- luckTimes = rolls left. Only the EQUIPPED slot's boosts count. Slot 2 opens at
+-- rebirth 4 and slot 3 at sign-in day 7 through TryUnlockIndexRE; 4-6 are Robux.
+-- LuckOnceRE(slot) with 0 rolls left is where the game opens a Robux prompt, so
+-- the roll count is checked before every roll.
+
+local RACE_WEIGHT = { Train = 100, Luck = 40, Damage = 6, Crit = 5, SkillDamage = 3,
+	Defence = 2, SkillCD = 1, WalkSpeed = 1 }
+
+local function raceScore(classId, level)
+	local s = 0
+	local ok, boosts = pcall(function() return ClassHelper.GetClassBoosts(classId, level or 1) end)
+	if ok and type(boosts) == "table" then
+		for stat, v in pairs(boosts) do
+			s = s + (RACE_WEIGHT[stat] or 1) * (tonumber(v) or 0)
+		end
+	end
+	-- a rarer race wins a tie
+	local okW, w = pcall(function() return ClassHelper.GetWeight(classId) end)
+	if okW and tonumber(w) and tonumber(w) > 0 then s = s + 0.001 / tonumber(w) end
+	return s
+end
+
+local function racePass()
+	if not ClassData then return end
+	local d = data()
+	local cl = d and d.Class
+	if type(cl) ~= "table" then return end
+
+	-- free slots first: 2 at rebirth 4, 3 at sign-in day 7
+	local have = cl.have or {}
+	if not have["2"] and STATE.rebirth >= 4 then
+		pcall(function() ClassData.TryUnlockIndex("2") end)
+		task.wait(1)
+	end
+	if not have["3"] and (tonumber(cl.signDay) or 0) >= 7 then
+		pcall(function() ClassData.TryUnlockIndex("3") end)
+		task.wait(1)
+	end
+
+	for _ = 1, 20 do
+		d = data()
+		cl = d and d.Class
+		if type(cl) ~= "table" then return end
+		have = cl.have or {}
+		local lock = cl.lock or {}
+		local rec = cl.recored or {}
+		local rolls = tonumber(cl.luckTimes) or 0
+		STATE.raceRolls = rolls
+
+		local slots = {}
+		for slot, id in pairs(have) do
+			local lv = rec[id] and rec[id].Level or 1
+			slots[#slots + 1] = { slot = slot, id = id, score = raceScore(id, lv), locked = lock[slot] == true }
+		end
+		table.sort(slots, function(a, b) return a.score > b.score end)
+		if #slots == 0 then return end
+
+		-- wear the best
+		local best = slots[1]
+		if cl.equiped ~= best.slot then
+			pcall(function() ClassData.ChangeEquipedIndex(best.slot) end)
+			task.wait(0.8)
+			note("race: wearing " .. tostring(ClassHelper.GetDisName(best.id)))
+		end
+		local lvBest = rec[best.id] and rec[best.id].Level or 1
+		STATE.race = tostring(ClassHelper.GetDisName(best.id) or best.id)
+		STATE.raceLevel = lvBest
+
+		if rolls <= 0 then return end
+
+		-- the roll slot: the worst unlocked slot, never the best one while
+		-- another exists; with one slot, only what the game itself rolls
+		-- without asking (Common..Epic)
+		local target
+		for i = #slots, 1, -1 do
+			local s = slots[i]
+			if not s.locked and (#slots > 1 and i > 1 or #slots == 1) then target = s; break end
+		end
+		if target and #slots == 1 then
+			local r = ClassHelper.GetRarity(target.id)
+			if not (r == "Common" or r == "UnCommon" or r == "Rare" or r == "Epic") then target = nil end
+		end
+		if not target then return end
+
+		pcall(function() ClassData.LuckOnce(target.slot) end)
+		task.wait(2)
+		local d2 = data()
+		local cl2 = d2 and d2.Class
+		local left = cl2 and tonumber(cl2.luckTimes) or rolls
+		if left >= rolls then
+			note("race roll refused")
+			return
+		end
+		local newId = cl2.have and cl2.have[target.slot]
+		STATE.rolled = STATE.rolled + 1
+		STATE.lastRoll = string.format("slot %s: %s -> %s", target.slot,
+			tostring(ClassHelper.GetDisName(target.id)), tostring(ClassHelper.GetDisName(newId)))
+		note("race " .. STATE.lastRoll)
+	end
+end
+
 local function unstuck()
 	unpin()
 	local r = hrp()
@@ -874,6 +1007,7 @@ _G.__LOOTTOFORGE_DBG = {
 	rebirthPass = rebirthPass, unstuck = unstuck, pin = pin, unpin = unpin,
 	indexPass = indexPass, towerRun = towerRun, dailyTicketPass = dailyTicketPass,
 	enchantPass = enchantPass, gearValue = gearValue, bestNormal = bestNormal,
+	racePass = racePass, raceScore = raceScore,
 }
 
 --------------------------------------------------------------------------------
@@ -901,10 +1035,22 @@ task.spawn(function()
 				if not ok then unpin(); note("stage failed: " .. tostring(err)) end
 			end
 			if CONFIG.forge then pcall(forgePass) end
+			if CONFIG.index then pcall(indexPass) end
 			if CONFIG.equip then pcall(equipPass) end
+			if CONFIG.enchant then pcall(enchantPass) end
 			if CONFIG.sell then pcall(sellPass) end
 			if CONFIG.upgrade then pcall(upgradePass) end
 			if CONFIG.rebirth then pcall(rebirthPass) end
+			if CONFIG.race then pcall(racePass) end
+			if CONFIG.dailyTicket then pcall(dailyTicketPass) end
+			if CONFIG.tower then
+				local ok, err = pcall(towerRun)
+				if not ok then note("tower failed: " .. tostring(err)) end
+				-- the tower drops ore too
+				if CONFIG.forge then pcall(forgePass) end
+				if CONFIG.index then pcall(indexPass) end
+				if CONFIG.equip then pcall(equipPass) end
+			end
 			if CONFIG.train then
 				local ok, err = pcall(function() trainPass(CONFIG.trainSecs) end)
 				if not ok then unpin(); note("train failed: " .. tostring(err)) end
@@ -968,10 +1114,12 @@ loopCard:Toggle("Rebirth", CONFIG.rebirth, function(v) CONFIG.rebirth = v end,
 local forgeCard = farm:Card("FORGE", 2):Accent()
 forgeCard:Toggle("Forge", CONFIG.forge, function(v) CONFIG.forge = v end,
 	"Forges a weapon from the 4 best ore types whenever 4 or more ore are home. Stage 27 ore forged Train 150M.")
+forgeCard:Toggle("Forge armor too", CONFIG.forgeArmor, function(v) CONFIG.forgeArmor = v end,
+	"Every other forge makes a hat or armor. A hat is a Train boost (+70% on LHat_14) and every new piece is index EXP.")
 forgeCard:Toggle("Equip best", CONFIG.equip, function(v) CONFIG.equip = v end,
-	"Wears the weapon with the highest Train stat.")
-forgeCard:Toggle("Sell weaker weapons", CONFIG.sell, function(v) CONFIG.sell = v end,
-	"Sells every weapon below the worn one for coins. Enchanted and locked ones are kept.", UI.theme.warn)
+	"Wears the best weapon, hat and armor, valued the way the game computes them.")
+forgeCard:Toggle("Sell weaker gear", CONFIG.sell, function(v) CONFIG.sell = v end,
+	"Sells every piece below the worn one in its slot. Hand-enchanted gear and the best normal piece of each slot are kept.", UI.theme.warn)
 
 local spendCard = farm:Card("UPGRADES", 1)
 spendCard:Toggle("Buy upgrades", CONFIG.upgrade, function(v) CONFIG.upgrade = v end,
@@ -988,7 +1136,34 @@ manual:Button("Forge now", function() task.spawn(function() pcall(forgePass); pc
 manual:Button("Unstuck", function() unstuck() end, UI.theme.bad)
 manual:Toggle("Anti-AFK", CONFIG.antiAfk, function(v) CONFIG.antiAfk = v end)
 
-local out = farm:Card("STATUS", 0):Readout(14)
+local out = farm:Card("STATUS", 0):Readout(20)
+
+local towerPage = win:Page("TOWER", UI.icon.flame)
+
+local towerCard = towerPage:Card("TOWER", 1):Accent()
+towerCard:Toggle("Run the tower", CONFIG.tower, function(v) CONFIG.tower = v end,
+	"One ticket runs all 30 rounds of the Frozen Tower (open from rebirth 2). Measured: 129 seconds, 26 enchant stones, plus coins and ore.")
+towerCard:Slider("Tickets to keep", 0, 50, CONFIG.towerKeep, function(v) CONFIG.towerKeep = v end)
+towerCard:Toggle("Daily ticket", CONFIG.dailyTicket, function(v) CONFIG.dailyTicket = v end,
+	"Claims the free tower ticket once a day.")
+towerCard:Button("Run tower now", function() task.spawn(function() pcall(towerRun) end) end)
+
+local indexCard = towerPage:Card("INDEX", 2):Accent()
+indexCard:Toggle("Claim index", CONFIG.index, function(v) CONFIG.index = v end,
+	"Every first weapon, armor and ore is index EXP; the EXP buys index ranks. Measured: 22 entries, rank 6 -> 12.")
+indexCard:Button("Claim now", function() task.spawn(function() pcall(indexPass) end) end)
+
+local enchCard = towerPage:Card("ENCHANT", 0)
+enchCard:Toggle("Enchant worn gear", CONFIG.enchant, function(v) CONFIG.enchant = v end,
+	"Fills empty slots on the worn weapon, hat and armor with the best stone, 5,000 coins each. The stones are combat effects: they help fights you play yourself, the farm does not need them.")
+enchCard:Dropdown("Preferred element", { "Fire", "Ice", "Thunder", "Poison" }, CONFIG.element,
+	function(v) CONFIG.element = v end)
+enchCard:Button("Enchant now", function() task.spawn(function() pcall(enchantPass) end) end)
+
+local raceCard = towerPage:Card("RACE", 0):Accent()
+raceCard:Toggle("Races", CONFIG.race, function(v) CONFIG.race = v end,
+	"Unlocks the free race slots (rebirth 4, sign-in day 7), spends race rolls on the WORST slot and wears the race with the best Train and Luck. Rolls are never bought: with none left the game would open a Robux prompt.")
+raceCard:Button("Roll / wear now", function() task.spawn(function() pcall(racePass) end) end)
 
 task.spawn(function()
 	while GEN == _G.__LOOTTOFORGE do
@@ -1001,13 +1176,21 @@ task.spawn(function()
 				string.format("  stage      %d   (passed %d)", targetStage(), STATE.stagePass),
 				"GEAR",
 				string.format("  weapon     %s   Train %s   (%d owned)", STATE.weapon, short(STATE.weaponTrain), STATE.weapons),
+				string.format("  hat        %s   +%d%% train", STATE.hat, math.floor(STATE.hatVal * 100 + 0.5)),
+				string.format("  armor      %s   def %.2f", STATE.armor, STATE.armorVal),
 				string.format("  ore home   %d   bag %d", STATE.ore, STATE.orePackCap),
 				string.format("  upgrades   bag L%d  train L%d  luck L%d", STATE.upg.OrePack, STATE.upg.Train, STATE.upg.Luck),
+				string.format("  index      level %d   tower best round %d", STATE.indexLevel, STATE.towerRound),
+				string.format("  tickets    %d   stones %d", STATE.tickets, STATE.stones),
+				string.format("  race       %s L%d   rolls %d   last %s", STATE.race, STATE.raceLevel, STATE.raceRolls, STATE.lastRoll),
 				"SESSION",
 				string.format("  runs %d  ore %d  forged %d  sold %d (+%s)  upgrades %d  rebirths %d",
 					STATE.runs, STATE.oreGot, STATE.forged, STATE.sold, short(STATE.coinsSold), STATE.upgrades, STATE.rebirths),
+				string.format("  tower %d  index +%d/%d ranks  enchants %d",
+					STATE.towerRuns, STATE.indexClaimed, STATE.indexRanks, STATE.enchants),
 				"  last run   " .. STATE.lastRun,
 				"  last forge " .. STATE.lastForge,
+				"  last tower " .. STATE.lastTower,
 				STATE.note ~= "" and ("  " .. STATE.note) or "  -",
 			})
 			win:SetStatus(string.format("%s coins   lv%d   %d rebirths   Train %s",

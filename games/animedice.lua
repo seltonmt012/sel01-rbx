@@ -21,11 +21,14 @@
 --   * Collect CollectBalance:FireServer(slotNumber) empties one slot (number, not
 --            string). EquipBest already does all of them, so this is only a
 --            manual helper.
---   * Level  LevelUpSlot:FireServer(slotNumber) +1 level on that slot's unit,
---            costs money on a ~1.6x/level curve (93,148,238,380,609,975,...).
---            Unit level does NOT change base income (income = f(rarity, mutation,
---            trait, grade, variant)); the slot level multiplier is applied server
---            side - lvl1 Huge Friza ~93/s, lvl8 ~256/s measured.
+--   * Level  LevelUpSlot:FireServer(slotNumber) +1 level on that slot's unit.
+--            income(attributes) = base x (1 + 0.25 x (level - 1)); price =
+--            income(mutation only) x 1.6^(level-1). Payback therefore grows 1.6x
+--            per level whatever the unit - levelled only up to a payback cap.
+--            income() takes u.ATTRIBUTES; passing the entry drops mutation,
+--            grade, trait and level (the first build did, and ranked wrong).
+--   * Place  EquipBest ranks WITH level, so levelled weak units never leave.
+--            placeBest ranks by level-1 income and swaps via Equip + InteractSlot.
 --   * Dice   Dice.GetAll() -> {key, luck, price, rarity}. Higher luck rolls rarer
 --            units, and rarity is the income driver (base Uncommon 100, Rare 1e3,
 --            Epic 1e5, Legendary 1e7, Mythical 1e9 ... Heavenly 1e23). BuyDice
@@ -81,8 +84,10 @@ local CONFIG = {
 
 	autoRoll    = true,   -- fire RollDice on the server cooldown
 	autoCollect = true,   -- EquipBest: collect every slot + place the best units
+	smartPlace  = true,   -- place by level-free potential, not the game's EquipBest
 	autoLevel   = true,   -- pour a share of money into placed-slot levels
 	levelShare  = 0.3,    -- fraction of money slot-leveling may spend each pass
+	levelPayback = 10,    -- only buy a level that pays itself back within N minutes
 	saveMinutes = 5,      -- skip leveling while the next dice/rebirth is this close
 	-- Grade/trait odds come from the configs' weights. Grades: D 45%, C 28%, B 15%,
 	-- A 8%, A+ 3%, S 0.9%, S+ 0.11%, Z 0.03%, 神 0.002%. Waiting for S costs ~100
@@ -170,6 +175,8 @@ local R = {
 	CompleteFloor   = svc("Towers.RF.CompleteTowerFloor"),
 	CancelTower     = svc("Towers.RF.CancelTower"),
 	BestTowerTeam   = svc("Towers.RE.EquipBestTowerTeam"),
+	InteractSlot    = svc("PlotService.RE.InteractSlot"),
+	EquipUnit       = svc("UnitService.RF.Equip"),
 	Fuse            = svc("FusingService.RE.Fuse"),
 	FuseResult      = svc("FusingService.RE.Result"),
 }
@@ -187,6 +194,13 @@ local TowersConfig   = require(Framework.Features.Towers.Towers)
 local BuffController = require(Framework.Features.Buffs.BuffController)
 local FusingUtil     = require(Framework.Features.Fusing.FusingUtil)
 local FusingConfig   = require(Framework.Features.Fusing.FusingConfig)
+local UnitUtil
+for _, m in ipairs(Framework:GetDescendants()) do
+	if m.Name == "UnitUtil" and m:IsA("ModuleScript") then
+		pcall(function() UnitUtil = require(m) end)
+		break
+	end
+end
 local BoostConfig
 pcall(function() BoostConfig = require(Framework.Features.Inventory.Kinds.Boost.BoostConfig) end)
 local BOOSTS = (BoostConfig and (BoostConfig.entries or BoostConfig)) or {}
@@ -222,6 +236,27 @@ local function count(t)
 	local n = 0
 	if type(t) == "table" then for _ in pairs(t) do n = n + 1 end end
 	return n
+end
+
+-- income() takes the unit's ATTRIBUTES (mutation, grade, trait, level). Passing
+-- the whole inventory entry silently drops all four and made a Diamond Rare look
+-- like a plain one - which is how the first build ranked, sold and fused wrong.
+-- Income = base x (1 + 0.25 x (level - 1)), so:
+--   curIncome   what the unit earns right now, level included (EquipBest's view)
+--   baseIncome  the same at level 1 - its potential, since every placed unit is
+--               levelled to the same payback cap anyway
+local function curIncome(u)
+	local e = u and UnitConfig.entries[u.name]
+	if not e then return 0 end
+	return tonumber(select(2, pcall(e.income, u.attributes or {}))) or 0
+end
+
+local function baseIncome(u)
+	local e = u and UnitConfig.entries[u.name]
+	if not e then return 0 end
+	local a = u.attributes or {}
+	return tonumber(select(2, pcall(e.income,
+		{ mutation = a.mutation, grade = a.grade, trait = a.trait, level = 1 }))) or 0
 end
 
 ---------------------------------------------------------------- dice model -----
@@ -361,6 +396,71 @@ local function doRoll()
 	if ok then STATE.rolled = STATE.rolled + 1 end
 end
 
+-- Placement by POTENTIAL. The game's EquipBest ranks by income WITH level, so a
+-- level-30 Epic (131k base x 8.25) keeps its slot against a fresh level-1
+-- Legendary with 2.5x its base - forever, since levels only go to placed units.
+-- A level's payback grows 1.6x per level while its gain is linear, so every
+-- placed unit ends at the same payback cap: the unit with the bigger base wins
+-- there, and the few cheap levels to get it there cost seconds of income.
+-- Swap = Equip(unit) into the hand, InteractSlot(slot) drops it in; the unit
+-- that was there goes back to the inventory with its level intact.
+local function placeBest()
+	if not (R.EquipUnit and R.InteractSlot) then return false end
+	local d = data()
+	local n = unlockedSlots()
+
+	local ranked = {}
+	for id, u in pairs(d.Inventory) do
+		if UnitConfig.entries[u.name] and (tonumber(u.amount) or 1) >= 1 then
+			ranked[#ranked + 1] = { id = id, v = baseIncome(u) }
+		end
+	end
+	table.sort(ranked, function(a, b) return a.v > b.v end)
+
+	local want, bench = {}, {}
+	for i = 1, math.min(n, #ranked) do want[ranked[i].id] = ranked[i].v end
+	local placed = {}
+	for i = 1, n do
+		local s = d.Slots[tostring(i)]
+		if s and s.unitId then placed[s.unitId] = true end
+	end
+	for i = 1, math.min(n, #ranked) do
+		if not placed[ranked[i].id] then bench[#bench + 1] = ranked[i] end
+	end
+	if #bench == 0 then return false end
+
+	-- Weakest slots first; an empty slot counts as 0.
+	local slots = {}
+	for i = 1, n do
+		local s = d.Slots[tostring(i)]
+		local u = s and s.unitId and d.Inventory[s.unitId]
+		slots[#slots + 1] = { i = i, v = u and baseIncome(u) or 0, id = s and s.unitId }
+	end
+	table.sort(slots, function(a, b) return a.v < b.v end)
+
+	local swapped = 0
+	for k, cand in ipairs(bench) do
+		local slot = slots[k]
+		-- 10% margin so two near-equal units never swap back and forth.
+		if slot and (slot.id == nil or not want[slot.id]) and cand.v > slot.v * 1.1 then
+			local ok = pcall(function() return R.EquipUnit:InvokeServer(cand.id) end)
+			if ok then
+				task.wait(0.55)                          -- PlotSlotInteraction 0.5s
+				R.InteractSlot:FireServer(slot.i)
+				task.wait(0.6)
+				local now = d.Slots[tostring(slot.i)]
+				if now and now.unitId == cand.id then
+					swapped = swapped + 1
+					local u = d.Inventory[cand.id]
+					STATE.note = "placed " .. tostring(u and u.name)
+				end
+			end
+		end
+	end
+	STATE.swaps = (STATE.swaps or 0) + swapped
+	return swapped > 0
+end
+
 -- Collect every slot explicitly, THEN place best. EquipBest only banks the slots
 -- it actually re-places, so once the plot is optimally filled it collects nothing
 -- - the explicit CollectBalance per slot is what keeps the money flowing.
@@ -372,7 +472,11 @@ local function doCollectPlace()
 			pcall(function() R.CollectBalance:FireServer(tonumber(key)) end)
 		end
 	end
-	if R.EquipBest then R.EquipBest:FireServer() end
+	if CONFIG.smartPlace then
+		pcall(placeBest)
+	elseif R.EquipBest then
+		R.EquipBest:FireServer()
+	end
 	task.wait(0.25)
 	local gained = data().Money - before
 	if gained > 0 then STATE.collected = STATE.collected + gained end
@@ -427,16 +531,17 @@ local function sellJunk(force)
 
 	local placed = {}
 	for _, slot in pairs(d.Slots) do if slot.unitId then placed[slot.unitId] = true end end
+	for _, id in pairs(d.TowerTeam or {}) do placed[id] = true end
 
-	-- Every unplaced unit with its income, weakest first.
+	-- Every unplaced unit with its level-free income, weakest first.
 	local units = {}
 	for id, u in pairs(d.Inventory) do
-		if not placed[id] then
-			local e = UnitConfig.entries[u.name]
-			local inc = 0
-			if e then inc = tonumber(select(2, pcall(e.income, u))) or 0 end
-			local order = e and RARITY_SORT[e.rarity] or 0
-			units[#units + 1] = { id = id, inc = inc, order = order }
+		local e = UnitConfig.entries[u.name]
+		if e and not placed[id] then
+			units[#units + 1] = {
+				id = id, inc = baseIncome(u), order = RARITY_SORT[e.rarity] or 0,
+				mutated = u.attributes and u.attributes.mutation ~= nil,
+			}
 		end
 	end
 	table.sort(units, function(a, b) return a.inc < b.inc end)
@@ -444,7 +549,10 @@ local function sellJunk(force)
 	local sellable = math.max(0, #units - CONFIG.keepBest)   -- protect the best spares
 	local list = {}
 	for i, unit in ipairs(units) do
-		local belowFloor = unit.order > 0 and unit.order < CONFIG.sellRarity
+		-- A mutation outweighs rarity (Uncommon Diamond out-earns plain Epics),
+		-- so the rarity floor only ever applies to unmutated units.
+		local belowFloor = not unit.mutated and unit.order > 0 and unit.order < CONFIG.sellRarity
+			and i <= sellable
 		local surplus = pressured and i <= sellable
 		if belowFloor or surplus then
 			list[#list + 1] = unit.id
@@ -467,11 +575,7 @@ local function itemAmount(key)
 	return (e and tonumber(e.amount)) or 0
 end
 
-local function unitIncome(u)
-	local e = u and UnitConfig.entries[u.name]
-	if not e then return 0 end
-	return tonumber(select(2, pcall(e.income, u))) or 0
-end
+local function unitIncome(u) return baseIncome(u) end
 
 -- The units that actually earn, strongest first: a reroll there pays the most.
 local function placedUnits()
@@ -666,6 +770,17 @@ local function doFuse()
 	local busy = {}
 	for _, slot in pairs(d.Slots) do if slot.unitId then busy[slot.unitId] = true end end
 	for _, id in pairs(d.TowerTeam or {}) do busy[id] = true end
+	-- Never fuse a unit that is good enough to be placed: the top (slots + 2) by
+	-- level-free income stay out of the pile. The first build fused on chance
+	-- alone and ate spares that should have been standing on the plot.
+	do
+		local ranked = {}
+		for id, u in pairs(d.Inventory) do
+			if UnitConfig.entries[u.name] then ranked[#ranked + 1] = { id = id, v = baseIncome(u) } end
+		end
+		table.sort(ranked, function(a, b) return a.v > b.v end)
+		for i = 1, math.min(#ranked, unlockedSlots() + 2) do busy[ranked[i].id] = true end
+	end
 
 	local pile = {}
 	for id, u in pairs(d.Inventory) do
@@ -726,17 +841,31 @@ end
 
 -- Level the weakest placed slot once. Cost grows and is server-checked, so an
 -- unaffordable call simply no-ops. Returns true only if money actually dropped.
+--
+-- Price = income(mutation only) x 1.6^(level-1) (UnitUtil.GetLevelPrice), gain =
+-- 0.25 x base x Money Multiplier per second. So payback grows 1.6x per level and
+-- does not care which unit it is; at x23.6 money: lvl 10 12s, 15 2min, 20 21min,
+-- 25 3.7h, 30 39h. The first build levelled to 26-31 and burned most of that.
+-- Buy the shortest payback first and stop at the levelPayback cap.
+local function levelPayback(u)
+	if not (UnitUtil and UnitUtil.GetLevelPrice) then return math.huge end
+	local price = tonumber(select(2, pcall(UnitUtil.GetLevelPrice, u.name, u.attributes or {})))
+	local mult = tonumber(select(2, pcall(BuffController.GetBuff, "Money Multiplier"))) or 1
+	local gain = 0.25 * baseIncome(u) * mult
+	if not price or gain <= 0 then return math.huge end
+	return price / gain
+end
+
 local function doLevel()
 	local d = data()
 	local lowestKey, lowestLvl
 	for key, slot in pairs(d.Slots) do
 		if slot.unitId and d.Inventory[slot.unitId] then
-			local u = d.Inventory[slot.unitId]
-			local lvl = (u.attributes and u.attributes.level) or 1
-			if not lowestLvl or lvl < lowestLvl then lowestLvl, lowestKey = lvl, key end
+			local pb = levelPayback(d.Inventory[slot.unitId])
+			if not lowestLvl or pb < lowestLvl then lowestLvl, lowestKey = pb, key end
 		end
 	end
-	if not lowestKey then return false end
+	if not lowestKey or lowestLvl > CONFIG.levelPayback * 60 then return false end
 	local before = d.Money
 	R.LevelUpSlot:FireServer(tonumber(lowestKey))
 	task.wait(0.12)
@@ -828,7 +957,8 @@ _G.__ANIMEDICE_DBG = {
 	doRoll = doRoll, doCollectPlace = doCollectPlace, doDice = doDice,
 	doUpgrade = doUpgrade, sellJunk = sellJunk, levelSlots = levelSlots,
 	doRerolls = doRerolls, useBoosts = useBoosts, towerRun = towerRun, drainTower = drainTower,
-	doFuse = doFuse, savingForLuck = savingForLuck,
+	doFuse = doFuse, savingForLuck = savingForLuck, placeBest = placeBest,
+	baseIncome = baseIncome, curIncome = curIncome, levelPayback = levelPayback,
 	nextLuckGoal = nextLuckGoal, placedUnits = placedUnits,
 	doRebirth = doRebirth, doLevel = doLevel, doCodes = doCodes,
 	doClaims = doClaims, DICE = DICE, UPGRADE_LINES = UPGRADE_LINES,
@@ -868,6 +998,12 @@ toggle(incomeCard, "Auto Collect & Place", "autoCollect",
 	"EquipBest: banks every slot + places the best units")
 toggle(incomeCard, "Auto Level Slots", "autoLevel",
 	"levels the placed units - a big income boost")
+toggle(incomeCard, "Smart Placement", "smartPlace",
+	"places by base income, so a fresh Legendary beats a levelled Epic")
+incomeCard:Stepper("Level payback max",
+	function() return tostring(CONFIG.levelPayback) .. " min" end,
+	function(delta) CONFIG.levelPayback = math.clamp(CONFIG.levelPayback + delta, 1, 120) end,
+	"a level costs 1.6x more each time; stop once it pays back slower")
 incomeCard:Slider("Level budget %", 10, 90, math.floor(CONFIG.levelShare * 100),
 	function(v) CONFIG.levelShare = v / 100 end,
 	"share of money slot-leveling may spend each pass")
@@ -1172,7 +1308,7 @@ task.spawn(function()
 			string.format("  dice buys  %d", STATE.diceBought),
 			string.format("  upgrades   %d", STATE.upgradesBought),
 			string.format("  rebirths   %d", STATE.rebirths),
-			string.format("  levels     %d", STATE.leveled),
+			string.format("  levels %d   swaps %d", STATE.leveled, STATE.swaps or 0),
 			string.format("  sold       %d (%s)", STATE.sold, fmt(STATE.soldValue)),
 			string.format("  codes %d   claims %d", STATE.codesDone, STATE.claims),
 		})
