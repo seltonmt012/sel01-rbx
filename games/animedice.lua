@@ -56,8 +56,10 @@
 --            only queues the end - a cancelled run must be drained or it blocks
 --            every new PlayTower.
 --
+--   * Fuse   3 spare units -> 1 whose chance is ~0.667x their SUM, i.e. about
+--            twice as rare as their mean. Balanced trios only (see doFuse).
+--
 -- Deliberately left out, do not add without new evidence:
---   Fusing   pools return 0.375-1.125x of the input, 0.667x on average.
 --   Forging  ___X is a mirror; purchases are checked against the server copy.
 
 local Players           = game:GetService("Players")
@@ -91,6 +93,8 @@ local CONFIG = {
 	autoTrait   = true,   -- spend Trait Rerolls on the placed units' traits
 	traitMin    = 1.5,    -- keep traits worth >= this income x (Money II and better)
 	autoBoost   = true,   -- activate owned Luck/Income boosts
+	autoFuse    = true,   -- fuse spare units three at a time into rarer ones
+	fuseShare   = 0.35,   -- share of money one fusion may cost
 	autoTower   = true,   -- farm a tower for boosts, gems and trait rerolls
 	tower       = "Dragon Tower",
 	autoDice    = true,   -- buy the best affordable dice we do not own, equip best
@@ -123,6 +127,7 @@ local STATE = {
 	upgradesBought = 0, sold = 0, soldValue = 0,
 	gradeRolls = 0, traitRolls = 0, boostsUsed = 0, luck = 0,
 	towerRuns = 0, towerFloors = 0, towerBest = 0, towerFloor = 0, towerDrops = 0,
+	fused = 0, fuseLast = "-", fuseBestChance = 0,
 	codesDone = 0, claims = 0,
 	phase = "idle", note = "-", uiOwner = "-",
 }
@@ -165,6 +170,8 @@ local R = {
 	CompleteFloor   = svc("Towers.RF.CompleteTowerFloor"),
 	CancelTower     = svc("Towers.RF.CancelTower"),
 	BestTowerTeam   = svc("Towers.RE.EquipBestTowerTeam"),
+	Fuse            = svc("FusingService.RE.Fuse"),
+	FuseResult      = svc("FusingService.RE.Result"),
 }
 
 local DataController = require(Framework.Features.Data.DataController)
@@ -178,6 +185,8 @@ local Grades         = require(Framework.Features.Grades.Grades)
 local Traits         = require(Framework.Features.Traits.Traits)
 local TowersConfig   = require(Framework.Features.Towers.Towers)
 local BuffController = require(Framework.Features.Buffs.BuffController)
+local FusingUtil     = require(Framework.Features.Fusing.FusingUtil)
+local FusingConfig   = require(Framework.Features.Fusing.FusingConfig)
 local BoostConfig
 pcall(function() BoostConfig = require(Framework.Features.Inventory.Kinds.Boost.BoostConfig) end)
 local BOOSTS = (BoostConfig and (BoostConfig.entries or BoostConfig)) or {}
@@ -632,6 +641,76 @@ local function towerRun()
 	STATE.note = "tower ended at floor " .. tostring(STATE.towerFloor)
 end
 
+-- Fuse machine (FusingService, which ships to the client and decompiles):
+-- Fuse(id1, id2, id3) sums the three units' 1-in-N chances (mutation included -
+-- Diamond is x10000) and rolls a unit whose chance is that sum x a pool factor
+-- averaging 0.667. So the result is on average TWICE as rare as the three
+-- inputs' mean - rarity without luck, paid in money:
+-- cost = S x 10000 x (S / 1e12)^0.2. The output is also the next fusion's fodder,
+-- so fusing the spare pile greedily from the top climbs a ladder (three ~5.7M
+-- -> ~11M+, the Legendary band). Inputs must be single, unlocked, non-limited.
+-- The server lock is ONE flag for every player on the server, 3s long, so
+-- "Please wait" just means retry.
+local fuseResult
+if R.FuseResult then
+	local conn
+	conn = R.FuseResult.OnClientEvent:Connect(function(unit, err, newId)
+		if _G.__ANIMEDICE ~= generation then conn:Disconnect(); return end
+		fuseResult = { unit = unit, err = err, newId = newId }
+	end)
+end
+
+local function doFuse()
+	if not R.Fuse then return false end   -- the savings gate sits in the loop
+	local d = data()
+	local busy = {}
+	for _, slot in pairs(d.Slots) do if slot.unitId then busy[slot.unitId] = true end end
+	for _, id in pairs(d.TowerTeam or {}) do busy[id] = true end
+
+	local pile = {}
+	for id, u in pairs(d.Inventory) do
+		if not busy[id] and UnitConfig.entries[u.name] then
+			local ch = select(2, pcall(FusingUtil.GetChance, u))
+			if type(ch) == "number" then pile[#pile + 1] = { id = id, ch = ch } end
+		end
+	end
+	table.sort(pile, function(a, b) return a.ch > b.ch end)
+
+	local budget = d.Money * math.clamp(CONFIG.fuseShare, 0, 1)
+	for i = 1, #pile - 2 do
+		local a, b, c = pile[i], pile[i + 1], pile[i + 2]
+		local sum = a.ch + b.ch + c.ch
+		-- Only a balanced trio pays: the expected result must beat its best input,
+		-- otherwise one strong unit gets diluted by two weak ones.
+		if sum * FusingConfig.AverageMultiplier >= a.ch then
+			local cost = FusingConfig.GetCost(sum)
+			if cost <= budget then
+				fuseResult = nil
+				R.Fuse:FireServer(a.id, b.id, c.id)
+				for _ = 1, 25 do
+					if fuseResult then break end
+					task.wait(0.2)
+				end
+				local r = fuseResult
+				if r and r.unit then
+					STATE.fused = STATE.fused + 1
+					local ch = r.newId and d.Inventory[r.newId]
+						and select(2, pcall(FusingUtil.GetChance, d.Inventory[r.newId]))
+					if type(ch) == "number" and ch > STATE.fuseBestChance then STATE.fuseBestChance = ch end
+					STATE.fuseLast = tostring(r.unit.name)
+						.. (r.unit.attributes and r.unit.attributes.mutation
+							and (" " .. r.unit.attributes.mutation) or "")
+					STATE.note = "fused -> " .. STATE.fuseLast
+					return true
+				end
+				STATE.note = "fuse: " .. tostring(r and r.err or "no answer")
+				return false
+			end
+		end
+	end
+	return false
+end
+
 local function doRebirth()
 	local cost = nextRebirthCost()
 	if not cost then return false end          -- max rebirth reached
@@ -698,10 +777,16 @@ end
 -- pads), weakest slot first so the cheapest levels go first. It protects a
 -- fraction of money for dice/upgrades/rebirth, and stops the moment a level is
 -- unaffordable. This is a real income lever: a leveled unit earns much more.
-local function levelSlots()
+-- True while the next dice/rebirth is within saveMinutes of income: leveling and
+-- fusing then hold back so the luck step is not pushed further away.
+local function savingForLuck()
 	local goal = nextLuckGoal()
 	local money = data().Money
-	if goal and money < goal and money + STATE.incomePerSec * CONFIG.saveMinutes * 60 >= goal then
+	return goal and money < goal and money + STATE.incomePerSec * CONFIG.saveMinutes * 60 >= goal
+end
+
+local function levelSlots()
+	if savingForLuck() then
 		STATE.phase = "saving for luck"
 		return
 	end
@@ -743,6 +828,7 @@ _G.__ANIMEDICE_DBG = {
 	doRoll = doRoll, doCollectPlace = doCollectPlace, doDice = doDice,
 	doUpgrade = doUpgrade, sellJunk = sellJunk, levelSlots = levelSlots,
 	doRerolls = doRerolls, useBoosts = useBoosts, towerRun = towerRun, drainTower = drainTower,
+	doFuse = doFuse, savingForLuck = savingForLuck,
 	nextLuckGoal = nextLuckGoal, placedUnits = placedUnits,
 	doRebirth = doRebirth, doLevel = doLevel, doCodes = doCodes,
 	doClaims = doClaims, DICE = DICE, UPGRADE_LINES = UPGRADE_LINES,
@@ -874,6 +960,15 @@ towerCard:Dropdown("Tower", { "Dragon Tower", "Cursed Tower", "Pirate Tower",
 local towerLabel = towerCard:Label("tower -")
 towerCard:Button("Run tower now", function() task.spawn(towerRun) end)
 
+local fuseCard = boostPage:Card("FUSE MACHINE", 1)
+toggle(fuseCard, "Auto Fuse", "autoFuse",
+	"3 spare units -> 1 about twice as rare; climbs toward Legendary")
+fuseCard:Slider("Fuse budget %", 5, 90, math.floor(CONFIG.fuseShare * 100),
+	function(v) CONFIG.fuseShare = v / 100 end,
+	"share of money one fusion may cost")
+local fuseLabel = fuseCard:Label("fused -")
+fuseCard:Button("Fuse now", function() task.spawn(doFuse) end)
+
 local boostCard = boostPage:Card("BOOSTS", 2)
 toggle(boostCard, "Auto Use Boosts", "autoBoost",
 	"luck and income boosts; different kinds multiply together")
@@ -936,6 +1031,14 @@ task.spawn(function()
 	while _G.__ANIMEDICE == generation do
 		if CONFIG.auto and (CONFIG.autoGrade or CONFIG.autoTrait) then pcall(doRerolls) end
 		task.wait(3)
+	end
+end)
+
+-- Fuse machine: one balanced trio per pass, off while saving for a luck step.
+task.spawn(function()
+	while _G.__ANIMEDICE == generation do
+		if CONFIG.auto and CONFIG.autoFuse and not savingForLuck() then pcall(doFuse) end
+		task.wait(4)
 	end
 end)
 
@@ -1046,6 +1149,8 @@ task.spawn(function()
 		towerLabel:set(string.format("floor %d   best %d   runs %d   drops %d",
 			STATE.towerFloor, STATE.towerBest, STATE.towerRuns, STATE.towerDrops))
 		luckLabel:set(string.format("roll luck %s   boosts used %d", fmt(STATE.luck), STATE.boostsUsed))
+		fuseLabel:set(string.format("fused %d   best 1 in %s   last %s",
+			STATE.fused, fmt(STATE.fuseBestChance), STATE.fuseLast))
 
 		local cost, mult = nextRebirthCost()
 		ladderOut:set({

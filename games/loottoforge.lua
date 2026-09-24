@@ -77,6 +77,14 @@ local CONFIG = {
 	coinKeep = 0,        -- coins never spent
 	rebirth = true,      -- as soon as the level requirement is met
 	antiAfk = true,
+
+	forgeArmor = true,   -- every other forge is "Armor" (hats and armor)
+	index = true,        -- claim every new index entry, then the index ranks
+	tower = true,        -- spend tower tickets: all 30 rounds per ticket
+	towerKeep = 0,       -- tickets never spent
+	dailyTicket = true,  -- the free daily tower ticket
+	enchant = true,      -- fill empty enchant slots on the worn gear
+	element = "Fire",    -- preferred stone element; the tier always comes first
 }
 
 local STATE = {
@@ -87,6 +95,10 @@ local STATE = {
 	upg = { OrePack = 0, Train = 0, Luck = 0 },
 	runs = 0, oreGot = 0, forged = 0, sold = 0, coinsSold = 0, upgrades = 0, rebirths = 0,
 	lastRun = "-", lastForge = "-",
+	hat = "-", hatVal = 0, armor = "-", armorVal = 0,
+	indexLevel = 0, indexClaimed = 0, indexRanks = 0,
+	tickets = 0, towerRuns = 0, towerRound = 0, stones = 0, enchants = 0, lastTower = "-",
+	forgeFlip = false,
 	busy = false,
 }
 
@@ -133,6 +145,14 @@ local UpgradeData = safeRequire(wfc(LocalData, "UpgradeData"))
 local TrainAreaCfg = safeRequire(wfc(wfc(Config, "TrainArea"), "Config"))
 local UpgradeCfg = safeRequire(wfc(wfc(Config, "Upgrade"), "Config"))
 local RebirthHelper = safeRequire(wfc(wfc(Config, "Rebirth"), "Helper"))
+local WeaponHelper = safeRequire(wfc(wfc(Config, "Weapon"), "Helper"))
+local ArmorHelper = safeRequire(wfc(wfc(Config, "Armor"), "Helper"))
+local DungeonData = safeRequire(wfc(LocalData, "DungeonData"))
+
+local R_index = wfc(Remote, "Index")
+R.indexExp = wfc(R_index, "TryClaimIndexExpRF")
+R.indexLevel = wfc(R_index, "TryClaimLevelRewardRF")
+local R_dungeonInto = wfc(wfc(Remote, "Dungeon"), "TryIntoDungeonRF")
 
 local hitBE, exitBE
 pcall(function()
@@ -195,6 +215,68 @@ local function trainValue(item)
 	return 0
 end
 
+-- The value of a piece of gear, computed exactly like BalanceUtils does it:
+--   Weapon -> flat Train add = the config MainAffix of its ID
+--   Hat    -> Train BOOST (a fraction, 0.7 = +70%)
+--   Armor  -> Defence
+-- "BestPercent" items (the _1001/_1002 ids) are worth MainAffix x the best NORMAL
+-- item of that slot you own, capped - which is why the best normal item of every
+-- slot is never sold, even when something better is worn.
+local SLOT_STAT = { Weapon = "Train", Hat = "Train", Armor = "Defence" }
+
+local function helperFor(slot)
+	return slot == "Weapon" and WeaponHelper or ArmorHelper
+end
+
+local function isPercent(slot, id)
+	local ok, v = pcall(function() return helperFor(slot).CheckIsBestPercent(id) end)
+	return ok and v == true
+end
+
+local function baseValue(slot, id)
+	local ok, v = pcall(function() return helperFor(slot).GetMainAffix(id) end)
+	return (ok and tonumber(v)) or 0
+end
+
+-- best normal (non-percent) value of a slot among everything owned
+local function bestNormal(have, slot)
+	local best = slot == "Weapon" and 1 or 0.1
+	for _, it in pairs(have) do
+		if it.Type == slot and not isPercent(slot, it.ID) then
+			local v
+			if slot == "Weapon" then
+				v = baseValue(slot, it.ID)
+			else
+				local ok, a = pcall(function() return ArmorHelper.GetAttriNum(it.ID) end)
+				v = (ok and tonumber(a)) or 0
+			end
+			if v > best then best = v end
+		end
+	end
+	return best
+end
+
+local function gearValue(have, it)
+	local slot = it.Type
+	if not SLOT_STAT[slot] then return 0 end
+	local v = baseValue(slot, it.ID)
+	if isPercent(slot, it.ID) then
+		local cap
+		pcall(function()
+			cap = slot == "Weapon" and WeaponHelper.GetMaxTrain(it.ID) or ArmorHelper.GetMaxAttrNum(it.ID)
+		end)
+		v = v * bestNormal(have, slot)
+		if tonumber(cap) then v = math.min(v, tonumber(cap)) end
+	end
+	-- bonus affixes, keyed by stat name
+	if slot ~= "Weapon" and type(it.Affix) == "table" then
+		for stat, add in pairs(it.Affix) do
+			if stat == SLOT_STAT[slot] and tonumber(add) then v = v + tonumber(add) end
+		end
+	end
+	return v
+end
+
 -- one pin at a time; the body belongs to whichever pass set it last
 local pinConn
 local function pin(pos)
@@ -244,20 +326,31 @@ local function refresh(withServer)
 		STATE.upg[k] = (upg[k] and tonumber(upg[k].Level)) or 0
 	end
 	local bp = d.Backpack or {}
-	local eq = bp.equiped and bp.equiped.Weapon
-	local ore, weapons = 0, 0
-	for uid, it in pairs(bp.have or {}) do
+	local have = bp.have or {}
+	local eq = bp.equiped or {}
+	local ore, weapons, tickets, stones = 0, 0, 0, 0
+	for _, it in pairs(have) do
 		if it.Type == "Ore" then
 			ore = ore + (tonumber(it.Number) or 1)
 		elseif it.Type == "Weapon" then
 			weapons = weapons + 1
-			if uid == eq then
-				STATE.weapon = tostring(it.ID)
-				STATE.weaponTrain = trainValue(it)
-			end
+		elseif it.Type == "EnchStone" then
+			stones = stones + (tonumber(it.Number) or 1)
+		elseif it.ID == "Dungeon_Ticket" then
+			tickets = tickets + (tonumber(it.Number) or 0)
 		end
 	end
-	STATE.ore, STATE.weapons = ore, weapons
+	local function worn(slot)
+		local it = eq[slot] and have[eq[slot]]
+		if it then return tostring(it.ID), gearValue(have, it) end
+		return "-", 0
+	end
+	STATE.weapon, STATE.weaponTrain = worn("Weapon")
+	STATE.hat, STATE.hatVal = worn("Hat")
+	STATE.armor, STATE.armorVal = worn("Armor")
+	STATE.ore, STATE.weapons, STATE.tickets, STATE.stones = ore, weapons, tickets, stones
+	STATE.indexLevel = (d.Index and tonumber(d.Index.level)) or STATE.indexLevel
+	STATE.towerRound = (d.Dungeon and tonumber(d.Dungeon.maxRound)) or STATE.towerRound
 end
 
 --------------------------------------------------------------------------------
@@ -421,10 +514,10 @@ local function oreList(d)
 	return list
 end
 
-local function weaponSet(d)
+local function gearSet(d)
 	local set = {}
 	for uid, it in pairs((d.Backpack and d.Backpack.have) or {}) do
-		if it.Type == "Weapon" then set[uid] = it end
+		if SLOT_STAT[it.Type] then set[uid] = it end
 	end
 	return set
 end
@@ -443,41 +536,57 @@ local function forgePass()
 		end
 		if total < 4 then return end
 
+		-- ConfigType is the CATEGORY. Alternating gives the index both kinds of
+		-- entry and keeps the hat (a Train boost) climbing beside the weapon.
+		local category = "Weapon"
+		if CONFIG.forgeArmor then
+			STATE.forgeFlip = not STATE.forgeFlip
+			if STATE.forgeFlip then category = "Armor" end
+		end
+
 		STATE.phase = "forge"
-		local before = weaponSet(d)
-		invoke(R.forge, { ConfigType = "Weapon", UUIDList = list })
+		local before = gearSet(d)
+		invoke(R.forge, { ConfigType = category, UUIDList = list })
 		task.wait(0.8)
 		local d2 = data()
 		local made
 		if d2 then
-			for uid, it in pairs(weaponSet(d2)) do
+			for uid, it in pairs(gearSet(d2)) do
 				if not before[uid] then made = it end
 			end
 		end
 		if not made then
-			note("forge produced nothing (" .. table.concat(used, " ") .. ") - stopped")
+			note("forge produced nothing (" .. category .. ": " .. table.concat(used, " ") .. ") - stopped")
 			return
 		end
 		STATE.forged = STATE.forged + 1
-		STATE.lastForge = string.format("%s Train %s from %s", tostring(made.ID), short(trainValue(made)),
-			table.concat(used, " "))
-		note("forged " .. STATE.lastForge)
+		local v = gearValue(d2.Backpack.have, made)
+		STATE.lastForge = string.format("%s %s %s", tostring(made.ID),
+			made.Type == "Weapon" and "Train" or (made.Type == "Hat" and "boost" or "def"),
+			made.Type == "Weapon" and short(v) or string.format("%.2f", v))
+		note("forged " .. STATE.lastForge .. " from " .. table.concat(used, " "))
 	end
 end
 
+-- wear the best piece in every slot
 local function equipPass()
 	local d = data()
 	if not d then return end
-	local eq = d.Backpack and d.Backpack.equiped and d.Backpack.equiped.Weapon
-	local best, bestV = nil, -1
-	for uid, it in pairs(weaponSet(d)) do
-		local v = trainValue(it)
-		if v > bestV then best, bestV = uid, v end
-	end
-	if best and best ~= eq then
-		pcall(function() BackpackData.EquipedItem(best, "Weapon") end)
-		task.wait(1)
-		note("equipped Train " .. short(bestV))
+	local have = d.Backpack.have or {}
+	local eq = d.Backpack.equiped or {}
+	for slot in pairs(SLOT_STAT) do
+		local best, bestV = nil, -1
+		for uid, it in pairs(have) do
+			if it.Type == slot then
+				local v = gearValue(have, it)
+				if v > bestV then best, bestV = uid, v end
+			end
+		end
+		if best and best ~= eq[slot] then
+			pcall(function() BackpackData.EquipedItem(best, slot) end)
+			task.wait(0.8)
+			note(string.format("equipped %s %s", slot, tostring(have[best].ID)))
+		end
 	end
 end
 
@@ -493,21 +602,40 @@ local function enchanted(it)
 	return it.Lock == true or it.Locked == true
 end
 
+-- Gear this script enchanted itself may be sold once outclassed; anything the
+-- player enchanted by hand is always kept.
+_G.__LTF_ENCHANTED = _G.__LTF_ENCHANTED or {}
+local SCRIPT_ENCH = _G.__LTF_ENCHANTED
+
 local function sellPass()
 	local d = data()
 	if not d then return end
-	local eq = d.Backpack and d.Backpack.equiped and d.Backpack.equiped.Weapon
-	local set = weaponSet(d)
-	local worn = eq and set[eq]
-	if not worn then return end -- never sell without knowing what is worn
-	local wornV = trainValue(worn)
+	local have = d.Backpack.have or {}
+	local eq = d.Backpack.equiped or {}
 	local coin0 = STATE.coin
 	local n = 0
-	for uid, it in pairs(set) do
-		if uid ~= eq and not enchanted(it) and trainValue(it) < wornV then
-			pcall(function() BackpackData.TrySellItem(uid, 1) end)
-			n = n + 1
-			task.wait(0.35)
+	for slot in pairs(SLOT_STAT) do
+		local worn = eq[slot] and have[eq[slot]]
+		if worn then -- never sell a slot without knowing what is worn
+			local wornV = gearValue(have, worn)
+			-- the best NORMAL piece feeds every percent item of the slot
+			local keepNormal, keepV = nil, -1
+			for uid, it in pairs(have) do
+				if it.Type == slot and not isPercent(slot, it.ID) then
+					local v = baseValue(slot, it.ID)
+					if v > keepV then keepNormal, keepV = uid, v end
+				end
+			end
+			for uid, it in pairs(have) do
+				if it.Type == slot and uid ~= eq[slot] and uid ~= keepNormal
+					and (not enchanted(it) or SCRIPT_ENCH[uid])
+					and gearValue(have, it) < wornV then
+					pcall(function() BackpackData.TrySellItem(uid, 1) end)
+					SCRIPT_ENCH[uid] = nil
+					n = n + 1
+					task.wait(0.35)
+				end
+			end
 		end
 	end
 	if n > 0 then
@@ -515,7 +643,7 @@ local function sellPass()
 		refresh(false)
 		STATE.sold = STATE.sold + n
 		STATE.coinsSold = STATE.coinsSold + math.max(0, STATE.coin - coin0)
-		note(string.format("sold %d weapons, +%s coins", n, short(STATE.coin - coin0)))
+		note(string.format("sold %d items, +%s coins", n, short(STATE.coin - coin0)))
 	end
 end
 
@@ -580,6 +708,152 @@ local function rebirthPass()
 	end
 end
 
+--------------------------------------------------------------------------------
+-- index: every first-time item is worth EXP, and EXP buys index ranks
+--------------------------------------------------------------------------------
+-- The index ID is "<Type>-<ItemId>" (Weapon-K_23, Hat-LHat_14, Ore-Ore_41).
+-- Measured: 22 unclaimed entries took the EXP 50 -> 1860 and six ranks followed.
+
+local function indexPass()
+	local d = data()
+	local ix = d and d.Index
+	if not ix or type(ix.unlocked) ~= "table" then return end
+	local claimed = type(ix.claimed) == "table" and ix.claimed or {}
+	local n = 0
+	for key in pairs(ix.unlocked) do
+		if not claimed[key] then
+			local kind, id = tostring(key):match("^([^-]+)-(.+)$")
+			if kind and invoke(R.indexExp, kind, id) then n = n + 1 end
+			task.wait(0.15)
+		end
+	end
+	local ranks = 0
+	for _ = 1, 15 do
+		local d1 = data()
+		local before = tonumber(d1 and d1.Index and d1.Index.level) or 0
+		invoke(R.indexLevel)
+		task.wait(0.4)
+		local d2 = data()
+		local after = tonumber(d2 and d2.Index and d2.Index.level) or before
+		if after <= before then break end
+		ranks = ranks + 1
+	end
+	STATE.indexClaimed = STATE.indexClaimed + n
+	STATE.indexRanks = STATE.indexRanks + ranks
+	if n > 0 or ranks > 0 then
+		note(string.format("index: %d entries, %d ranks", n, ranks))
+	end
+end
+
+--------------------------------------------------------------------------------
+-- tower (the "Frozen Tower", open from rebirth 2): one ticket runs all 30 rounds
+--------------------------------------------------------------------------------
+-- Enemies die through the same EnemyHitBE as the stages; CompleteRoundRF credits
+-- the round (coins, ore, enchant stones) and the client starts the next one 3s
+-- later. Measured: 1 ticket -> rounds 1-30 in 129s -> 26 enchant stones.
+
+local function dailyTicketPass()
+	if not DungeonData then return end
+	local claimed = false
+	pcall(function() claimed = DungeonData.CheckTodayClaimed() end)
+	if not claimed then
+		pcall(function() DungeonData.TryClaimDailyDunTic() end)
+		task.wait(1)
+	end
+end
+
+local function towerRun()
+	refresh(true)
+	if STATE.rebirth < 2 or STATE.tickets <= CONFIG.towerKeep or dead() then return end
+	unpin()
+	local stones0 = STATE.stones
+	STATE.phase = "tower"
+	local ok = invoke(R_dungeonInto, 1)
+	local t = 0
+	while not plr:GetAttribute("Dungeoning") and t < 6 do task.wait(0.2); t = t + 0.2 end
+	if not plr:GetAttribute("Dungeoning") then
+		note("tower refused (" .. tostring(ok) .. ")")
+		return
+	end
+	local t0 = os.clock()
+	while plr:GetAttribute("Dungeoning") and os.clock() - t0 < 200 and GEN == _G.__LOOTTOFORGE do
+		local ef = Workspace:FindFirstChild("EnemyFolder")
+		if ef then
+			for _, m in ipairs(ef:GetChildren()) do
+				if not m:GetAttribute("Dead") then
+					pcall(function() hitBE:Fire(m.Name, 1e30, { Damage = 1e30 }) end)
+				end
+			end
+		end
+		task.wait(0.5)
+	end
+	task.wait(2)
+	refresh(true)
+	STATE.towerRuns = STATE.towerRuns + 1
+	STATE.lastTower = string.format("%ds, +%d stones, %d tickets left",
+		math.floor(os.clock() - t0), STATE.stones - stones0, STATE.tickets)
+	note("tower " .. STATE.lastTower)
+end
+
+--------------------------------------------------------------------------------
+-- enchant: fill the empty slots of the worn gear with the best stone
+--------------------------------------------------------------------------------
+-- EnchantRE(equipment uuid, stone uuid, slot). Costs 5,000 coins a stone. The
+-- stones are COMBAT effects (burn, freeze, chain, poison) - they make fights you
+-- play yourself stronger; the farm kills by client authority and gains nothing.
+
+local function stoneRank(id)
+	local tier = tonumber(tostring(id):match("_(%d+)$")) or 0
+	local pref = tostring(id):find("^" .. tostring(CONFIG.element)) and 1 or 0
+	return tier * 10 + pref
+end
+
+local function enchantPass()
+	for _ = 1, 8 do
+		local d = data()
+		if not d then return end
+		local have = d.Backpack.have or {}
+		local eq = d.Backpack.equiped or {}
+		local target, slot
+		for gearSlot in pairs(SLOT_STAT) do
+			local uid = eq[gearSlot]
+			local it = uid and have[uid]
+			if it then
+				for i = 1, tonumber(it.EnchanceNum) or 0 do
+					local s = type(it.EnchanceList) == "table" and it.EnchanceList[i]
+					if not (type(s) == "table" and s.ID) then target, slot = uid, i; break end
+				end
+			end
+			if target then break end
+		end
+		if not target then return end
+
+		local stone, rank = nil, -1
+		for uid, it in pairs(have) do
+			if it.Type == "EnchStone" and (tonumber(it.Number) or 0) > 0 then
+				local r = stoneRank(it.ID)
+				if r > rank then stone, rank = uid, r end
+			end
+		end
+		if not stone or STATE.coin - 5000 < CONFIG.coinKeep then return end
+
+		local id = have[stone].ID
+		pcall(function() BackpackData.EnchantEquipment(target, stone, slot) end)
+		task.wait(1)
+		local d2 = data()
+		local it2 = d2 and d2.Backpack.have[target]
+		local s2 = it2 and type(it2.EnchanceList) == "table" and it2.EnchanceList[slot]
+		if not (type(s2) == "table" and s2.ID) then
+			note("enchant refused on " .. tostring(have[target].ID))
+			return
+		end
+		SCRIPT_ENCH[target] = true
+		STATE.enchants = STATE.enchants + 1
+		note(string.format("enchanted %s slot %d with %s", tostring(have[target].ID), slot, tostring(id)))
+		refresh(false)
+	end
+end
+
 local function unstuck()
 	unpin()
 	local r = hrp()
@@ -598,6 +872,8 @@ _G.__LOOTTOFORGE_DBG = {
 	trainPass = trainPass, stageRun = stageRun, forgePass = forgePass,
 	equipPass = equipPass, sellPass = sellPass, upgradePass = upgradePass,
 	rebirthPass = rebirthPass, unstuck = unstuck, pin = pin, unpin = unpin,
+	indexPass = indexPass, towerRun = towerRun, dailyTicketPass = dailyTicketPass,
+	enchantPass = enchantPass, gearValue = gearValue, bestNormal = bestNormal,
 }
 
 --------------------------------------------------------------------------------
