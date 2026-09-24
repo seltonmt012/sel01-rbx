@@ -45,13 +45,20 @@
 --            redeems (RELEASE -> +10000 money verified, RedeemedCodes updated).
 --   * Claims OfflineEarnings/DailyReward/GroupReward .Claim:FireServer().
 --
--- Deliberately NOT in v1, do not add back without new evidence:
---   Tower    Towers.RF.PlayTower is a separate wave-combat minigame (units carry
---            damage/health for it). Automating it needs its own reversing pass;
---            it is not part of the money loop, so it is left out rather than
---            faked.
---   SellInventory RF - bare and single-number args both sold 0; it needs a unit
---            id list we have not reversed. AutoSell covers ongoing junk instead.
+--   * Luck   The roll only draws units whose 1-in-N chance is >= your luck and
+--            weights them by luck/chance, so luck decides rarity outright. The
+--            server's luck = GetBuff("Luck") x equipped die (2nd return of
+--            RollDice). Dice + rebirth + boosts are the whole path to Legendary.
+--   * Rerolls Grade (1 Gem) / trait (1 Trait Reroll) on the placed units, good
+--            tiers protected by name so the server stops on them.
+--   * Tower  The server simulates each floor; CompleteTowerFloor just asks for
+--            the next one. Skipping the animation is the speed-up. CancelTower
+--            only queues the end - a cancelled run must be drained or it blocks
+--            every new PlayTower.
+--
+-- Deliberately left out, do not add without new evidence:
+--   Fusing   pools return 0.375-1.125x of the input, 0.667x on average.
+--   Forging  ___X is a mirror; purchases are checked against the server copy.
 
 local Players           = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -73,11 +80,24 @@ local CONFIG = {
 	autoRoll    = true,   -- fire RollDice on the server cooldown
 	autoCollect = true,   -- EquipBest: collect every slot + place the best units
 	autoLevel   = true,   -- pour a share of money into placed-slot levels
-	levelShare  = 0.5,    -- fraction of money slot-leveling may spend each pass
+	levelShare  = 0.3,    -- fraction of money slot-leveling may spend each pass
+	saveMinutes = 5,      -- skip leveling while the next dice/rebirth is this close
+	-- Grade/trait odds come from the configs' weights. Grades: D 45%, C 28%, B 15%,
+	-- A 8%, A+ 3%, S 0.9%, S+ 0.11%, Z 0.03%, 神 0.002%. Waiting for S costs ~100
+	-- Gems per unit on average; "A or better" (12%) costs ~8, so that is the default.
+	-- Traits: ~66% are Damage/Health (no income at all); Money II+ (x1.5) is 8.4%.
+	autoGrade   = true,   -- spend Gems rerolling the placed units' grades
+	gradeMin    = 3,      -- keep grades worth >= this income x (A and better)
+	autoTrait   = true,   -- spend Trait Rerolls on the placed units' traits
+	traitMin    = 1.5,    -- keep traits worth >= this income x (Money II and better)
+	autoBoost   = true,   -- activate owned Luck/Income boosts
+	autoTower   = true,   -- farm a tower for boosts, gems and trait rerolls
+	tower       = "Dragon Tower",
 	autoDice    = true,   -- buy the best affordable dice we do not own, equip best
 	autoUpgrade = true,   -- buy the cheapest affordable world-pad upgrade tier
 	autoRebirth = true,   -- rebirth once money reaches nextCost x factor
-	rebirthMult = 2,      -- how many times the next rebirth cost to bank first
+	rebirthMult = 1,      -- rebirth wipes ALL money and nothing else, so rebirthing
+	                      -- the moment the cost is met throws away the least
 	autoSell    = true,   -- keep the backpack under its cap by selling junk
 	sellRarity  = 3,      -- rarity sortOrder floor (3 = always sell below Rare)
 	keepBest    = 20,     -- when the bag fills, keep this many best spares, sell rest
@@ -101,6 +121,8 @@ local STATE = {
 	invCount = 0, invCap = INV_CAP_BASE, nextUpgrade = "-",
 	rolled = 0, collected = 0, diceBought = 0, rebirths = 0, leveled = 0,
 	upgradesBought = 0, sold = 0, soldValue = 0,
+	gradeRolls = 0, traitRolls = 0, boostsUsed = 0, luck = 0,
+	towerRuns = 0, towerFloors = 0, towerBest = 0, towerFloor = 0, towerDrops = 0,
 	codesDone = 0, claims = 0,
 	phase = "idle", note = "-", uiOwner = "-",
 }
@@ -134,6 +156,15 @@ local R = {
 	ClaimOffline    = svc("OfflineEarningsService.RE.Claim"),
 	ClaimDaily      = svc("DailyRewardService.RE.Claim"),
 	ClaimGroup      = svc("GroupRewardService.RE.Claim"),
+	GradeRoll       = svc("GradeService.RE.Roll"),
+	GradeProtect    = svc("GradeService.RE.SetGradeProtected"),
+	TraitRoll       = svc("TraitService.RE.Roll"),
+	TraitProtect    = svc("TraitService.RE.SetTraitProtected"),
+	BoostUse        = svc("BoostService.RE.Use"),
+	PlayTower       = svc("Towers.RF.PlayTower"),
+	CompleteFloor   = svc("Towers.RF.CompleteTowerFloor"),
+	CancelTower     = svc("Towers.RF.CancelTower"),
+	BestTowerTeam   = svc("Towers.RE.EquipBestTowerTeam"),
 }
 
 local DataController = require(Framework.Features.Data.DataController)
@@ -143,6 +174,13 @@ local PlotConfig     = require(Framework.Features.Plot.PlotConfig)
 local MonetConfig    = require(Framework.Features.Monetization.MonetizationConfig)
 local UpgradeConfig  = require(Framework.Features.Upgrades.Upgrades)
 local UnitConfig     = require(Framework.Features.Inventory.Kinds.Unit.UnitConfig)
+local Grades         = require(Framework.Features.Grades.Grades)
+local Traits         = require(Framework.Features.Traits.Traits)
+local TowersConfig   = require(Framework.Features.Towers.Towers)
+local BuffController = require(Framework.Features.Buffs.BuffController)
+local BoostConfig
+pcall(function() BoostConfig = require(Framework.Features.Inventory.Kinds.Boost.BoostConfig) end)
+local BOOSTS = (BoostConfig and (BoostConfig.entries or BoostConfig)) or {}
 
 -- rarity name -> sortOrder (Common 1, Uncommon 2, Rare 3, ...), for the sell floor.
 local RARITY_SORT = {}
@@ -413,6 +451,187 @@ local function sellJunk(force)
 	end
 end
 
+------------------------------------------------------ rerolls, boosts, tower -----
+
+local function itemAmount(key)
+	local e = data().Inventory[key]
+	return (e and tonumber(e.amount)) or 0
+end
+
+local function unitIncome(u)
+	local e = u and UnitConfig.entries[u.name]
+	if not e then return 0 end
+	return tonumber(select(2, pcall(e.income, u))) or 0
+end
+
+-- The units that actually earn, strongest first: a reroll there pays the most.
+local function placedUnits()
+	local d = data()
+	local list = {}
+	for _, slot in pairs(d.Slots) do
+		local u = slot.unitId and d.Inventory[slot.unitId]
+		if u then list[#list + 1] = { id = slot.unitId, u = u, inc = unitIncome(u) } end
+	end
+	table.sort(list, function(a, b) return a.inc > b.inc end)
+	return list
+end
+
+-- Protection is per grade/trait NAME and the server skips a protected one on a
+-- reroll, so protecting every good tier turns "spam reroll" into "reroll until
+-- it lands on something good, then stop". Only fires when a flag must change.
+local function syncProtection()
+	local d = data()
+	for name, g in pairs(Grades) do
+		if type(g) == "table" then
+			local want = (tonumber(g.incomeMultiplier) or 0) >= CONFIG.gradeMin
+			if R.GradeProtect and (d.ProtectedGrades[name] and true or false) ~= want then
+				R.GradeProtect:FireServer(name, want)
+			end
+		end
+	end
+	for name, t in pairs(Traits) do
+		if type(t) == "table" then
+			local want = (tonumber(t.incomeMultiplier) or 0) >= CONFIG.traitMin
+			if R.TraitProtect and (d.ProtectedTraits[name] and true or false) ~= want then
+				R.TraitProtect:FireServer(name, want)
+			end
+		end
+	end
+end
+
+local function goodGrade(g)
+	local def = g and Grades[g]
+	return def and (tonumber(def.incomeMultiplier) or 0) >= CONFIG.gradeMin
+end
+
+local function goodTrait(t)
+	local def = t and Traits[t]
+	return def and (tonumber(def.incomeMultiplier) or 0) >= CONFIG.traitMin
+end
+
+-- Reroll grade and trait on the placed units until each lands on a kept tier.
+-- Gems pay for grades (神 x50 at the top), Trait Rerolls for traits (Eternal x27).
+local function doRerolls()
+	syncProtection()
+	local rolls = 0
+	for _, p in ipairs(placedUnits()) do
+		if rolls >= 8 then break end
+		local attrs = p.u.attributes or {}
+		if CONFIG.autoGrade and R.GradeRoll and not goodGrade(attrs.grade)
+			and itemAmount("Gems") >= 1 then
+			R.GradeRoll:FireServer(p.id)
+			STATE.gradeRolls = STATE.gradeRolls + 1
+			rolls = rolls + 1
+			task.wait(0.25)
+		end
+		if CONFIG.autoTrait and R.TraitRoll and not goodTrait(attrs.trait)
+			and itemAmount("Trait Reroll") >= 1 then
+			R.TraitRoll:FireServer(p.id)
+			STATE.traitRolls = STATE.traitRolls + 1
+			rolls = rolls + 1
+			task.wait(0.25)
+		end
+	end
+end
+
+-- Boosts are timed (2-5 min). Boosts of DIFFERENT categories multiply together,
+-- so every owned Luck/Income boost is worth running; one of the same category is
+-- never started while its twin is still ticking, that would waste it.
+local boostUntil = {}
+local function useBoosts()
+	if not R.BoostUse then return end
+	local d = data()
+	for key, item in pairs(d.Inventory) do
+		local def = type(key) == "string" and BOOSTS[key]
+		if def and type(def) == "table" and def.buffs and (tonumber(item.amount) or 0) >= 1 then
+			local b = def.buffs
+			if b.Luck or b["Money Multiplier"] then
+				local cat = def.category or key
+				if (boostUntil[cat] or 0) < os.clock() then
+					R.BoostUse:FireServer(key)
+					boostUntil[cat] = os.clock() + (tonumber(def.duration) or 120) + 1
+					STATE.boostsUsed = STATE.boostsUsed + 1
+					STATE.note = "boost " .. key
+					task.wait(0.3)
+				end
+			end
+		end
+	end
+end
+
+-- One tower run. The server simulates every floor and hands back the sequence the
+-- client would animate; skipping that animation is the whole speed-up. Asking
+-- before the server's per-floor clock (~1.5-2s) returns nil - that is "not yet",
+-- the run is still alive, so we poll instead of cancelling like the client does.
+--
+-- Read from TowerService itself (it ships to the client): PlayTower refuses while
+-- the player still has a run, and CancelTower does NOT end a run - it only queues
+-- the ending, which the server carries out on the next CompleteTowerFloor. A run
+-- that is cancelled and then left alone therefore blocks every new run forever.
+local function drainTower()
+	if not R.CancelTower then return end
+	local okC, queued = pcall(function() return R.CancelTower:InvokeServer() end)
+	if not (okC and queued) then return end          -- no run exists
+	for _ = 1, 60 do
+		local ok, seq = pcall(function() return R.CompleteFloor:InvokeServer() end)
+		if ok and type(seq) == "table" then
+			for _, ev in ipairs(seq) do
+				if ev.action == "ended" then return end
+			end
+		end
+		task.wait(0.3)
+	end
+end
+
+local function towerRun()
+	if not (R.PlayTower and R.CompleteFloor) then return end
+	if R.BestTowerTeam then R.BestTowerTeam:FireServer(); task.wait(0.5) end
+	local ok, started = pcall(function() return R.PlayTower:InvokeServer(CONFIG.tower) end)
+	if not (ok and started) then
+		drainTower()                                  -- a stale run is in the way
+		task.wait(3.2)                                -- PlayTower's 3s debounce
+		ok, started = pcall(function() return R.PlayTower:InvokeServer(CONFIG.tower) end)
+		if not (ok and started) then STATE.note = "tower refused"; return end
+	end
+	STATE.towerRuns = STATE.towerRuns + 1
+	STATE.towerFloor = 0
+	local misses, sawEnded = 0, false
+	while _G.__ANIMEDICE == generation and CONFIG.auto and CONFIG.autoTower do
+		local okF, seq = pcall(function() return R.CompleteFloor:InvokeServer() end)
+		if not okF or seq == nil or (type(seq) == "table" and #seq == 0) then
+			misses = misses + 1
+			if misses > 50 then break end         -- ~15s with nothing: give up
+			task.wait(0.3)
+		else
+			misses = 0
+			local ended, done = false, false
+			for _, ev in ipairs(seq) do
+				if ev.action == "floorCompleted" then
+					done = true
+					STATE.towerFloor = tonumber(ev.floor) or (STATE.towerFloor + 1)
+					if type(ev.rewards) == "table" then
+						STATE.towerDrops = STATE.towerDrops + #ev.rewards
+					end
+				elseif ev.action == "ended" then
+					ended = true
+					-- the drops of the whole run arrive here, not per floor
+					if type(ev.rewards) == "table" then
+						STATE.towerDrops = STATE.towerDrops + #ev.rewards
+					end
+				end
+			end
+			if done then STATE.towerFloors = STATE.towerFloors + 1 end
+			if STATE.towerFloor > STATE.towerBest then STATE.towerBest = STATE.towerFloor end
+			if ended then sawEnded = true; break end   -- lost, or the run is over
+			if not done then break end
+			task.wait(0.2)
+		end
+	end
+	-- Never leave a run hanging: it would block the next PlayTower.
+	if not sawEnded then drainTower() end
+	STATE.note = "tower ended at floor " .. tostring(STATE.towerFloor)
+end
+
 local function doRebirth()
 	local cost = nextRebirthCost()
 	if not cost then return false end          -- max rebirth reached
@@ -449,11 +668,43 @@ local function doLevel()
 	return false
 end
 
+-- The money the next LUCK step needs: the next stronger die, or the rebirth
+-- threshold, whichever is cheaper. Luck is what unlocks rarer units (the roll
+-- only picks units whose 1-in-N chance is at least your luck), so leveling must
+-- not eat money that would buy the next luck step within a few minutes.
+local function nextLuckGoal()
+	local d = data()
+	local curLuck = 0
+	for _, die in ipairs(DICE) do
+		if d.OwnedDice[die.key] and die.luck > curLuck then curLuck = die.luck end
+	end
+	local goal
+	for _, die in ipairs(DICE) do
+		if die.price and not d.OwnedDice[die.key] and die.luck > curLuck then
+			if not goal or die.price < goal then goal = die.price end
+		end
+	end
+	if CONFIG.autoRebirth then
+		local cost = nextRebirthCost()
+		if cost then
+			local rb = cost * math.max(1, CONFIG.rebirthMult)
+			if not goal or rb < goal then goal = rb end
+		end
+	end
+	return goal
+end
+
 -- Pour a share of the current money into slot levels (the placed units' "Lvl x>y"
 -- pads), weakest slot first so the cheapest levels go first. It protects a
 -- fraction of money for dice/upgrades/rebirth, and stops the moment a level is
 -- unaffordable. This is a real income lever: a leveled unit earns much more.
 local function levelSlots()
+	local goal = nextLuckGoal()
+	local money = data().Money
+	if goal and money < goal and money + STATE.incomePerSec * CONFIG.saveMinutes * 60 >= goal then
+		STATE.phase = "saving for luck"
+		return
+	end
 	local floor = data().Money * (1 - math.clamp(CONFIG.levelShare, 0, 1))
 	for _ = 1, 15 do
 		if data().Money <= floor then break end
@@ -491,6 +742,8 @@ _G.__ANIMEDICE_DBG = {
 	CONFIG = CONFIG, STATE = STATE, data = data,
 	doRoll = doRoll, doCollectPlace = doCollectPlace, doDice = doDice,
 	doUpgrade = doUpgrade, sellJunk = sellJunk, levelSlots = levelSlots,
+	doRerolls = doRerolls, useBoosts = useBoosts, towerRun = towerRun, drainTower = drainTower,
+	nextLuckGoal = nextLuckGoal, placedUnits = placedUnits,
 	doRebirth = doRebirth, doLevel = doLevel, doCodes = doCodes,
 	doClaims = doClaims, DICE = DICE, UPGRADE_LINES = UPGRADE_LINES,
 	invCap = invCap, bestUpgrade = bestUpgrade,
@@ -583,6 +836,49 @@ sellCard:Stepper("Keep best spares",
 local bagLabel = sellCard:Label("bag -")
 sellCard:Button("Sell junk now", function() task.spawn(function() sellJunk(true) end) end)
 
+-- BOOST -----------------------------------------------------------------------
+local GRADE_STEPS = { 1.25, 1.75, 3, 4.5, 7, 10, 15, 25, 50 }
+local GRADE_NAMES = { [1.25]="C", [1.75]="B", [3]="A", [4.5]="A+", [7]="S", [10]="S+",
+	[15]="Z", [25]="Z+", [50]="神" }
+local TRAIT_STEPS = { 1.2, 1.5, 2, 3, 5, 8, 15, 27 }
+local function stepIn(list, value, delta)
+	local idx = 1
+	for i, v in ipairs(list) do if v <= value then idx = i end end
+	return list[math.clamp(idx + delta, 1, #list)]
+end
+
+local boostPage = win:Page("BOOST", UI.icon.spark)
+
+local rrCard = boostPage:Card("REROLLS", 1):Accent()
+toggle(rrCard, "Auto Grade Reroll", "autoGrade",
+	"spends Gems on the placed units until they hit the kept grade")
+rrCard:Stepper("Keep grade from",
+	function() return (GRADE_NAMES[CONFIG.gradeMin] or "?") .. "  x" .. tostring(CONFIG.gradeMin) end,
+	function(delta) CONFIG.gradeMin = stepIn(GRADE_STEPS, CONFIG.gradeMin, delta) end,
+	"A 12% / A+ 4% / S 1% per roll - higher costs far more Gems")
+toggle(rrCard, "Auto Trait Reroll", "autoTrait",
+	"spends Trait Rerolls until the trait is worth keeping")
+rrCard:Stepper("Keep trait from",
+	function() return "x" .. tostring(CONFIG.traitMin) end,
+	function(delta) CONFIG.traitMin = stepIn(TRAIT_STEPS, CONFIG.traitMin, delta) end,
+	"x1.5+ 8% / x2+ 2% / x3+ 0.7% per roll")
+local rrLabel = rrCard:Label("gems -")
+rrCard:Button("Reroll now", function() task.spawn(doRerolls) end)
+
+local towerCard = boostPage:Card("TOWER", 2):Accent()
+toggle(towerCard, "Auto Tower", "autoTower",
+	"skips the fight animation; drops boosts, gems, trait rerolls")
+towerCard:Dropdown("Tower", { "Dragon Tower", "Cursed Tower", "Pirate Tower",
+	"Hidden Leaf Tower", "Slayer Tower", "Infinity Tower" }, CONFIG.tower,
+	function(choice) CONFIG.tower = choice end)
+local towerLabel = towerCard:Label("tower -")
+towerCard:Button("Run tower now", function() task.spawn(towerRun) end)
+
+local boostCard = boostPage:Card("BOOSTS", 2)
+toggle(boostCard, "Auto Use Boosts", "autoBoost",
+	"luck and income boosts; different kinds multiply together")
+local luckLabel = boostCard:Label("luck -")
+
 -- REWARDS ---------------------------------------------------------------------
 local rewPage = win:Page("REWARDS", UI.icon.bag)
 
@@ -635,6 +931,34 @@ task.spawn(function()
 	end
 end)
 
+-- Grade/trait rerolls on the earning units, paid in Gems / Trait Rerolls.
+task.spawn(function()
+	while _G.__ANIMEDICE == generation do
+		if CONFIG.auto and (CONFIG.autoGrade or CONFIG.autoTrait) then pcall(doRerolls) end
+		task.wait(3)
+	end
+end)
+
+-- Owned Luck/Income boosts, each category kept running.
+task.spawn(function()
+	while _G.__ANIMEDICE == generation do
+		if CONFIG.auto and CONFIG.autoBoost then pcall(useBoosts) end
+		task.wait(10)
+	end
+end)
+
+-- Tower farming: runs back to back; its drops feed the two loops above.
+task.spawn(function()
+	while _G.__ANIMEDICE == generation do
+		if CONFIG.auto and CONFIG.autoTower then
+			pcall(towerRun)
+			task.wait(3)
+		else
+			task.wait(2)
+		end
+	end
+end)
+
 -- The economy tick decides how to SPEND, in one place so the money reads stay
 -- coherent: dice first (permanent luck), then rebirth (permanent x mult + slot),
 -- then leftover into slot levels.
@@ -684,6 +1008,12 @@ task.spawn(function()
 		STATE.invCap = invCap()
 		local up = bestUpgrade()
 		STATE.nextUpgrade = up and (up.name .. " " .. fmt(up.price)) or "-"
+		-- Effective roll luck = buff luck x equipped die. The roll only draws units
+		-- whose 1-in-N chance is >= this, so it is the number that decides rarity.
+		local buffLuck = tonumber(select(2, pcall(BuffController.GetBuff, "Luck"))) or 1
+		local dieLuck = 1
+		for _, die in ipairs(DICE) do if die.key == d.Dice then dieLuck = die.luck end end
+		STATE.luck = buffLuck * dieLuck
 
 		local sum = 0
 		for _, slot in pairs(d.Slots) do sum = sum + (slot.balance or 0) end
@@ -711,13 +1041,18 @@ task.spawn(function()
 		diceLabel:set(string.format("%s  ->  %s", STATE.dice, STATE.nextDice))
 		upLabel:set("next: " .. STATE.nextUpgrade)
 		bagLabel:set(string.format("bag: %d / %d", STATE.invCount, STATE.invCap))
+		rrLabel:set(string.format("gems %d   trait rerolls %d   rolls %d/%d",
+			itemAmount("Gems"), itemAmount("Trait Reroll"), STATE.gradeRolls, STATE.traitRolls))
+		towerLabel:set(string.format("floor %d   best %d   runs %d   drops %d",
+			STATE.towerFloor, STATE.towerBest, STATE.towerRuns, STATE.towerDrops))
+		luckLabel:set(string.format("roll luck %s   boosts used %d", fmt(STATE.luck), STATE.boostsUsed))
 
 		local cost, mult = nextRebirthCost()
 		ladderOut:set({
 			"PROGRESS",
 			string.format("  money     %s", fmt(STATE.money)),
 			string.format("  income    %s/s", fmt(STATE.incomePerSec)),
-			string.format("  rolls     %s", fmt(STATE.rolls)),
+			string.format("  luck      %s  (%s die)", fmt(STATE.luck), STATE.dice),
 			string.format("  rebirth   %d", STATE.rebirth),
 			string.format("  slots     %d / %d", STATE.slotsUsed, STATE.slotsMax),
 			string.format("  bag       %d / %d", STATE.invCount, STATE.invCap),

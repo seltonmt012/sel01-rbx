@@ -30,7 +30,7 @@
         113290951185459
       ],
       "status": "ok",
-      "note": "Idle roll-and-place gacha. Free RollDice RemoteFunction (~2s server cooldown, no batch) drops anime units into the inventory; EquipBest banks every plot slot balance into Money AND places the best-income units in one call - the whole money engine. Income is driven by rarity (base Uncommon 100 up to Heavenly 1e23), so luck matters: the dice ladder (BuyDice/EquipDice) buys permanent luck. Rebirth wipes ONLY money, keeps units/dice/slots, and grants a permanent x money and x luck multiplier plus one more slot (1-4 free, up to 15 by rb12). All state is read from DataController.___X, the live server-mirrored table, so every number is real. Codes and offline/daily/group claims automated; Tower combat and SellInventory left out of v1",
+      "note": "Idle roll-and-place gacha. Free RollDice (~2s server cooldown) drops units; every plot slot is collected with CollectBalance(slot) because EquipBest only banks the slots it re-places, then EquipBest places the best. Rarity is decided by luck outright: the roll only draws entries whose 1-in-N chance is >= luck (server luck = GetBuff Luck x equipped die, the 2nd return of RollDice), so the dice ladder, rebirths (wipe only money - done at exactly the cost) and luck boosts are the whole path past Epic. Grade/trait rerolls on the placed units (Gems / Trait Rerolls, good tiers protected by name). Towers: the server simulates each floor, the script skips the animation and drains cancelled runs (a queued cancel blocks every new run). Pad upgrades, slot levels, backpack overflow selling, codes and claims. State from DataController.___X; forging it does nothing, purchases are checked server side",
       "detect": "local rs = game:GetService('ReplicatedStorage') local n = rs:FindFirstChild('Network') local roll = n and n:FindFirstChild('RollService') return roll ~= nil and n:FindFirstChild('DiceShopService') ~= nil and rs:FindFirstChild('Framework') ~= nil"
     },
     {
@@ -565,6 +565,17 @@
       "status": "ok",
       "note": "FREE. Train on a pad for Strength, cross a StartLine to open a chop run, and the trees pay wood plus TREASURE - treasure is carried home (cap 3 plus the backpack upgrade), banked by the return call and sold at the market for Cash, which is the only currency any shop here checks. TrainHit is position gated and the server credits about 3.0 hits/s whatever the fire rate (48/s and 264/s both measured 3.00), so the levers are the pad reward, the chopper multiplier and the rebirth count. The tree HP is simulated entirely in the client and ChopTreeHit takes an ARRAY OF ZONE NUMBERS: the server validates neither the zone nor the position and caps the count at 13, so a zone-52 claim made from zone 1 pays 483M wood and drops treasure worth 7.6e21 against 11 in zone 1. That is the TURBO page - off by default, in no preset, with the measurements printed next to it. A rebirth resets Strength, the LEVEL and EVERY AXE although the game only warns about Strength. The XP curve caps the ladder: level 225 is instant, 275 about ninety seconds and 400 roughly 3.4 years, so rebirth ~11 and Candyland (level 200) are the practical ceiling while Frost (400) and Cyber (600) are not reachable.",
       "detect": "local rs = game:GetService('ReplicatedStorage') local s = rs:FindFirstChild('Shared') if not s then return false end return s:FindFirstChild('TreeZonesData') ~= nil and rs:FindFirstChild('ChopTreeHit') ~= nil and rs:FindFirstChild('TrainHit') ~= nil and rs:FindFirstChild('AxeDataSync') ~= nil"
+    },
+    {
+      "alias": "loottoforge",
+      "name": "[Races]+1 Loot To Forge",
+      "file": "games/loottoforge.lua",
+      "places": [
+        118805555015549
+      ],
+      "status": "ok",
+      "note": "FREE. Train by standing in a train area (the game trains by itself; firing TrainOnceRE by hand is UUID-gated at ~6.7/s and a second loop made the server roll power back), clear a stage, collect the ore and RETURN - ExitFightBE(true) fires ClaimedAllOreRE, and only then does the ore exist server side. The deepest stage is the whole game: stage 5 ore forged Train 500, stage 27 ore forged Train 150M. ForgeRF wants ConfigType 'Weapon' (the category, not 'Katana'), at most 4 ore types and at least 4 ore - a wrong payload is not refused, it eats the ore. Coins come from selling the weaker forged weapons (a Train 25M one sold for 5.04M), and buy the OrePack / Train / Luck upgrades. Rebirth at level 25 x (rebirth+1) keeps coins and weapons. bridge spy BREAKS this game (StageFinishedRF stops returning, nothing drops) - the script hooks nothing.",
+      "detect": "local rs = game:GetService('ReplicatedStorage') local r = rs:FindFirstChild('Remote') local c = rs:FindFirstChild('CTRL') if not r or not c then return false end local f = r:FindFirstChild('Forge') local t = r:FindFirstChild('Train') return f ~= nil and f:FindFirstChild('ForgeRF') ~= nil and t ~= nil and t:FindFirstChild('TrainOnceRE') ~= nil and c:FindFirstChild('TrainCTRL') ~= nil and game.Workspace:FindFirstChild('CanAttackFolder') ~= nil"
     },
     {
       "alias": "redliner",
