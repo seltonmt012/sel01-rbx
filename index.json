@@ -168,6 +168,7 @@
         100068273119174
       ],
       "status": "ok",
+      "paid": true,
       "note": "lobby and map are separate places; every map place is caught by detect",
       "detect": "local plr = game:GetService('Players').LocalPlayer local ps = plr and plr:FindFirstChild('PlayerScripts') if ps and ps:FindFirstChild('LeafSim') then return true end local rem = game:GetService('ReplicatedStorage'):FindFirstChild('Remotes') if rem and rem:FindFirstChild('EmptyBackpack') then return true end return rem ~= nil and rem:FindFirstChild('UpgradeBuy') ~= nil and game.Workspace:FindFirstChild('Teams') ~= nil"
     },
