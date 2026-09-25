@@ -8,7 +8,7 @@
 -- they are - they keep passing "Auto rebirth" and only this file decides what
 -- the player reads.
 --
--- 2283 entries.
+-- 2288 entries.
 
 return {
 	["$%s   %s/s   slots %d/%d   R%d   endurance %s"] = "%s$   %s/s   Plaetze %d/%d   R%d   Ausdauer %s",
@@ -1138,6 +1138,7 @@ return {
 	["Streamer mode"] = "Streamer-Modus",
 	["Style"] = "Stil",
 	["Swap exhibits"] = "Exponate tauschen",
+	["Swap in better animals"] = "Bessere Tiere eintauschen",
 	["Swap margin"] = "Tausch-Vorsprung",
 	["Swap now"] = "Jetzt tauschen",
 	["Swap on base value"] = "Nach Basiswert tauschen",
@@ -1283,6 +1284,7 @@ return {
 	["WHEN TO STOP"] = "WANN AUFHÖREN",
 	["WINS SPENDING"] = "WINS AUSGEBEN",
 	["Walk speed"] = "Laufgeschwindigkeit",
+	["Walk through eggs"] = "Durch Eier laufen",
 	["Walks instead of warping. Free, half the wins per second"] = "Laeuft statt zu warpen. Kostenlos, halb so viele Wins pro Sekunde",
 	["Walks the castle for potions, crystals and gems - the strongest thing here"] = "Laeuft das Castle ab fuer Traenke, Kristalle und Gems - das Staerkste hier",
 	["Wall check"] = "Sichtprüfung",
@@ -1558,6 +1560,7 @@ return {
 	["freeze time is when nine other people are looking at you"] = "in der Freeze-Time schauen neun andere Leute auf dich",
 	["full bag = every pickup fails, so it surfaces and sells"] = "volle Tasche = jedes Aufheben scheitert, also hoch und verkaufen",
 	["full cast loop - no power bar, no reeling needed"] = "kompletter Wurf-Loop - keine Kraftleiste, kein Einholen",
+	["full pen: the weakest comes out and is sold, the better catch goes in"] = "Voller Pen: Das schwächste kommt raus und wird verkauft, der bessere Fang kommt rein.",
 	["full plot pulls its worst one out for a better one"] = "volles Grundstück wirft das schlechteste für ein besseres raus",
 	["fuses four of a kind and clears the weakest when storage fills up"] = "fusioniert vier gleiche und räumt die schwächsten weg, wenn der Platz knapp wird",
 	["gated on your LEVEL, and it unlocks the next free training pads"] = "an dein LEVEL gebunden und schaltet die nächsten freien Trainingsfelder frei",
@@ -1840,6 +1843,7 @@ return {
 	["resets the stage run, multiplies water and cash"] = "setzt den Stage-Lauf zurück, multipliziert Wasser und Geld",
 	["resizes the enemy's own Hitbox part on THIS client"] = "verändert das Hitbox-Teil des Gegners auf DIESEM Client",
 	["richest case that is unlocked, in stock and beats the weakest slot"] = "teuerste Kiste, die freigeschaltet und vorraetig ist und den schwaechsten Slot schlaegt",
+	["risky: the server still sees the shells and pulls you back through them"] = "Riskant: Der Server sieht die Schalen weiterhin und zieht dich zurück.",
 	["roll, collect, upgrade, rebirth"] = "Würfeln, sammeln, upgraden, Rebirth.",
 	["rolling itself is free, only buying costs money"] = "das Rollen selbst ist gratis, nur der Kauf kostet",
 	["rolls cost nothing; titles run x1.2 to x150 and equip themselves"] = "Rolls kosten nichts; Titel gehen x1.2 bis x150 und legen sich an",
@@ -2036,6 +2040,7 @@ return {
 	["vertical - slower than H takes the give-away snap off the head"] = "senkrecht - langsamer als H nimmt den Kopf-Snap raus",
 	["wait after warping before touching - too short and the touch is ignored"] = "nach dem Warp warten vor dem Berühren - zu kurz und es wird ignoriert",
 	["wait this long for an evolve the level already allows"] = "so lange auf ein Evolve warten das das Level schon erlaubt",
+	["walk faster than the bosses (they run 23) - tested to 50 without a kick"] = "Schneller laufen als die Bosse (die laufen 23) - bis 50 ohne Kick getestet.",
 	["walk speed is the race distance - the biggest wins lever"] = "Laufgeschwindigkeit ist die Renndistanz - der größte Hebel für Siege",
 	["walks down to the Crystal Buyer; selling is position gated"] = "läuft zum Kristallhändler - Verkaufen geht nur vor Ort",
 	["walks into the stage, the click kills the mobs, then claims its Wins pad"] = "läuft in die Stage, der Klick tötet die Mobs, dann das Wins-Pad",

@@ -8,7 +8,7 @@
 -- they are - they keep passing "Auto rebirth" and only this file decides what
 -- the player reads.
 --
--- 2283 entries.
+-- 2288 entries.
 
 return {
 	["$%s   %s/s   slots %d/%d   R%d   endurance %s"] = "%s$   %s/с   слоты %d/%d   R%d   выносливость %s",
@@ -1284,6 +1284,7 @@ return {
 	["Style"] = "Стиль",
 	["Suche"] = "Поиск",
 	["Swap exhibits"] = "Менять экспонаты",
+	["Swap in better animals"] = "Заменять на лучших животных",
 	["Swap margin"] = "Порог замены",
 	["Swap now"] = "Заменить сейчас",
 	["Swap on base value"] = "Менять по базовой ценности",
@@ -1452,6 +1453,7 @@ return {
 	["WINS SPENDING"] = "ТРАТА ПОБЕД",
 	["WIRKLICH MELDEN?"] = "ТОЧНО СООБЩИТЬ?",
 	["Walk speed"] = "Скорость ходьбы",
+	["Walk through eggs"] = "Проходить сквозь яйца",
 	["Walks instead of warping. Free, half the wins per second"] = "Идёт пешком вместо телепорта. Бесплатно, вдвое меньше винов в секунду",
 	["Walks the castle for potions, crystals and gems - the strongest thing here"] = "Проходит замок ради зелий, кристаллов и камней - самое сильное здесь",
 	["Wall check"] = "Проверка стен",
@@ -1733,6 +1735,7 @@ return {
 	["freeze time is when nine other people are looking at you"] = "во фриз-тайм на тебя смотрят девять человек",
 	["full bag = every pickup fails, so it surfaces and sells"] = "полный рюкзак = подбор не работает, поэтому наверх и продавать",
 	["full cast loop - no power bar, no reeling needed"] = "полный цикл заброса - без шкалы и вытягивания",
+	["full pen: the weakest comes out and is sold, the better catch goes in"] = "Полный загон: самое слабое убирается и продаётся, лучший улов ставится.",
 	["full plot pulls its worst one out for a better one"] = "полный участок меняет худшего на лучшего",
 	["fuses four of a kind and clears the weakest when storage fills up"] = "объединяет четырёх одинаковых и убирает слабейших, когда место кончается",
 	["gated on your LEVEL, and it unlocks the next free training pads"] = "зависит от УРОВНЯ и открывает следующие бесплатные площадки",
@@ -2022,6 +2025,7 @@ return {
 	["resets the stage run, multiplies water and cash"] = "сбрасывает забег, умножает воду и деньги",
 	["resizes the enemy's own Hitbox part on THIS client"] = "меняет размер части Hitbox врага на ЭТОМ клиенте",
 	["richest case that is unlocked, in stock and beats the weakest slot"] = "самый дорогой кейс, который открыт, есть в наличии и превосходит слабейший слот",
+	["risky: the server still sees the shells and pulls you back through them"] = "Рискованно: сервер всё ещё видит скорлупу и возвращает тебя назад.",
 	["roll, collect, upgrade, rebirth"] = "Бросок, сбор, улучшение, перерождение.",
 	["rolling itself is free, only buying costs money"] = "сам ролл бесплатный, платить нужно только за покупку",
 	["rolls cost nothing; titles run x1.2 to x150 and equip themselves"] = "роллы бесплатны; титулы x1.2 - x150 и надеваются сами",
@@ -2220,6 +2224,7 @@ return {
 	["vertical - slower than H takes the give-away snap off the head"] = "по вертикали - медленнее, чем Г, убирает выдающий рывок к голове",
 	["wait after warping before touching - too short and the touch is ignored"] = "пауза после телепорта перед касанием - слишком мало и касание игнорируется",
 	["wait this long for an evolve the level already allows"] = "столько ждать эволюцию, которую уровень уже позволяет",
+	["walk faster than the bosses (they run 23) - tested to 50 without a kick"] = "Бегать быстрее боссов (у них 23) - проверено до 50 без кика.",
 	["walk speed is the race distance - the biggest wins lever"] = "скорость бега - это дистанция гонки, главный рычаг побед",
 	["walks down to the Crystal Buyer; selling is position gated"] = "идёт к скупщику кристаллов - продажа только на месте",
 	["walks into the stage, the click kills the mobs, then claims its Wins pad"] = "заходит на этап, клик убивает мобов, затем забирает плиту побед",
