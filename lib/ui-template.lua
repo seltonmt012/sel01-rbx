@@ -95,7 +95,8 @@ local UI = {}
 -- ever opened a panel keeps its old copy and the new controls come up untranslated.
 -- 3.10: the Hypershot panel's strings. 3.11: its WORLD / MISC / GUN additions.
 -- 3.12: Steal An Egg's offline money / rift switches.
-UI.VERSION = "3.14"
+-- 3.15: the report card's category, confirmation popup and validation strings.
+UI.VERSION = "3.15"
 UI.BRAND = "SELUX"
 UI.DISCORD = "discord.gg/ARdpzFuKMm"
 UI.REPO = "seltonmt012/sel01-rbx"
@@ -2425,6 +2426,9 @@ function UI.Window(options)
 	local function show(page)
 		if window.current == page then return end
 		if window.current then window.current.holder.Visible = false end
+		-- The report card lives on Home, so "which page were you on" is the page
+		-- visited BEFORE Home, not Home itself. Remembered here for the report.
+		if window.current then window.lastPage = window.current end
 		window.current = page
 		page.holder.Visible = true
 		setText(pageName, page.name)
@@ -3649,7 +3653,33 @@ function UI.Window(options)
 		-- Report card. Sits on Home, under the live panel, so a user who thinks
 		-- something is broken finds it without being told where to look.
 		local report = page:Card("PROBLEM MELDEN", 2):Icon(UI.icon.shield)
-		local reportHint = report:Label("Was genau geht nicht? Schreib es kurz rein - ohne Text kann ich nichts beheben.")
+		page.isHome = true
+		local reportHint = report:Label("Bug reports only. Pick the kind of problem, then write one sentence: what you did and what went wrong. No links, keys or usernames - this is not a chat.")
+
+		-- A REQUIRED category. The choices are dictionary keys, so the dropdown
+		-- shows them translated and hands back the English original; the relay
+		-- gets the short code, never the display text. Kept to ~10 characters -
+		-- the dropdown box is 96px and truncates anything longer.
+		local CATEGORIES = { "Won't load", "No effect", "Wrong", "Error", "Other" }
+		local CATEGORY_CODE = { ["Won't load"] = "load", ["No effect"] = "nothing",
+			["Wrong"] = "wrong", ["Error"] = "error", ["Other"] = "other" }
+		-- The long form, shown in the confirmation so nobody has to guess what
+		-- "Wrong" meant when they picked it.
+		local CATEGORY_LONG = {
+			["Won't load"] = "The script does not load / no panel",
+			["No effect"] = "The panel is there but a feature does nothing",
+			["Wrong"] = "A feature does the wrong thing",
+			["Error"] = "An error message, or the game freezes / crashes",
+			["Other"] = "Something else",
+		}
+		local category = nil
+		-- Forward-declared: the dropdown's callback repaints the button, and a
+		-- local is invisible above its own definition.
+		local paintReportBtn
+		report:Dropdown("What kind of problem?", CATEGORIES, "Pick one", function(choice)
+			category = choice
+			if paintReportBtn then paintReportBtn() end
+		end)
 
 		-- Free text, and it is REQUIRED. It used to be optional with a two-press
 		-- confirmation instead, and both halves of that were wrong: the reports
@@ -3671,7 +3701,7 @@ function UI.Window(options)
 		msgInput.BackgroundTransparency = 1
 		msgInput.Size = UDim2.fromScale(1, 1)
 		msgInput.Text = ""
-		setPlaceholder(msgInput, "Was genau geht nicht? (Pflicht)")
+		setPlaceholder(msgInput, "e.g. Auto rebirth is on but it never rebirths")
 		msgInput.TextSize = 11
 		msgInput.Font = UI.font.body
 		msgInput.TextColor3 = UI.theme.textSoft
@@ -3697,71 +3727,301 @@ function UI.Window(options)
 			counter.Text = #msgInput.Text .. " / " .. MAX_MESSAGE
 		end)
 
-		-- ONE gate, and it is the description. A bright button that costs nothing
-		-- gets pressed out of curiosity: measured on the live relay, the reports
-		-- arriving carried notes like "Bereit" and "Gestoppt" and statuses like
-		-- "0 wins lvl 0 reb 0" - panels that had just been loaded. Nobody had a
-		-- problem; they had a button. A sentence about what is wrong costs a
-		-- curious click nothing to skip and is the only thing that makes a report
-		-- actionable, so it is the requirement.
-		local MIN_MESSAGE = 10
+		-- THE GATE. Measured on the live #reports forum 2026-09-25: of 335
+		-- reports, 111 were nothing but the Discord invite - the Discord bar below
+		-- copies it to the clipboard and this is the only text box in sight - 20
+		-- more were other links and loadstrings, a dozen were keys or settings
+		-- codes typed on the key page, and most of the rest were usernames, "free
+		-- robux" and keyboard mash. Only ~40 described a problem. So a report must
+		-- look like a sentence, carry no link, and come with a category, and the
+		-- panel says WHICH rule was broken - a grey button that does not say why is
+		-- what gets pressed twenty times. The relay enforces the same rules
+		-- (tools/report-relay/worker.js); keep the numbers in step.
+		local MIN_LETTERS = 15
+		local MIN_WORDS = 3
+		local COOLDOWN = 120          -- seconds between two reports
+		local SESSION_CAP = 3         -- reports per Lua VM, i.e. per game session
+		-- The bare-domain endings need a non-letter after them (%f[%A]): "work.Come
+		-- on" is a sentence typed without a space, not a link.
+		local LINKS = { "https?://", "www%.", "loadstring", "httpget", "rscripts",
+			"pastebin", "github", "require%s*%(", "%w%.gg/", "%w%.ly/",
+			"%w%.com%f[%A]", "%w%.net%f[%A]", "%w%.org%f[%A]", "%w%.io%f[%A]",
+			"%w%.xyz%f[%A]", "%w%.lua%f[%A]" }
 		local reportBtn
-		local sent = false
+		-- `busy` is the lock that was missing. The button runs its callback in a
+		-- task.spawn and `sent` was only set after the HTTP call returned, so a
+		-- double tap - or a phone registering one tap twice - sent the same report
+		-- two or three times within 30ms. That is where the identical triples in
+		-- the forum came from.
+		local sent, busy = false, false
+		-- Per session, not per panel: a rebuilt panel (reload, language reset)
+		-- must not hand out a fresh allowance.
+		local sess = _G.__SEL_REPORTS
+		if type(sess) ~= "table" then sess = { count = 0, last = 0 } _G.__SEL_REPORTS = sess end
 
-		-- Long enough, and not the same key held down: ".........." and "aaaaaaaaa"
-		-- clear a length check and say exactly as much as an empty box.
-		local function described()
-			local text = string.gsub(msgInput.Text, "^%s+", "")
-			text = string.gsub(text, "%s+$", "")
-			if #text < MIN_MESSAGE then return false end
-			local seen, distinct = {}, 0
-			for i = 1, #text do
-				local ch = string.lower(string.sub(text, i, i))
-				if not seen[ch] then seen[ch] = true distinct = distinct + 1 end
+		local function trimmed()
+			local t = string.gsub(msgInput.Text, "^%s+", "")
+			t = string.gsub(t, "%s+$", "")
+			return t
+		end
+
+		-- Letters, not bytes. A UTF-8 lead byte is one character, so Cyrillic,
+		-- Arabic or Thai are measured like Latin; CJK, kana and Hangul (lead
+		-- bytes E3-ED) count double because one of those is closer to a word.
+		-- E2 (symbols, arrows, dingbats) and F0+ (emoji) count as nothing.
+		local function weight(b)
+			if (b >= 65 and b <= 90) or (b >= 97 and b <= 122) then return 1 end
+			if b >= 0xC3 and b <= 0xE1 then return 1 end
+			if b >= 0xE3 and b <= 0xED then return 2 end
+			if b == 0xEE or b == 0xEF then return 1 end
+			return 0
+		end
+		local function measure(text)
+			local m = { letters = 0, digits = 0, nonAscii = 0, distinct = 0, words = 0 }
+			local seen, i, n = {}, 1, #text
+			while i <= n do
+				local b = string.byte(text, i)
+				local len = (b >= 0xF0 and 4) or (b >= 0xE0 and 3) or (b >= 0xC0 and 2) or 1
+				local ch = string.sub(text, i, i + len - 1)
+				i = i + len
+				local w = weight(b)
+				if b >= 48 and b <= 57 then m.digits = m.digits + 1 end
+				if w > 0 then
+					m.letters = m.letters + w
+					if b >= 0x80 then m.nonAscii = m.nonAscii + w end
+					local key = string.lower(ch)
+					if not seen[key] then seen[key] = true m.distinct = m.distinct + 1 end
+				end
 			end
-			return distinct >= 4
+			for token in string.gmatch(text, "[^%s%p]+") do
+				local l, d = 0, 0
+				for j = 1, #token do
+					local c = string.byte(token, j)
+					if weight(c) > 0 then l = l + 1
+					elseif c >= 48 and c <= 57 then d = d + 1 end
+				end
+				if l >= 2 and l > d then m.words = m.words + 1 end
+			end
+			return m
+		end
+
+		-- nil when the text is a usable description, otherwise the sentence that
+		-- tells the user what to change. Order matters: the specific mistakes
+		-- (invite, key, settings code) get their own answer before the generic ones.
+		local function problemWith(text)
+			local low = string.lower(text)
+			if string.find(low, "discord%.gg") or string.find(low, "discord%.com") then
+				return "That is a Discord link. You do not need to report it - open it in your browser to join. This box is only for bugs."
+			end
+			if string.find(low, "selux%-%w%w%w%w%w%-") then
+				return "That is a key, not a problem. Keys go in the box on the KEY page."
+			end
+			if string.find(low, "selux1%.") then
+				return "That is a settings code. Share it in #configs on the Discord, not here."
+			end
+			for _, p in ipairs(LINKS) do
+				if string.find(low, p) then
+					return "No links or scripts in a report. Describe the problem in words."
+				end
+			end
+			local m = measure(text)
+			if m.digits > m.letters then
+				return "That is mostly numbers. Describe the problem in words - no usernames or ids."
+			end
+			if m.letters < MIN_LETTERS or m.distinct < 6
+				or (m.words < MIN_WORDS and m.nonAscii < 8) then
+				return UI.tf("Too short. Write a full sentence (at least %d letters and %d words): what did you do, what happened?",
+					MIN_LETTERS, MIN_WORDS)
+			end
+			return nil
+		end
+
+		-- Everything that stops a send, in the order the user should fix it.
+		local function blocker()
+			if not category then return "First pick what kind of problem it is (the box above)." end
+			local text = trimmed()
+			if text == "" then return "Write what is broken first." end
+			local why = problemWith(text)
+			if why then return why end
+			if sess.count >= SESSION_CAP then
+				return UI.tf("You already sent %d reports this session. For more, use #support on the Discord.", SESSION_CAP)
+			end
+			local wait = COOLDOWN - (os.time() - (sess.last or 0))
+			if wait > 0 then
+				return UI.tf("Please wait %d s before sending another report.", wait)
+			end
+			return nil
 		end
 
 		-- The button says whether it will do anything BEFORE it is pressed. A
 		-- press that silently does nothing is what made the old confirmation read
 		-- as a bug rather than as a question.
-		local function paintReportBtn()
+		paintReportBtn = function()
 			-- reportBtn is still nil while the field is being typed into during
-			-- construction, and a local is invisible above its own definition -
-			-- so this is checked rather than assumed.
-			if not reportBtn or sent then return end
-			local ready = described()
+			-- construction, so this is checked rather than assumed.
+			if not reportBtn or sent or busy then return end
+			local ready = blocker() == nil
 			reportBtn.BackgroundColor3 = ready and UI.theme.warn or UI.theme.band
-			setText(reportBtn, ready and "MELDEN" or "MELDEN (TEXT FEHLT)")
+			setText(reportBtn, ready and "CHECK AND SEND" or "REPORT NOT READY")
 		end
 
 		-- Repaint as it is typed, so the button turns from grey to live the moment
-		-- the description is long enough.
+		-- the description is good enough.
 		msgInput:GetPropertyChangedSignal("Text"):Connect(paintReportBtn)
 
-		reportBtn = report:Button("MELDEN (TEXT FEHLT)", function()
-			if sent then return end
+		------------------------------------------------------- confirmation
+		-- A popup INSIDE the panel that shows exactly what will be sent and asks
+		-- "is this the problem?". People did not understand what this box was for;
+		-- seeing the game, the script and what the script is doing right now
+		-- next to their own sentence is what makes that obvious.
+		local confirmGui
+		local function closeConfirm()
+			if confirmGui then pcall(function() confirmGui:Destroy() end) end
+			confirmGui = nil
+		end
 
-			if not described() then
-				reportHint.set(UI.tf("Bitte schreib kurz rein, was nicht geht - mindestens %d Zeichen. Ohne Beschreibung kann ich den Fehler nicht finden.", MIN_MESSAGE))
+		local function openConfirm(r, choice, onSend)
+			closeConfirm()
+			-- A button, not a frame: it has to swallow clicks so nothing under
+			-- the popup can be pressed while it is open.
+			local scrim = Instance.new("TextButton")
+			scrim.Name = "SeluxReportConfirm"
+			scrim.Size = UDim2.fromScale(1, 1)
+			scrim.BackgroundColor3 = Color3.new(0, 0, 0)
+			scrim.BackgroundTransparency = 0.3
+			scrim.BorderSizePixel = 0
+			scrim.Text = ""
+			scrim.AutoButtonColor = false
+			scrim.ZIndex = 300
+			scrim.Parent = root
+			corner(scrim, 13)
+			confirmGui = scrim
+
+			local box = frame(scrim, UDim2.fromOffset(470, 0), nil, UI.theme.window)
+			box.AnchorPoint = Vector2.new(0.5, 0.5)
+			box.Position = UDim2.fromScale(0.5, 0.5)
+			box.AutomaticSize = Enum.AutomaticSize.Y
+			box.Active = true
+			box.ZIndex = 301
+			corner(box, 12)
+			stroke(box, UI.theme.warn, 0.35)
+			pad(box, 18, 18, 16, 16)
+			listLayout(box, 7)
+			local order = 0
+			local function nextOrder() order = order + 1 return order end
+
+			local title = label(box, "Is this the problem?", 15, UI.font.heading, UI.theme.warn)
+			title.Size = UDim2.new(1, 0, 0, 18)
+			title.LayoutOrder = nextOrder()
+			title.ZIndex = 302
+			local sub = label(box, "This is exactly what the developer will get. Check it, then send.",
+				11, UI.font.body, UI.theme.muted)
+			sub.Size = UDim2.new(1, 0, 0, 0)
+			sub.AutomaticSize = Enum.AutomaticSize.Y
+			sub.TextWrapped = true
+			sub.LayoutOrder = nextOrder()
+			sub.ZIndex = 302
+
+			-- caption | value. The value is DATA - the user's text, the game name
+			-- - so it is written raw, never through the dictionary, and never as
+			-- RichText (a "<" in a message must not eat the rest of the line).
+			local function line(caption, value, colour)
+				local row2 = frame(box, UDim2.new(1, 0, 0, 0), nil, UI.theme.window, 1)
+				row2.AutomaticSize = Enum.AutomaticSize.Y
+				row2.LayoutOrder = nextOrder()
+				row2.ZIndex = 302
+				local cap = label(row2, caption, 11, UI.font.body, UI.theme.dimmer)
+				cap.Size = UDim2.fromOffset(118, 14)
+				cap.TextYAlignment = Enum.TextYAlignment.Top
+				cap.ZIndex = 303
+				local val = label(row2, "", 11, UI.font.body, colour or UI.theme.textSoft)
+				val.RichText = false
+				val.Text = (value == nil or value == "") and "-" or tostring(value)
+				val.Position = UDim2.fromOffset(124, 0)
+				val.Size = UDim2.new(1, -124, 0, 0)
+				val.AutomaticSize = Enum.AutomaticSize.Y
+				val.TextWrapped = true
+				val.TextYAlignment = Enum.TextYAlignment.Top
+				val.ZIndex = 303
+				return val
+			end
+
+			line("Game", tostring(r.game) .. "   (place " .. tostring(r.place) .. ")")
+			line("Script", tostring(r.script) .. "   ·   Selux v" .. tostring(r.ui))
+			line("Page", r.page)
+			line("Script is doing", r.note ~= "" and r.status ~= ""
+				and (r.note .. "   ·   " .. r.status) or (r.note ~= "" and r.note or r.status))
+			line("Options on", string.sub(r.active or "", 1, 140))
+			line("Problem", UI.t(CATEGORY_LONG[choice] or choice), UI.theme.warn)
+			line("Your message", "\"" .. r.message .. "\"", UI.theme.text)
+
+			local foot = label(box, "Bug reports only - nobody replies here. For help, keys or questions use #support on the Discord.",
+				10, UI.font.body, UI.theme.faint)
+			foot.Size = UDim2.new(1, 0, 0, 0)
+			foot.AutomaticSize = Enum.AutomaticSize.Y
+			foot.TextWrapped = true
+			foot.LayoutOrder = nextOrder()
+			foot.ZIndex = 302
+
+			local buttons = frame(box, UDim2.new(1, 0, 0, 36), nil, UI.theme.window, 1)
+			buttons.LayoutOrder = nextOrder()
+			buttons.ZIndex = 302
+			-- 36px tall: this popup is read on phones too, and anything smaller is
+			-- a missed tap there.
+			local function button(caption, colour, xScale, onClick)
+				local b = Instance.new("TextButton")
+				b.Size = UDim2.new(0.5, -5, 1, 0)
+				b.Position = UDim2.new(xScale, xScale > 0 and 5 or 0, 0, 0)
+				b.BackgroundColor3 = colour
+				b.BorderSizePixel = 0
+				b.AutoButtonColor = false
+				setText(b, caption)
+				b.TextSize = 12
+				b.Font = UI.font.heading
+				b.TextColor3 = colour == UI.theme.input and UI.theme.textSoft or Color3.new(1, 1, 1)
+				b.ZIndex = 303
+				b.Parent = buttons
+				corner(b, 8)
+				b.MouseButton1Click:Connect(function()
+					press(b)
+					onClick()
+				end)
+				return b
+			end
+			button("YES, SEND IT", UI.theme.warn, 0, function()
+				closeConfirm()
+				task.spawn(onSend)
+			end)
+			button("CANCEL", UI.theme.input, 0.5, function()
+				closeConfirm()
+				reportHint.set("Not sent. Change the text or the category and try again.")
+			end)
+		end
+
+		local function doSend(r)
+			if sent or busy then return end
+			busy = true
+			setText(reportBtn, "SENDING ...")
+			reportBtn.BackgroundColor3 = UI.theme.band
+			local ok, how, detail = UI.sendReport(r)
+			busy = false
+			if how == "refused" then
+				-- The relay applies the same rules; if it still says no, show its
+				-- reason and leave the card usable.
+				reportHint.set(UI.tf("The server refused this report: %s", tostring(detail or "?")))
+				paintReportBtn()
 				return
 			end
-
-			local r = UI.buildReport(window)
-			r.message = msgInput.Text
-			-- The clipboard fallback wants it on one line; the relay gets the
-			-- message as its own field and formats it itself.
-			if r.message ~= "" then
-				r.text = r.text .. "  |  Text: " .. r.message
-			end
-			local ok, how = UI.sendReport(r)
 			if not ok then
 				reportHint.set("Konnte nicht senden. Bitte im Discord im Support-Forum melden.")
+				paintReportBtn()
 				return
 			end
 			-- Locked afterwards: the same person pressing twenty times tells us
 			-- nothing more than pressing once, and it is the whole spam surface.
 			sent = true
+			sess.count = sess.count + 1
+			sess.last = os.time()
 			if how == "limit" then
 				-- Not delivered. Say so, and give the user the way round it.
 				setText(reportBtn, "LIMIT ERREICHT")
@@ -3783,9 +4043,29 @@ function UI.Window(options)
 				reportBtn.BackgroundColor3 = UI.theme.good
 				reportHint.set(UI.tf("Angekommen. Nummer #%s - die kannst du im Support-Forum nennen.", r.id))
 			end
+		end
+
+		-- The press never sends. It either says which rule is broken, or opens
+		-- the confirmation, and only YES in there sends.
+		reportBtn = report:Button("REPORT NOT READY", function()
+			if sent or busy or confirmGui then return end
+			local why = blocker()
+			if why then
+				reportHint.set(why)
+				reportHint.label.TextColor3 = UI.theme.warn
+				return
+			end
+			reportHint.label.TextColor3 = UI.theme.dimmer
+			local r = UI.buildReport(window)
+			r.message = trimmed()
+			r.category = CATEGORY_CODE[category] or "other"
+			-- The clipboard fallback wants everything in one block; the relay gets
+			-- message and category as their own fields and formats them itself.
+			r.text = r.text .. "\nProblem: " .. tostring(category) .. "\nText: " .. r.message
+			openConfirm(r, category, function() doSend(r) end)
 		end, UI.theme.warn)
 		paintReportBtn()   -- start grey: nothing has been typed yet
-		report:Label("Mitgeschickt werden Spiel, Script-Version, der letzte Status und die aktiven Optionen. Kein Roblox-Name, keine UserId.")
+		report:Label("Sent along: game, script version, the page you were on, what the script is doing and the options that are on. No Roblox name, no UserId.")
 
 		-- The settings live on their own page with a gear at the BOTTOM of the rail.
 		-- Built from here so no game script gained a line for it, and built LAST so
@@ -3996,7 +4276,17 @@ function UI.buildReport(window, note)
 	end
 	table.sort(active)
 
+	-- The report card sits on Home, so the page that matters is the one the user
+	-- came from (show() remembers it as lastPage).
+	local pageName = "?"
+	pcall(function()
+		local p = window and window.current
+		if p and p.isHome and window.lastPage then p = window.lastPage end
+		pageName = (p and p.name) or "?"
+	end)
+
 	local report = {
+		page = pageName,
 		place = placeId,
 		game = gameName,
 		script = alias,
@@ -4019,7 +4309,7 @@ function UI.buildReport(window, note)
 	report.text = table.concat({
 		"**Selux report #" .. report.id .. "**",
 		"Spiel: " .. report.game .. "  (place " .. report.place .. ")",
-		"Script: " .. report.script .. "   UI v" .. report.ui,
+		"Script: " .. report.script .. "   UI v" .. report.ui .. "   page " .. report.page,
 		"Status: " .. (report.status ~= "" and report.status or "-"),
 		"Notiz: " .. (report.note ~= "" and report.note or "-"),
 		"Aktiv: " .. (report.active ~= "" and report.active or "-"),
@@ -4028,7 +4318,8 @@ function UI.buildReport(window, note)
 	return report
 end
 
--- Returns ok, wie ("relay" | "clipboard" | "keiner")
+-- Returns ok, wie ("relay" | "limit" | "doppelt" | "clipboard" | "keiner"),
+-- or false, "refused", <relay's reason> when the relay rejected the content.
 function UI.sendReport(report)
 	if UI.REPORT_URL ~= "" then
 		local request = (syn and syn.request) or (http and http.request) or http_request or request
@@ -4055,6 +4346,14 @@ function UI.sendReport(report)
 					return true, "doppelt"
 				end
 				return true, "relay"
+			end
+			-- 400/422 is the relay applying its rules (no link, too short, no
+			-- category). Falling back to the clipboard there would only move the
+			-- same unusable text into #support, so the reason goes back to the
+			-- card instead. Anything else (5xx, no answer) still falls back.
+			local code = ok and response and (response.StatusCode or 0) or 0
+			if code == 400 or code == 422 then
+				return false, "refused", tostring(response.Body or code)
 			end
 		end
 	end
