@@ -3594,6 +3594,24 @@ function UI.Window(options)
 		for i, p in ipairs(self.pages) do p.railButton.LayoutOrder = i end
 		show(page)
 
+		-- PAID SCRIPTS OPEN ON THEIR OWN FIRST PAGE, not on Home. Someone who
+		-- just walked through a key gate sees a changelog and a report card and
+		-- reads it as "the key did nothing"; the user got exactly those reports.
+		-- Home stays first in the rail. `landOnGame` overrides either way. The
+		-- switch is deferred because scripts call Home() before OR after their
+		-- own pages, and only after the build is the first game page known.
+		local land = options2.landOnGame
+		if land == nil then
+			local g = _G.__SEL and _G.__SEL.game
+			land = type(g) == "table" and g.paid == true
+		end
+		if land then
+			task.delay(0.3, function()
+				local target = self.pages[2]
+				if target and target ~= page and page.holder.Parent then show(target) end
+			end)
+		end
+
 		-- Six, not eight. Each entry is ~46px and the body is 420px tall, so
 		-- eight ran straight under the Discord bar and the last two were
 		-- unreachable. Six fills the page and stops at the edge.
