@@ -478,6 +478,14 @@ end
 
 local TRAIN_GAP = 0.3
 
+-- True while "Run it once" owns the account. Declared this high because the
+-- training and chopping loops read it to step aside mid-pass (a Lua local is
+-- invisible above its own definition - declared in the FINISH section it
+-- resolved to a nil global here). See finishPass for why it has to pause
+-- everything else.
+local FINISHING = false
+local BODY_ACTIVE = false   -- the main body thread is mid-pass
+
 local function trainPass(seconds)
 	if not R.TrainHit then return end
 	local pad, part = bestPad()
@@ -497,7 +505,7 @@ local function trainPass(seconds)
 		end
 	end)
 	while os.clock() - t0 < (seconds or CONFIG.trainSecs)
-		and CONFIG.auto and CONFIG.train and GEN == _G.__CHOPTREES do
+		and CONFIG.auto and CONFIG.train and GEN == _G.__CHOPTREES and not FINISHING do
 		pcall(function() R.TrainHit:FireServer(pad.mat) end)
 		task.wait(TRAIN_GAP)
 	end
@@ -593,7 +601,7 @@ local function chopPass(seconds)
 	if type(mult) == "number" and mult > 0 then swing = swing / mult end
 
 	while os.clock() - t0 < (seconds or CONFIG.chopSecs)
-		and CONFIG.auto and CONFIG.chop and GEN == _G.__CHOPTREES do
+		and CONFIG.auto and CONFIG.chop and GEN == _G.__CHOPTREES and not FINISHING do
 
 		if not runActive() then
 			if not enterRun() then break end
@@ -618,10 +626,23 @@ local function chopPass(seconds)
 			local tz = treezoneParts()
 			if #tz > 0 then
 				local pick = tz[math.random(1, #tz)]
-				local _, hrp = char()
+				local ch, hrp = char()
 				if hrp then
-					hrp.CFrame = CFrame.new(pick.Position + Vector3.new(0, 4, 0))
-					task.wait(0.5)
+					-- LAND ON THE SURFACE, NOT IN THE PART. This used to warp to
+					-- the part's CENTRE + 4, and for a thick zone block that is
+					-- inside or under the ground - the "teleported under the map"
+					-- the user kept seeing. Ray down from well above the part and
+					-- stand on whatever it hits; no hit, no warp.
+					local params = RaycastParams.new()
+					params.FilterType = Enum.RaycastFilterType.Exclude
+					params.FilterDescendantsInstances = { ch }
+					local top = pick.Position + Vector3.new(0, pick.Size.Y / 2 + 60, 0)
+					local hit = workspace:Raycast(top, Vector3.new(0, -200, 0), params)
+					if hit then
+						hrp.CFrame = CFrame.new(hit.Position + Vector3.new(0, 3.5, 0))
+						hrp.AssemblyLinearVelocity = Vector3.zero
+						task.wait(0.5)
+					end
 				end
 			end
 		end
@@ -810,9 +831,17 @@ local function upgradePass()
 				end)
 				local t = 0
 				while not done and t < 5 do task.wait(0.1); t = t + 0.1 end
-				task.wait(0.4)
-				local after = data(true)
-				local nl = after and tonumber((after.upgrades or {})[id]) or lvl
+				-- The profile push lags the purchase. One read after 0.4s missed
+				-- a moveSpeed buy that did land, the finish read that as "nothing
+				-- left to buy" and stopped with equip/luck at 0 for 10K-250K
+				-- against 1.6e23 cash. Poll for the new level instead.
+				local nl = lvl
+				local w0 = os.clock()
+				repeat
+					task.wait(0.2)
+					local after = data(true)
+					nl = after and tonumber((after.upgrades or {})[id]) or lvl
+				until nl > lvl or os.clock() - w0 > 3
 				if nl > lvl then
 					STATE.spent = STATE.spent + price
 					note("upgrade " .. id .. " -> " .. nl)
@@ -924,10 +953,23 @@ local function petPass()
 	if not d then return end
 
 	-- hatch
-	local eggs = {}
+	-- The ladder is the folders in ReplicatedStorage PLUS the cost table: Egg1
+	-- has no folder there (12 of 15 replicate), yet HatchEgg("Egg1") hatches a
+	-- Cow for 250 wood - a fresh save sat on "no affordable egg" with 1,590
+	-- wood because the one egg it could pay for was never on the list.
+	local eggs, seen = {}, {}
 	for _, inst in ipairs(ReplicatedStorage:GetChildren()) do
 		local n = inst.Name:match("^Egg(%d+)$")
-		if n then eggs[#eggs + 1] = { name = inst.Name, n = tonumber(n) } end
+		if n and not seen[inst.Name] then
+			seen[inst.Name] = true
+			eggs[#eggs + 1] = { name = inst.Name, n = tonumber(n) }
+		end
+	end
+	for name in pairs(EGG_COST) do
+		if not seen[name] then
+			seen[name] = true
+			eggs[#eggs + 1] = { name = name, n = tonumber(name:match("%d+")) }
+		end
 	end
 	table.sort(eggs, function(a, b) return a.n > b.n end)
 
@@ -942,7 +984,7 @@ local function petPass()
 		if e.name ~= bestEgg then queue[#queue + 1] = e end
 	end
 
-	local hatched = false
+	local hatched, full = false, false
 	for _, e in ipairs(queue) do
 		local done, res = false, nil
 		task.spawn(function()
@@ -954,6 +996,7 @@ local function petPass()
 		while not done and t < 4 do task.wait(0.1); t = t + 0.1 end
 		if res == "full" then
 			note("pet storage full")
+			full = true
 			break
 		elseif res and res ~= "broke" then
 			if bestEgg ~= e.name then bestEgg = e.name end
@@ -984,23 +1027,38 @@ local function petPass()
 			bestEgg = nil
 		end
 	end
-	if not hatched and not bestEgg then note("no affordable egg") end
+	-- "full" is its own answer; reporting it as "no affordable egg" sent the
+	-- reader looking at the wood balance (6.6e9 of it) instead of the storage
+	if not hatched and not full and not bestEgg then note("no affordable egg") end
 
-	-- wear: the verb is `toggle_equip` and it takes the pet's INDEX, not its id.
-	-- Anything else ("equip", "wear", "toggle") is accepted and does nothing.
-	local e = data(true)
-	if not e then return end
-	local slots = 1 + (tonumber((e.upgrades or {}).equip) or 0)
-	local worn = {}
-	for _, v in pairs(e.equippedPets or {}) do worn[tonumber(v) or -1] = true end
-	local wornCount = count(e.equippedPets)
-	local total = count(e.pets)
-	for i = 1, total do
-		if wornCount >= slots then break end
-		if not worn[i] then
-			pcall(function() R.PetAction:FireServer("toggle_equip", i) end)
-			wornCount = wornCount + 1
-			task.wait(0.4)
+	-- WEAR THE BEST, NOT THE FIRST. This used to toggle_equip pets 1..N by
+	-- index, which wore whatever was hatched first - a player reported "it
+	-- doesn't equip best pets" and that was exactly it. The pets menu
+	-- (PlayerScripts.Client.PetsMenu) has an "Equip Best" button that fires
+	-- PetAction("equip_best", nil); the game ranks, we just press it.
+	pcall(function() R.PetAction:FireServer("equip_best", nil) end)
+	task.wait(0.6)
+
+	-- A FULL STORAGE STOPPED THE WHOLE PET LADDER. HatchEgg answers "full" at
+	-- 30 pets (30 + 30 x storage upgrade) and nothing here ever made room, so
+	-- the account sat on 30 early pets with 6.6e9 wood unspent. Only worn pets
+	-- pay, and Equip Best has just picked those, so everything not worn goes
+	-- through the menu's own Delete: PetAction("delete", {indices}).
+	if full then
+		local e = data(true)
+		if not e then return end
+		local worn = {}
+		for _, v in pairs(e.equippedPets or {}) do worn[tonumber(v) or -1] = true end
+		local drop = {}
+		for i = 1, count(e.pets) do
+			if not worn[i] then drop[#drop + 1] = i end
+		end
+		if #drop > 0 and count(e.equippedPets) > 0 then
+			pcall(function() R.PetAction:FireServer("delete", drop) end)
+			task.wait(0.6)
+			local after = data(true)
+			note(("storage full - deleted %d unworn pets (%d -> %d)"):format(
+				#drop, count(e.pets), count(after and after.pets)))
 		end
 	end
 end
@@ -1115,11 +1173,6 @@ end
 --
 -- This is real, server-side progress and it is also an obvious dupe, so it lives
 -- on its own page, defaults off and is in no preset.
-
--- Declared up here on purpose: the rush below reads it, and a Lua local is
--- invisible above its own definition - left in the FINISH section it would have
--- resolved to a nil global and the rush would have quietly ignored it.
-local FINISHING = false
 
 local function turboFire()
 	if not R.ChopTreeHit then return false end
@@ -1242,10 +1295,19 @@ end
 -- rebirth as far as the level carries. It is the TURBO page's reason for existing
 -- rather than a second feature - everything below is a call already measured above.
 
+-- ONE BODY. The button used to task.spawn this straight next to the running
+-- farm: training walked the body to the pad while the finish walked it to the
+-- run, the farm's end-of-pass cleared STATE.busy under the finish, and the
+-- user had to press it again and again before everything was bought. Now
+-- FINISHING pauses every other loop, the train/chop loops step out mid-pass,
+-- and the finish waits for the body thread to report idle before it moves.
 local function finishPass()
 	if FINISHING then return end
 	FINISHING = true
 	STATE.busy = true
+	STATE.finishStep = "pausing the farm"
+	local w0 = os.clock()
+	while BODY_ACTIVE and os.clock() - w0 < 15 do task.wait(0.1) end
 	local ok, err = pcall(function()
 		local d = data(true)
 		local startCash = (d and d.cash) or 0
@@ -1278,14 +1340,32 @@ local function finishPass()
 		STATE.finishStep = "rebirth"
 		if CONFIG.rebirthRush then pcall(rebirthRushPass) else pcall(rebirthPass) end
 
-		-- 3. spend it, best first, and let every ladder run to a standstill
+		-- 3. spend it, best first, and let every ladder run to a standstill.
+		--    ONE CLICK HAS TO FINISH IT. The six upgrades hold 133 levels
+		--    between them (3 x 33, equip 4, luck 12, backpack 18) and the old
+		--    loop stopped after 30 buys, so the user had to press the button
+		--    again and again. Now it repeats chopper + axe + upgrade rounds
+		--    until a whole round buys nothing - measured on STATE.spent, since a
+		--    note can repeat word for word.
 		STATE.finishStep = "buying"
-		pcall(chopperPass)
-		pcall(axePass)
-		for _ = 1, 30 do
-			local before = STATE.note
-			pcall(upgradePass)
-			if STATE.note == before then break end
+		local idle = 0
+		for round = 1, 250 do
+			if GEN ~= _G.__CHOPTREES then break end
+			local before = STATE.spent
+			pcall(chopperPass)
+			pcall(axePass)
+			-- upgrades back to back: re-running the chopper and axe checks
+			-- between every single level made each one cost ~3s
+			for _ = 1, 150 do
+				local b = STATE.spent
+				pcall(upgradePass)
+				STATE.finishStep = string.format("buying (%d)", round)
+				if STATE.spent == b then break end
+			end
+			-- three empty rounds in a row, so a missed confirmation (luck was
+			-- the slow one) cannot end it
+			if STATE.spent == before then idle = idle + 1 else idle = 0 end
+			if idle >= 3 then break end
 		end
 		-- eggs are priced in WOOD, so the pet ladder needs its own mint
 		pcall(petPushPass)
@@ -1430,7 +1510,8 @@ _G.__CHOPTREES_DBG = {
 local function loop(sec, key, fn, needsBody)
 	task.spawn(function()
 		while GEN == _G.__CHOPTREES do
-			if CONFIG.auto and (key == nil or CONFIG[key]) and not (needsBody and STATE.busy) then
+			if CONFIG.auto and (key == nil or CONFIG[key]) and not (needsBody and STATE.busy)
+				and not FINISHING then
 				local ok, err = pcall(fn)
 				if not ok then note(tostring(key) .. " failed: " .. tostring(err)) end
 			end
@@ -1457,13 +1538,18 @@ end)
 
 -- One body, one owner. Training, the run and the market trip pull in opposite
 -- directions, so they run back to back in one thread instead of fighting.
+-- BODY_ACTIVE says this thread is mid-pass; "Run it once" waits for it.
 task.spawn(function()
 	while GEN == _G.__CHOPTREES do
-		if CONFIG.auto and CONFIG.finishLoop then
+		if FINISHING then
+			-- "Run it once" owns the body; stand aside until it is done
+			BODY_ACTIVE = false
+		elseif CONFIG.auto and CONFIG.finishLoop then
 			if CONFIG.freebies then pcall(freebiePass) end
 			pcall(finishPass)
 			task.wait(1)
 		elseif CONFIG.auto and (CONFIG.train or CONFIG.chop or CONFIG.treasure or CONFIG.turbo) then
+			BODY_ACTIVE = true
 			STATE.busy = true
 
 			if CONFIG.freebies then pcall(freebiePass) end
@@ -1474,7 +1560,7 @@ task.spawn(function()
 				STATE.phase = "turbo"
 				local t0 = os.clock()
 				while os.clock() - t0 < CONFIG.chopSecs and CONFIG.auto and CONFIG.turbo
-					and GEN == _G.__CHOPTREES do
+					and GEN == _G.__CHOPTREES and not FINISHING do
 					pcall(turboPass)
 					if CONFIG.treasure then pcall(lootPass) end
 					task.wait(CONFIG.turboGap)
@@ -1483,14 +1569,18 @@ task.spawn(function()
 				pcall(function() chopPass(CONFIG.chopSecs) end)
 			end
 
-			if CONFIG.treasure then
+			if CONFIG.treasure and not FINISHING then
 				pcall(lootPass)
 				pcall(bankPass)
 				pcall(sellPass)
 			end
 
-			STATE.busy = false
-			STATE.phase = "idle"
+			BODY_ACTIVE = false
+			-- never clear the flag out from under a running "Run it once"
+			if not FINISHING then
+				STATE.busy = false
+				STATE.phase = "idle"
+			end
 		end
 		task.wait(1)
 	end
