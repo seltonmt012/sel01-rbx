@@ -95,7 +95,7 @@ local UI = {}
 -- ever opened a panel keeps its old copy and the new controls come up untranslated.
 -- 3.10: the Hypershot panel's strings. 3.11: its WORLD / MISC / GUN additions.
 -- 3.12: Steal An Egg's offline money / rift switches.
-UI.VERSION = "3.13"
+UI.VERSION = "3.14"
 UI.BRAND = "SELUX"
 UI.DISCORD = "discord.gg/ARdpzFuKMm"
 UI.REPO = "seltonmt012/sel01-rbx"

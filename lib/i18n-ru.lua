@@ -8,7 +8,7 @@
 -- they are - they keep passing "Auto rebirth" and only this file decides what
 -- the player reads.
 --
--- 2282 entries.
+-- 2283 entries.
 
 return {
 	["$%s   %s/s   slots %d/%d   R%d   endurance %s"] = "%s$   %s/с   слоты %d/%d   R%d   выносливость %s",
@@ -2136,6 +2136,7 @@ return {
 	["the game's own shot ignores a ForceField"] = "собственный выстрел игры игнорирует ForceField",
 	["the game's own shot ignores them, so aiming there is a wasted 1.1s"] = "собственный выстрел игры их игнорирует, целиться туда - потерянные 1.1с",
 	["the game's own teleport; the island boosts every click and has better eggs"] = "Телепорт самой игры; остров усиливает каждый клик, и на нём яйца лучше.",
+	["the game's paid upgrade dialogs never open while the farm runs"] = "платные окна улучшений игры не открываются, пока идёт фарм",
 	["the group reward and the tutorial reward"] = "награда группы и награда за обучение",
 	["the gun game level - this is what decides the match"] = "уровень gun game - именно он решает матч",
 	["the gun model only - cosmetic, it does not move the shot"] = "только модель оружия - косметика, выстрел не сдвигает",

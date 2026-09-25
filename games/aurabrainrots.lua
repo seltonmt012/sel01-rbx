@@ -175,6 +175,7 @@ local CONFIG = {
     autoFarm    = false,  -- grab the best item on the field and seat it
     autoCollect = true,   -- firetouchinterest every slot, from anywhere
     autoSell    = true,   -- sell backpack leftovers below the plot floor
+    blockPrompts = true,  -- drop the game's Robux purchase popups while farming
 
     -- spending, in payback order
     autoUpgrade = true,   -- slot levels: x1.2 income for x1.5 price
@@ -207,7 +208,42 @@ local STATE = {
     -- the world push owns the character while this is true; the farm cycle stands
     -- back without anybody touching the user's toggle
     worldPin  = false,
+    promptsBlocked = 0, lastPrompt = "-",
 }
+
+-- ------------------------------------------------------------ robux popups
+-- Reported 2026-09-25: a "Buy Robux and item - Insta Upgrade [4]" dialog kept
+-- popping up while the farm ran. It is one of the game's own client scripts
+-- calling MarketplaceService:Prompt*Purchase - the slot pins put the body and
+-- the camera over the plot's paid upgrade buttons. Nothing about it is ever
+-- wanted by this script, so while the automation runs every purchase prompt a
+-- GAME script raises is dropped before it opens. Calls from the executor
+-- (checkcaller) pass untouched, and the switch on the panel turns it off.
+-- One __namecall hook per VM, behind a _G guard; it reads a live flag.
+local PROMPTS = {
+    PromptProductPurchase = true, PromptPurchase = true,
+    PromptGamePassPurchase = true, PromptBundlePurchase = true,
+    PromptPremiumPurchase = true, PromptSubscriptionPurchase = true,
+}
+if not _G.__AURABR_PROMPTHOOK and hookmetamethod and getnamecallmethod then
+    local okHook = pcall(function()
+        local old
+        old = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
+            if _G.__AURABR_BLOCKPROMPT and PROMPTS[getnamecallmethod()]
+                and not checkcaller() then
+                local cb = _G.__AURABR_ONPROMPT
+                if cb then pcall(cb, getnamecallmethod(), ...) end
+                return nil
+            end
+            return old(self, ...)
+        end))
+    end)
+    if okHook then _G.__AURABR_PROMPTHOOK = true end
+end
+_G.__AURABR_ONPROMPT = function(method, _, id)
+    STATE.promptsBlocked = STATE.promptsBlocked + 1
+    STATE.lastPrompt = tostring(method) .. " " .. tostring(id)
+end
 
 -- ------------------------------------------------------------------- helpers
 local function fmt(n)
@@ -492,9 +528,43 @@ local function grabItem(m)
     return true
 end
 
--- Seat what is carried. On a full plot the weakest slot is emptied first,
--- because an occupied slot's prompt PICKS UP - it never swaps in one fire.
-local function seat(name, target)
+local function seatedName(s)
+    local vi = s and s:FindFirstChild("Spawn") and s.Spawn:FindFirstChild("VisualItem")
+    return vi and vi:GetAttribute("OriginalName") or nil
+end
+
+-- Hold one exact Tool - by instance, because two items can share a name and
+-- differ only in their mutation (SwagSoda and Golden SwagSoda).
+-- Straight after the bat was put back in hand an EquipTool can take longer
+-- than one short wait to land (measured: "not held" on the third item of a
+-- run), so it is given up to a second and one more try.
+local function equipTool(tool)
+    local h = hum()
+    if not (tool and h) then return false end
+    for _ = 1, 2 do
+        if tool.Parent == char() then return true end
+        if tool.Parent ~= plr.Backpack then return false end
+        pcall(function() h:UnequipTools() end)
+        task.wait(0.1)
+        pcall(function() h:EquipTool(tool) end)
+        local t = os.clock()
+        while os.clock() - t < 1 and tool.Parent ~= char() do task.wait(0.05) end
+    end
+    return tool.Parent == char()
+end
+
+-- Seat an item. On a full plot the weakest slot is emptied first, because an
+-- occupied slot's prompt PICKS UP - it never swaps in one fire.
+--
+-- A CARRIED item is not placeable any more (measured 2026-09-25): straight
+-- after a pickup the brainrot hangs in Character.Gripped as a Model, and firing
+-- a free slot's prompt then only turns it into a backpack Tool - backpack 22 ->
+-- 23, slot still empty. The old seat() read "something is in Gripped" as "held",
+-- fired once, counted a swap and moved on, so every grab ended in the backpack
+-- while the counter climbed. The seat is now VERIFIED on the slot itself and
+-- retried with the Tool in hand, which is the path that works (equip, pin,
+-- fire: seated on the first try).
+local function seat(name, target, tool)
     local c = census()
     local tgt = target or c.free[1]
     local displaced = nil
@@ -503,15 +573,63 @@ local function seat(name, target)
         if not tgt then return nil, "no slot" end
         displaced = tgt.item
         fireSlot(tgt.slot)                       -- fire 1: pull the weakest out
+        if seatedName(tgt.slot) then
+            equipBat()
+            return nil, "slot did not empty"
+        end
     end
-    if #grippedList() == 0 then
-        if not equipNamed(name) then return nil, "not held" end
+    for _ = 1, 3 do
+        local held
+        if tool and tool.Parent then
+            held = equipTool(tool)
+        end
+        if not held then held = equipNamed(name) end
+        -- Nothing held as a Tool but something still carried: the fire below
+        -- converts it into a Tool, and the next pass equips it.
+        if not held and #grippedList() == 0 then
+            equipBat()
+            return nil, "not held"
+        end
+        fireSlot(tgt.slot)
+        local now = seatedName(tgt.slot)
+        if now == name then
+            equipBat()
+            return tgt.key, displaced, now
+        end
+        if now ~= nil then break end             -- something else took the slot
     end
-    fireSlot(tgt.slot)                           -- fire 2: seat ours
     equipBat()
-    local vi = tgt.slot.Spawn:FindFirstChild("VisualItem")
-    local seated = vi and vi:GetAttribute("OriginalName") or nil
-    return tgt.key, displaced, seated
+    return nil, "not placed", seatedName(tgt.slot)
+end
+
+-- Empty the backpack onto the plot: every free slot gets the best backpack
+-- item, and on a full plot an item that beats the weakest seated one swaps in.
+-- Without this a full backpack just sat there - the farm kept grabbing and
+-- sellSurplus threw the good ones away.
+local function placeBackpack(max)
+    local placed = 0
+    for _ = 1, (max or 3) do
+        local c = census()
+        local bar = (#c.free > 0) and -1 or ((c.weakest and c.weakest.value) or math.huge)
+        local best, bestV
+        for _, x in ipairs(backpackBrainrots()) do
+            local v = rawValue(x:GetAttribute("OriginalName"), x:GetAttribute("Mutation"),
+                               x:GetAttribute("WorldId") or 1)
+            if v > bar and (not bestV or v > bestV) then best, bestV = x, v end
+        end
+        if not best then break end
+        local name = best:GetAttribute("OriginalName")
+        local key, displaced = seat(name, nil, best)
+        if not key then
+            STATE.note = "could not place " .. tostring(name) .. ": " .. tostring(displaced)
+            break
+        end
+        placed = placed + 1
+        STATE.swaps = STATE.swaps + 1
+        STATE.lastSwap = key .. " <- " .. tostring(name) .. " (backpack)"
+            .. (displaced and (" (out: " .. tostring(displaced) .. ")") or "")
+    end
+    return placed
 end
 
 -- ------------------------------------------------------------------- economy
@@ -544,6 +662,10 @@ end
 -- "Inventory" would take the bat with it.
 local function sellSurplus(max)
     local c = census()
+    -- A free slot means every backpack item is worth more placed than sold. The
+    -- bar used to be the weakest SEATED item even with 28 of 30 slots empty, so
+    -- anything below the two seated ones was sold instead of placed.
+    if #c.free > 0 then return 0 end
     local bar = (c.weakest and c.weakest.value) or 0
     local sold = 0
     for _ = 1, (max or 8) do
@@ -694,6 +816,27 @@ local function rebirthStep()
         return "refused"
     end
 
+    -- Already caught and sitting in the backpack: seat that one. The step used to
+    -- look only at the plot and the field and said "waiting for FrigoCamelo"
+    -- with a Galaxy FrigoCamelo in the backpack.
+    for _, x in ipairs(backpackBrainrots()) do
+        if x:GetAttribute("OriginalName") == req.Item then
+            local key, why = seat(req.Item, nil, x)
+            if key then
+                if auraLevel() >= req.Aura then
+                    Events.RequestRebirth:FireServer()
+                    task.wait(1.0)
+                    if rebirths() > r then
+                        STATE.rebirths = STATE.rebirths + 1
+                        return "REBIRTH " .. (r + 1)
+                    end
+                end
+                return "staged " .. req.Item .. " from the backpack at " .. tostring(key)
+            end
+            return "could not seat " .. req.Item .. ": " .. tostring(why)
+        end
+    end
+
     for _, m in ipairs(spawnedItems()) do
         if m:GetAttribute("OriginalName") == req.Item then
             if grabItem(m) then
@@ -786,6 +929,9 @@ local function farmCycle()
     -- OFF, so the next session comes up not farming. A runtime pin belongs in
     -- STATE; CONFIG is what the user asked for.
     if CONFIG.autoFarm and not STATE.worldPin then
+        -- What is already caught goes on the plot before anything new is grabbed.
+        STATE.phase = "placing"
+        placeBackpack(3)
         STATE.phase = "hunting"
         local m, v, bar = bestCandidate()
         if m then
@@ -819,6 +965,7 @@ end
 
 task.spawn(function()
     while _G.__AURABR == GEN do
+        _G.__AURABR_BLOCKPROMPT = CONFIG.blockPrompts and STATE.running and true or false
         if STATE.running then
             local ok, err = pcall(farmCycle)
             if not ok then STATE.note = "ERR " .. tostring(err) end
@@ -874,6 +1021,8 @@ cFarm:Toggle("Auto farm", CONFIG.autoFarm, function(v)
 end, "grab the best item on the field - the walls do not gate pickups")
 cFarm:Toggle("Sell leftovers", CONFIG.autoSell, function(v) CONFIG.autoSell = v end,
     "only what is worse than the weakest slot, and never the bat")
+cFarm:Toggle("Block Robux popups", CONFIG.blockPrompts, function(v) CONFIG.blockPrompts = v end,
+    "the game's paid upgrade dialogs never open while the farm runs", UI.theme.good)
 
 local cPlot = farm:Card("PLOT", 2)
 cPlot:Toggle("Auto collect", CONFIG.autoCollect, function(v) CONFIG.autoCollect = v end,
@@ -931,7 +1080,7 @@ task.spawn(function()
         end
 
         out:set({
-            "FARM",
+            ("FARM   robux popups blocked %d"):format(STATE.promptsBlocked),
             ("  phase %s   grabs %d   seated %d   sold %d"):format(
                 STATE.phase, STATE.grabs, STATE.swaps, STATE.sells),
             "  last " .. STATE.lastGrab,
@@ -972,6 +1121,8 @@ _G.__AURABR_DBG = {
     census = census, rawValue = rawValue, totalIncome = totalIncome,
     spawnedItems = spawnedItems, bestCandidate = bestCandidate,
     grabItem = grabItem, seat = seat, fireSlot = fireSlot,
+    placeBackpack = placeBackpack, seatedName = seatedName, equipTool = equipTool,
+    backpackBrainrots = backpackBrainrots,
     collectAll = collectAll, sellSurplus = sellSurplus, upgradePass = upgradePass,
     auraStep = auraStep, auraPrice = auraPrice, skinStep = skinStep,
     baseStep = baseStep, carryStep = carryStep,

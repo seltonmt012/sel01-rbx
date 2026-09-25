@@ -8,7 +8,7 @@
 -- they are - they keep passing "Auto rebirth" and only this file decides what
 -- the player reads.
 --
--- 2282 entries.
+-- 2283 entries.
 
 return {
 	["$%s   %s/s   slots %d/%d   R%d   endurance %s"] = "%s$   %s/s   Plaetze %d/%d   R%d   Ausdauer %s",
@@ -1954,6 +1954,7 @@ return {
 	["the game's own shot ignores a ForceField"] = "der spieleigene Schuss ignoriert ein ForceField",
 	["the game's own shot ignores them, so aiming there is a wasted 1.1s"] = "der spieleigene Schuss ignoriert sie, dorthin zu zielen sind vergeudete 1,1s",
 	["the game's own teleport; the island boosts every click and has better eggs"] = "Nutzt den Teleport des Spiels; die Insel verstärkt jeden Klick und hat bessere Eggs.",
+	["the game's paid upgrade dialogs never open while the farm runs"] = "die kostenpflichtigen Upgrade-Fenster des Spiels öffnen sich nicht, solange der Farm läuft",
 	["the group reward and the tutorial reward"] = "die Gruppen- und die Tutorial-Belohnung",
 	["the gun game level - this is what decides the match"] = "das Gun-Game-Level - genau das entscheidet das Match",
 	["the gun model only - cosmetic, it does not move the shot"] = "nur das Waffenmodell - kosmetisch, bewegt den Schuss nicht",
