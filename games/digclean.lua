@@ -76,7 +76,8 @@ local CONFIG = {
 	islandFirst = true,   -- hold gold back from gear once an island is in reach
 	buyGear = true,
 	claimFree = true,     -- offline earnings, forever pack, codes
-	moveSpeed = 90,       -- studs/s for the tween hops; the game does not check it
+	teleport = true,      -- instant hops instead of flying (the game does not check)
+	moveSpeed = 90,       -- studs/s for the tween hops when teleport is off
 	-- Progress is clickPower per click against a per-second decay, and both come
 	-- out of digDifficultyFor(itemId, kg, shovelPower). An epic needs roughly 7.5
 	-- clicks a second just to break even, an anomaly about 30. Clicking near the
@@ -206,6 +207,16 @@ local function hop(goal, extraWait)
 	if not hrp or not goal then return false end
 	local dist = (goal - hrp.Position).Magnitude
 	if dist < 4 then return true end
+	-- Teleport by default (user request 2026-09-26: "teleport instead of floating
+	-- back and forth"). The game has no movement check - measured when the tween
+	-- speed was set to 90 - so the flight only cost time. A short settle lets the
+	-- node stream and the server catch up with the new position.
+	if CONFIG.teleport then
+		hrp.AssemblyLinearVelocity = Vector3.zero
+		hrp.CFrame = CFrame.new(goal)
+		task.wait(0.25 + (extraWait or 0.2))
+		return true
+	end
 	local dur = math.max(dist / math.max(CONFIG.moveSpeed, 10), 0.1)
 	TweenService:Create(hrp, TweenInfo.new(dur, Enum.EasingStyle.Linear),
 		{ CFrame = CFrame.new(goal) }):Play()
@@ -742,62 +753,38 @@ local function doDig()
 	-- start-timeout below is the honest test of whether the node is really there.
 	task.wait(0.7)
 
-	local finished, started
-	if _G.__DC_ENDCONN then pcall(function() _G.__DC_ENDCONN:Disconnect() end) end
-	if _G.__DC_STARTCONN then pcall(function() _G.__DC_STARTCONN:Disconnect() end) end
-	local okConn, conn = pcall(function()
-		return net("ShovelNetwork").ShovelEvents.DigSceneEnd:connect(function(userId, success)
-			if userId == plr.UserId then finished = success end
-		end)
-	end)
-	if okConn then _G.__DC_ENDCONN = conn end
-	local okStart, startConn = pcall(function()
-		return net("ShovelNetwork").ShovelEvents.DigSceneStart:connect(function(userId)
-			if userId == plr.UserId then started = true end
-		end)
-	end)
-	if okStart then _G.__DC_STARTCONN = startConn end
-
+	-- 2026-09 rework of the game's digging: there is no DigSceneStart /
+	-- DigSceneProgress / DigSceneEnd any more. A dig is a SESSION on the game's own
+	-- DigController (BeginDig -> DigInput -> ResolveDig), and the controller keeps
+	-- it in `ctrl.session` with `phase` (minigame -> finishing -> success | loss)
+	-- and `progress`. Waiting for the old start event rejected every node as
+	-- "stale" and the farm dug nothing. So the session itself is read.
+	local finished
+	local okConn, okStart, conn, startConn = false, false, nil, nil
 	fire("ShovelNetwork", "ShovelEvents", "SetShovelEquipped", true)
-	pcall(function() ctrl:attemptDig() end)
-	task.wait(0.4)
+	pcall(function() ctrl:requestSession() end)
 
-	-- The server answers a real dig with DigSceneStart almost immediately. If it
-	-- does not, the node is not there any more and clicking at it for the full
-	-- timeout is pure waste - that is what made three dead nodes in a row stall the
-	-- farm for twenty seconds each.
 	local interval = 1 / math.clamp(CONFIG.clicksPerSec, 1, 40)
-	local startDeadline = os.clock() + 1.6
-	while not started and finished == nil and os.clock() < startDeadline do
-		pcall(function() ctrl:onDigInput() end)
-		task.wait(interval)
+	local sess
+	local startDeadline = os.clock() + 2.5
+	while os.clock() < startDeadline do
+		sess = ctrl.session
+		if sess then break end
+		pcall(function() ctrl:attemptDig() end)
+		task.wait(0.15)
 	end
-	if not started and finished == nil then
-		if okConn then pcall(function() conn:Disconnect() end) end
-		if okStart then pcall(function() startConn:Disconnect() end) end
+	if not sess then
 		forgetNode(node.id)
 		STATE.note = "stale node (" .. tostring(node.rarity) .. ")"
 		return false
 	end
 
 	-- Some finds are simply out of reach for the current shovel: the decay eats the
-	-- clicks and the bar sits still or slides back. Grinding the full timeout into
-	-- one of those costs twenty seconds and yields nothing, so a dig that is not
-	-- gaining ground gets abandoned and the node is dropped.
+	-- clicks and the bar sits still or slides back. A dig that is not gaining
+	-- ground gets abandoned and the node is dropped.
 	local progConn
-	if _G.__DC_PROGCONN then pcall(function() _G.__DC_PROGCONN:Disconnect() end) end
 	local progress, bestProgress, bestAt = 0, 0, os.clock()
-	local okProg, pc = pcall(function()
-		return net("ShovelNetwork").ShovelEvents.DigSceneProgress:connect(function(userId, value)
-			if userId == plr.UserId then progress = value or 0 end
-		end)
-	end)
-	if okProg then progConn = pc _G.__DC_PROGCONN = pc end
 
-	-- The deadline follows the prediction instead of sitting at a flat 20 seconds:
-	-- a node predicted at 4s that is still going at 12 is not a slow dig, it is a
-	-- wrong model, and the sooner that ends the sooner the model is corrected. The
-	-- ceiling stays at DIG_SESSION_TIMEOUT so a genuinely long dig is never cut.
 	local budgeted = math.clamp(
 		(predicted == math.huge and 20 or predicted) * 2.5 + 3, 6,
 		CfgDig.DIG_SESSION_TIMEOUT or 45)
@@ -806,23 +793,39 @@ local function doDig()
 	local deadline = started_at + budgeted
 	local stalled = false
 	while finished == nil and os.clock() < deadline and CONFIG.auto and GEN == _G.__DIGCLEAN do
-		pcall(function() ctrl:onDigInput() end)
+		local ph = sess.phase
+		if ph == "success" then finished = true break end
+		if ph == "loss" then finished = false break end
+		if ctrl.session ~= sess then
+			-- ended without us seeing the last phase: judge by the bar
+			finished = (sess.phase == "success") or (progress >= 0.95)
+			break
+		end
+		if ph ~= "finishing" then
+			pcall(function() ctrl:onDigInput() end)
+		end
 		task.wait(interval)
+		progress = tonumber(sess.progress) or progress
 		-- every sample is kept, up OR down: the slope of the bar is the measurement
 		if progress > 0 and progress ~= lastProgress then
 			if not firstAt then firstProgress, firstAt = progress, os.clock() end
 			lastProgress, lastAt = progress, os.clock()
 		end
-		if progress > bestProgress + 0.01 then
-			bestProgress, bestAt = progress, os.clock()
-		elseif os.clock() - bestAt > CONFIG.giveUpAfter then
-			stalled = true
-			break
+		if ph == "minigame" then
+			if progress > bestProgress + 0.01 then
+				bestProgress, bestAt = progress, os.clock()
+			elseif os.clock() - bestAt > CONFIG.giveUpAfter then
+				stalled = true
+				pcall(function() ctrl:abortSession() end)
+				break
+			end
+		else
+			bestAt = os.clock()
 		end
 	end
-	if okConn then pcall(function() conn:Disconnect() end) end
-	if okStart then pcall(function() startConn:Disconnect() end) end
-	if progConn then pcall(function() progConn:Disconnect() end) end
+	-- let a success/loss animation finish so the next dig is not refused
+	local settle = os.clock() + 2
+	while ctrl.session == sess and os.clock() < settle do task.wait(0.1) end
 
 	-- Whatever the outcome, the bar's own speed is the measurement of how many
 	-- clicks the server counted, and every dig that moved it refines the model.
@@ -1215,7 +1218,15 @@ end
 local function backpackFullness()
 	local d = data()
 	if not d then return 0 end
-	local count = #inventoryList()
+	-- Only what the seller would actually take: items on a pedestal, in a
+	-- polisher or favorited never sell, and counting the museum's eight exhibits
+	-- made every cycle a trip to the seller that sold nothing.
+	local count = 0
+	for _, e in ipairs(inventoryList()) do
+		if e.pedestalSlot == nil and e.polisherSlot == nil and e.favorited ~= true then
+			count = count + 1
+		end
+	end
 	local limit = CfgBackpack.BASE_BACKPACK_CAPACITY + (d.BonusBackpackSlots or 0)
 	local ok, lim = pcall(function() return CfgBackpack.BackpackCapacity.limitFor(d) end)
 	if ok and tonumber(lim) then limit = lim end
@@ -1223,17 +1234,56 @@ local function backpackFullness()
 	return count / limit
 end
 
+-- Since the 2026-09 expansion there is ONE seller, on the starter island
+-- (Home Beach: Islands.<name>.NPCs.Sell.SellerNPC - the other islands only have
+-- Gear and Travel NPCs), and the server refuses `sellInventory` while the shovel
+-- is in hand. Measured: travel home, shovel away, sellInventory = 474,868 gold;
+-- the same call with the shovel held returned nil every time, which read as
+-- "no seller npc" / nothing sold while the backpack filled up.
+local function sellerPos()
+	local islands = Workspace:FindFirstChild("Islands")
+	if not islands then return nil end
+	for _, isl in ipairs(islands:GetChildren()) do
+		local npcs = isl:FindFirstChild("NPCs")
+		local seller = npcs and npcs:FindFirstChild("SellerNPC", true)
+		if seller then
+			local ok, pivot = pcall(function() return seller:GetPivot() end)
+			if ok then return pivot.Position end
+		end
+	end
+	return nil
+end
+
 local function doSell()
-	local where = npcNamed("SellerNPC")
+	local where = sellerPos()
 	if not where then STATE.note = "no seller npc" return false end
 	STATE.phase = "sell"
+	local d = data()
+	local okIsl, isl = pcall(function() return require(Const.world.Islands) end)
+	local home = (okIsl and isl.STARTER_ISLAND_ID) or "starterIsland"
+	local back = d and d.CurrentIsland
+	if back and back ~= home then
+		invoke("TravelNetwork", "TravelFunctions", "travel", home)
+		task.wait(2)
+	end
 	hop(where + Vector3.new(0, 3, 4), 0.8)
+	fire("ShovelNetwork", "ShovelEvents", "SetShovelEquipped", false)
+	pcall(function()
+		local _, _, hum = char()
+		if hum then hum:UnequipTools() end
+	end)
+	task.wait(0.5)
 	local ok, earned = invoke("SellNetwork", "SellFunctions", "sellInventory")
+	if back and back ~= home then
+		invoke("TravelNetwork", "TravelFunctions", "travel", back)
+		task.wait(1.5)
+	end
 	if ok and tonumber(earned) then
 		STATE.sold = STATE.sold + tonumber(earned)
 		STATE.note = "sold for " .. tostring(math.floor(tonumber(earned)))
 		return true
 	end
+	STATE.note = "nothing sellable (displayed / polishing / favorited)"
 	return false
 end
 
@@ -1343,18 +1393,31 @@ local function bestGear(config, orderKey, tableKey, owned, unlockedIslands, gold
 	local islandSet = {}
 	for _, id in ipairs(unlockedIslands or {}) do islandSet[id] = true end
 
-	local pick, pickRank = nil, -1
+	-- The three gear types do not share a stat name: shovels carry `power`,
+	-- detectors `range`, sprays `strength`. Reading only `power` made every
+	-- detector rank zero and the loop bought the CHEAPEST tier instead of the best
+	-- affordable one - copper at 500 while silver at 5000 was covered. The tier
+	-- order is the tiebreaker when no stat is found.
+	local function rankOf(entry, index)
+		return tonumber(entry.power) or tonumber(entry.range)
+			or tonumber(entry.strength) or tonumber(entry.speed) or index
+	end
+	-- Only an UPGRADE over what is already owned. Without this floor the loop
+	-- bought a cobalt shovel (power 17) while holding carbon (21) - the ladder is
+	-- no longer sorted by power after the 2026-09 gear update - and spent the gold
+	-- on a downgrade that equipBest immediately put away again.
+	local ownedBest = -1
+	for index, id in ipairs(order) do
+		local entry = list[id]
+		if entry and ownedSet[id] then ownedBest = math.max(ownedBest, rankOf(entry, index)) end
+	end
+
+	local pick, pickRank = nil, ownedBest
 	for index, id in ipairs(order) do
 		local entry = list[id]
 		if entry and not ownedSet[id] then
 			local cost = tonumber(entry.cost) or math.huge
-			-- The three gear types do not share a stat name: shovels carry `power`,
-			-- detectors `range`, sprays `strength`. Reading only `power` made every
-			-- detector rank zero and the loop bought the CHEAPEST tier instead of
-			-- the best affordable one - copper at 500 while silver at 5000 was
-			-- covered. The tier order is the tiebreaker when no stat is found.
-			local rank = tonumber(entry.power) or tonumber(entry.range)
-				or tonumber(entry.strength) or tonumber(entry.speed) or index
+			local rank = rankOf(entry, index)
 			if cost > 0 and cost <= gold and islandSet[entry.islandId] and rank > pickRank then
 				pick, pickRank = id, rank
 			end
@@ -1364,6 +1427,7 @@ local function bestGear(config, orderKey, tableKey, owned, unlockedIslands, gold
 end
 
 local GEAR_CATEGORY = { shovel = "shovel", spray = "spray", detector = "detector" }
+local GEAR_REFUSED = {}   -- [gear id] = os.clock() until which it is not retried
 
 -- Owning the best tier and HOLDING it are two different things, and only the second
 -- one digs: `bestGear` skips anything already owned, so once the equipped item is
@@ -1439,6 +1503,7 @@ local function doBuyGear()
 		local budget = gold
 		if reserve > 0 then budget = math.max(gold - reserve, gold * 0.01) end
 		local pick = bestGear(job.cfg, job.order, job.tbl, owned, fresh.UnlockedIslands, budget)
+		if pick and (GEAR_REFUSED[pick] or 0) > os.clock() then pick = nil end
 		if pick then
 			STATE.phase = "buy " .. job.cat
 			hop(where + Vector3.new(0, 3, 4), 0.8)
@@ -1450,7 +1515,11 @@ local function doBuyGear()
 				boughtThisRound = true
 				task.wait(0.6)
 			else
-				STATE.note = "buy " .. pick .. " refused (" .. tostring(res) .. ")"
+				-- Remember the refusal. Without this, gearPending saw the same
+				-- "affordable" item every cycle and the body walked to the shop and
+				-- straight back forever ("he keeps going to the gear shop", 2026-09-26).
+				GEAR_REFUSED[pick] = os.clock() + 300
+				STATE.note = "buy " .. pick .. " refused (" .. tostring(res) .. "), retry in 5 min"
 			end
 		end
 	end
@@ -1471,8 +1540,15 @@ local function gearPending()
 		{ CfgDetectors, "DETECTOR_TIER_ORDER", "Detectors", d.OwnedDetectors,
 		  d.EquippedDetector, GEAR_CATEGORY.detector },
 	}
+	-- Same budget as doBuyGear: gold minus the island reserve. Checking against the
+	-- full balance called a trip for gear the buyer then refused to spend on.
+	local gold = d.Gold or 0
+	local reserve = CONFIG.islandFirst and islandReserve() or 0
+	local budget = gold
+	if reserve > 0 then budget = math.max(gold - reserve, gold * 0.01) end
 	for _, c in ipairs(checks) do
-		if bestGear(c[1], c[2], c[3], c[4], d.UnlockedIslands, d.Gold or 0) then return true end
+		local pick = bestGear(c[1], c[2], c[3], c[4], d.UnlockedIslands, budget)
+		if pick and (GEAR_REFUSED[pick] or 0) <= os.clock() then return true end
 	end
 	-- A better OWNED tier that is not in hand is also pending work, and it is the
 	-- cheap kind: no walk, no gold, and it is what the trip existed for anyway.
@@ -1529,7 +1605,16 @@ loop(0.5, function()
 		if CONFIG.clean then doClean() end
 		if CONFIG.polish then doPolish() end
 		if CONFIG.display then doDisplay() end
-		if CONFIG.sell and backpackFullness() >= CONFIG.sellAt then
+		-- the game's own "backpack full" check counts exhibits too, so that one
+		-- also triggers a sale even when the sellable share looks small
+		local gameFull = false
+		pcall(function()
+			local d = data()
+			local isFull = CfgBackpack.isFull
+				or (CfgBackpack.BackpackCapacity and CfgBackpack.BackpackCapacity.isFull)
+			gameFull = d and isFull and isFull(d) or false
+		end)
+		if CONFIG.sell and (backpackFullness() >= CONFIG.sellAt or gameFull) then
 			doSell()
 			closeModals()
 		end
@@ -1682,6 +1767,8 @@ extra:Toggle("Buy gear", CONFIG.buyGear, function(v) CONFIG.buyGear = v end,
 	"best affordable shovel, spray and detector at the GearNPC", UI.theme.warn)
 extra:Toggle("Claim free rewards", CONFIG.claimFree, function(v) CONFIG.claimFree = v end,
 	"offline earnings and the forever pack")
+extra:Toggle("Teleport", CONFIG.teleport, function(v) CONFIG.teleport = v end,
+	"instant hops; off = fly at the speed below")
 extra:Slider("Move speed", 30, 200, CONFIG.moveSpeed, function(v)
 	CONFIG.moveSpeed = math.floor(v)
 end, "studs per second for the hops")
