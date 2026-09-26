@@ -106,7 +106,7 @@
       ],
       "status": "ok",
       "paid": true,
-      "note": "no anti-cheat at all. CollectTrashBag(money, gum): the MONEY half is a trusted count with no cap, the GUM half ignores its argument and trickles ~20/s - gum has to be farmed with CollectPaper('ThundergumNeonGoldPoop'), which pays 139/call on an empty tree and 20,270 with it full. Prestige pays one point per gum skill and the 9 Robux-priced skills survive it",
+      "note": "no anti-cheat at all. CollectTrashBag(money, gum): the MONEY half is a trusted count with no cap, the GUM half ignores its argument and trickles ~20/s - gum has to be farmed with CollectPaper('ThundergumNeonGoldPoop'), which pays 139/call on an empty tree and 20,270 with it full. Prestige pays one point per gum skill and the 9 Robux-priced skills survive it. 2026-09-26: skill order read from the game's own tree (U3 nodes, Underground + Fire branch)",
       "detect": "local rs = game:GetService('ReplicatedStorage') local r = rs:FindFirstChild('Remotes') return r ~= nil and r:FindFirstChild('CollectTrashBag') ~= nil and r:FindFirstChild('PrestigeRebirth') ~= nil and r:FindFirstChild('PurchaseThundergum') ~= nil and rs:FindFirstChild('Trash') ~= nil"
     },
     {
@@ -169,7 +169,7 @@
       ],
       "status": "ok",
       "paid": true,
-      "note": "lobby and map are separate places; every map place is caught by detect",
+      "note": "lobby and map are separate places; every map place is caught by detect; rebuilt 2026-09-26 for the perk/zone update, full run verified on Gas Station",
       "detect": "local plr = game:GetService('Players').LocalPlayer local ps = plr and plr:FindFirstChild('PlayerScripts') if ps and ps:FindFirstChild('LeafSim') then return true end local rem = game:GetService('ReplicatedStorage'):FindFirstChild('Remotes') if rem and rem:FindFirstChild('EmptyBackpack') then return true end return rem ~= nil and rem:FindFirstChild('UpgradeBuy') ~= nil and game.Workspace:FindFirstChild('Teams') ~= nil"
     },
     {
