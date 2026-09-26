@@ -437,7 +437,13 @@ local function claimNearby(budgetSeconds, minPrice)
 end
 
 local function plotButtons()
-	local plot = workspace:FindFirstChild(tostring(plr:GetAttribute("FishShowPlotId")))
+	-- The plots moved into `Workspace.PlayerEar.<plotId>` (game update, 2026-09);
+	-- they used to sit at the top of the workspace under the bare id, and looking
+	-- only there made every tank trip end in "no plot found" - nothing displayed,
+	-- nothing sold, cash frozen while the backpack stayed full.
+	local id = tostring(plr:GetAttribute("FishShowPlotId"))
+	local ear = workspace:FindFirstChild("PlayerEar")
+	local plot = (ear and ear:FindFirstChild(id)) or workspace:FindFirstChild(id)
 	if not plot then return nil, nil end
 	local function posOf(name)
 		local part = plot:FindFirstChild(name, true)
