@@ -432,6 +432,7 @@
       ],
       "status": "ok",
       "paid": true,
+      "note": "2026-09-26: RAGE (silent aim, wallbang with damage prediction, auto shoot), WORLD (third person on V) and MOVE (bunny hop, full air strafe) tabs",
       "detect": "local st = workspace:FindFirstChild('Status') return st ~= nil and st:FindFirstChild('HasBomb') ~= nil and st:FindFirstChild('MapName') ~= nil"
     },
     {
