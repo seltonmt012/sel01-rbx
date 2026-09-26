@@ -106,7 +106,9 @@ local CONFIG = {
 	sellAt = 0.3,         -- sell once the backpack is this full
 	gearEvery = 30,       -- seconds between gear-shopping trips
 	swapExhibits = true,  -- replace the weakest exhibit when a better find turns up
-	swapMargin = 1.2,     -- how much better it has to be before evicting one
+	swapMargin = 1.05,    -- how much better it has to be before evicting one (was 1.2 -
+	                      -- the user wants every real upgrade on display; 5% only
+	                      -- stops two near-equal finds trading places forever)
 }
 
 local STATE = {
@@ -777,6 +779,33 @@ local function doDig()
 		forgetNode(node.id)
 		STATE.note = "stale node (" .. tostring(node.rarity) .. ")"
 		return false
+	end
+
+	-- The server hands over the REAL difficulty of this very find once the
+	-- session starts (clickPower / decay per click and per second). The picker only
+	-- knew the median of the rarity band, so heavy finds it could never finish
+	-- were tried anyway ("you keep trying ones that are too hard for us",
+	-- 2026-09-26). Check the actual numbers and walk away at once when the bar
+	-- would not fill inside the time limit.
+	local diffWait = os.clock() + 2
+	while not sess.difficulty and ctrl.session == sess and os.clock() < diffWait do
+		task.wait(0.05)
+	end
+	local diff = sess.difficulty
+	if type(diff) == "table" and tonumber(diff.clickPower) and tonumber(diff.decay) then
+		local rate = diff.clickPower * STATE.cps - diff.decay
+		local need = rate > 0 and (DIG_SPAN / rate) or math.huge
+		if need > digLimit() then
+			pcall(function() ctrl:abortSession() end)
+			forgetNode(node.id)
+			STATE.tooHard = (STATE.tooHard or 0) + 1
+			STATE.note = string.format("skipped %s: needs %s at %.0f clicks/s",
+				tostring(node.rarity), need == math.huge and "more power" or string.format("%.0fs", need),
+				STATE.cps)
+			local settleAbort = os.clock() + 1.5
+			while ctrl.session == sess and os.clock() < settleAbort do task.wait(0.1) end
+			return false
+		end
 	end
 
 	-- Some finds are simply out of reach for the current shovel: the decay eats the
@@ -1687,6 +1716,8 @@ if _G.__DIGCLEAN_WIN then pcall(function() _G.__DIGCLEAN_WIN:Destroy() end) end
 -- value out of CONFIG when they are created, so they come up on the saved state
 -- by themselves and nothing below had to be told about any of this.
 UI.config("digclean", CONFIG)
+-- one-time move off the old default, which is what every saved file holds
+if CONFIG.swapMargin == 1.2 then CONFIG.swapMargin = 1.05 end
 
 local win = UI.Window({
 	title = "DIG", accentTitle = "CLEAN", subtitle = "seltonmt",
