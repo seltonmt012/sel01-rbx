@@ -394,16 +394,6 @@
       "detect": "local rs = game:GetService('ReplicatedStorage') local inv = rs:FindFirstChild('Inventory') local ctrl = rs:FindFirstChild('Controllers') return rs:FindFirstChild('GetRebirthInfo') ~= nil and inv ~= nil and inv:FindFirstChild('Food') ~= nil and ctrl ~= nil and ctrl:FindFirstChild('Data') ~= nil and game.Workspace:FindFirstChild('MapPoorRich') ~= nil"
     },
     {
-      "alias": "beflash",
-      "name": "[Galaxy] Be Flash For Brainrots!",
-      "file": "games/beflash.lua",
-      "places": [
-        136066387156306
-      ],
-      "status": "ok",
-      "detect": "local rs = game:GetService('ReplicatedStorage') return rs:FindFirstChild('DashEvent') ~= nil and rs:FindFirstChild('RemoteGUI') ~= nil"
-    },
-    {
       "alias": "logobrainrots",
       "name": "Logo für Brainrots!",
       "file": "games/logobrainrots.lua",
