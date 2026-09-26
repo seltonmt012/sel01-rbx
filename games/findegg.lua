@@ -114,11 +114,14 @@ local CONFIG = {
     autoPlace     = true,    -- seat hatched brainrots on free slots
     autoCollect   = true,    -- sweep the SlotPads for accrued money
     autoUpgrade   = true,    -- the EvolvePancarte boards, ~2.5s payback early
-    autoRebirth   = false,   -- gate is money + N copies of one brainrot
+    autoRebirth   = true,    -- gate is money + N copies of one brainrot; on by
+                             -- default since 2026-09-26 (user: "still 0 rebirths")
     autoSwap      = true,    -- on a full plot, evict the weakest BASE value
+    autoSell      = true,    -- after Equip Best, sell every spare (rebirth copies kept)
     swapMargin    = 1.5,     -- how much better the newcomer's base must be
     autoTrain     = true,    -- train when the reachable field cannot help
     stopTreadmill = true,    -- Training=true blocks every pickup, see header
+    trainAtHome   = 5,       -- seconds on the treadmill after every delivery
 
     minRarity     = "common",-- skip anything below this on the ground
     hatchAt       = 3,       -- bank this many eggs before firing HATCH ALL
@@ -546,6 +549,27 @@ local function trainCycle()
     end)
 end
 
+-- Training and hunting cannot run at once: the treadmill stops by itself once
+-- the body is more than ~25 studs from where it was started (measured: +20
+-- endurance/s on it, "Training" false 60 studs away). What CAN be done is a
+-- short session at every return home - the body is in the village anyway.
+-- Endurance is what moves the server-side zone wall (a warp past it is snapped
+-- back to the band edge, z 749, whatever the target), so this is the only way
+-- to reach the better eggs.
+function trainAtHome()
+    local secs = tonumber(CONFIG.trainAtHome) or 0
+    if secs <= 0 or not Net then return end
+    local _, hrp = char()
+    if not hrp then return end
+    pcall(function()
+        Net.ToggleTreadmill.Fire({ rootCf = hrp.CFrame })
+        if Net.SendEvents then Net.SendEvents() end
+    end)
+    note(("training %ds at home (%d endurance)"):format(secs, endurance()))
+    task.wait(secs)
+    -- the next grab calls stopTreadmill() itself
+end
+
 local function farmCycle()
     -- Training outranks farming outright while the field is exhausted.
     if STATE.mode == "train" then return end
@@ -561,21 +585,13 @@ local function farmCycle()
     -- "there are brainrots in the inventory" alone deadlocked the farm: once
     -- the plot was full, four spares worth less than the weakest seat sat
     -- there forever and 24s produced zero eggs.
-    if CONFIG.autoPlace and brainrotCount() > 0 then
-        local free = slotPrompts()
-        if #free > 0 then return end
-        -- A full plot still yields when the best spare genuinely beats the
-        -- weakest seat on BASE value - that swap is worth more than one more
-        -- egg. It does not yield otherwise, or spares nobody wants would
-        -- deadlock the farm again.
-        if CONFIG.autoSwap then
-            local _, pickScore = bestInvBrainrot()
-            local seat = weakestSeat()
-            if seat and pickScore and pickScore > seat.base * (CONFIG.swapMargin or 1.5) then
-                return
-            end
-        end
-    end
+    -- Brainrots in the bag go through equip-best-and-sell first; with selling
+    -- on, the bag empties every time, so this can no longer deadlock the farm.
+    -- Home work waiting = spares to sell, OR a hatch that has not been through
+    -- Equip Best yet (its brainrots may beat seats and need a swap, which the
+    -- spare count deliberately does not include). Either way the farm yields.
+    if CONFIG.autoPlace and ((spareCount and spareCount() > 0)
+        or (STATE.hatched or 0) > (STATE.equippedAtHatch or -1)) then return end
     local egg = bestEgg()
     if not egg then
         note("no egg in the reachable band")
@@ -588,7 +604,7 @@ local function farmCycle()
         STATE.lastEgg = r .. (m ~= "default" and ("/" .. m) or "")
         note("grabbing " .. STATE.lastEgg)
         if grabEgg(egg) then
-            carryHome()
+            if carryHome() then trainAtHome() end
         end
     end)
 end
@@ -738,7 +754,138 @@ function weakestSeat()
     return s[1], #s
 end
 
-local function placeBrainrots()
+-- ------------------------------------------------------------- equip & sell
+-- The cycle the user described (2026-09-26): egg -> home -> hatch -> EQUIP BEST
+-- -> sell the rest, all while standing at home. EquipBest makes the SERVER seat
+-- the best brainrots on the plot (and push weaker ones back into the
+-- inventory), which replaces the manual slot-by-slot placing and swapping - the
+-- source of the back-and-forth warping. What is left in the inventory after
+-- that is surplus and is sold, except:
+--   * the copies the next rebirth asks for (objectiveBrainrotId x xN)
+--   * anything the player favorited
+-- SellItem takes { ref = { kind = "brainrot", brainrotId, mutationId, level,
+-- traits }, amount } - read out of Shared.Net.client.
+local function goHome()
+    local p = myPlot()
+    local pos = p and anchorPos(p)
+    if pos then warpTo(pos, 10) task.wait(0.6) end
+    return p ~= nil
+end
+
+-- How many of each inventory entry are SPARE (sellable): everything except the
+-- rebirth copies and favorites. Shared by the seller and by the farm's
+-- "is there work at home" test - with the farm waiting on the raw bag count,
+-- the one kept rebirth copy stopped every egg run (0 grabbed in 90 s).
+local function spares()
+    local seat = weakestSeat()
+    local weakSeatBase = seat and seat.base or nil
+    local g
+    if RebirthsMod and RebirthsMod.nextRank then
+        local ok, res = pcall(RebirthsMod.nextRank, rebirths())
+        if ok and type(res) == "table" then g = res end
+    end
+    local keepId = g and tonumber(g.objectiveBrainrotId)
+    local keepLeft = (g and tonumber(g.xN)) or 0
+    local out, total = {}, 0
+    for _, e in ipairs(INV.brainrots or {}) do
+        local count = tonumber(e.count) or 1
+        local amount = count
+        if keepId and tonumber(e.brainrotId) == keepId and keepLeft > 0 then
+            local keep = math.min(count, keepLeft)
+            keepLeft = keepLeft - keep
+            amount = count - keep
+        end
+        if e.favorite or e.favorited or e.isFavorite then amount = 0 end
+        -- Never sell something whose BASE beats the weakest seat: Equip Best
+        -- appears to rank by the levelled income, so a base-940 level-20 seat
+        -- can outrank a better unlevelled find. Those are swapped, not sold.
+        if amount > 0 and weakSeatBase and brainrotScore(e) > weakSeatBase then amount = 0 end
+        out[#out + 1] = { entry = e, amount = amount }
+        total = total + amount
+    end
+    return out, total
+end
+
+function spareCount()
+    local _, n = spares()
+    return n
+end
+
+local function sellRest()
+    local sold = 0
+    for _, s in ipairs((spares())) do
+        local e, amount = s.entry, s.amount
+        if amount > 0 then
+            pcall(function()
+                Net.SellItem.Fire({
+                    ref = {
+                        kind = "brainrot",
+                        brainrotId = tonumber(e.brainrotId),
+                        mutationId = tostring(e.mutationId or "default"),
+                        level = tonumber(e.level) or nil,
+                        traits = e.traits,
+                    },
+                    amount = amount,
+                })
+                if Net.SendEvents then Net.SendEvents() end
+            end)
+            sold = sold + amount
+            task.wait(0.12)
+        end
+    end
+    if sold > 0 then
+        STATE.sold = (STATE.sold or 0) + sold
+        note(("sold %d spare brainrot(s)"):format(sold))
+    end
+    refreshInventory()
+    return sold
+end
+
+-- NO Equip Best. Measured 2026-09-26: the game's Equip Best ranks by the
+-- LEVELLED income, so it put a base-940 level-20 Pipi Potato back every time the
+-- base swap had replaced it with a base-13,000 find - ten swaps in a row, the
+-- income flicking 267M <-> 299M. Placement is done by BASE value here instead:
+-- free slots first (best base first), then base swaps, then the rest is sold.
+local function equipAndSell()
+    if not goHome() then return false end
+    refreshInventory()
+    task.wait(0.6)
+    placeBrainrots()
+    task.wait(0.6)
+    refreshInventory()
+    task.wait(0.6)
+    -- Base-value swaps on top of Equip Best: while the best spare beats the
+    -- weakest seat on BASE (by the swap margin), seat it by hand. placeBrainrots
+    -- does exactly that swap, one per call.
+    if CONFIG.autoSwap and os.clock() >= (STATE.swapBlockedUntil or 0) then
+        for _ = 1, 5 do
+            local _, pickScore = bestInvBrainrot()
+            local seat = weakestSeat()
+            if not (seat and pickScore and pickScore > seat.base * (CONFIG.swapMargin or 1.5)) then break end
+            placeBrainrots()
+            task.wait(0.8)
+            refreshInventory()
+            task.wait(0.6)
+            -- Proof, not the counter: the weakest seat must actually be a
+            -- different brainrot now. Measured 2026-09-26: the swap prompt left
+            -- "Pipi Potato" (base 940) in place seven times in a row while the
+            -- counter went up, and the loop held the character so the farm
+            -- grabbed nothing. A swap that does not stick blocks swaps 10 min.
+            local after = weakestSeat()
+            if after and after.name == seat.name and after.base == seat.base then
+                STATE.swapBlockedUntil = os.clock() + 600
+                note("swap did not stick - base swaps paused for 10 min")
+                break
+            end
+        end
+    end
+    if CONFIG.autoSell then sellRest() end
+    return true
+end
+
+-- global on purpose: equipAndSell above calls it, and a local would still be
+-- nil there (a Lua local is invisible above its own definition)
+function placeBrainrots()
     -- No early return on a full plot: the swap pass below is exactly what has
     -- to run then.
     local free = slotPrompts()
@@ -784,7 +931,7 @@ local function placeBrainrots()
     -- producing and every better brainrot piles up in the inventory forever.
     -- The comparison is BASE against BASE - both sides raw, never one side's
     -- levelled RevenueLabel, which is the trap this whole ranking exists for.
-    if CONFIG.autoSwap and #free == 0 then
+    if CONFIG.autoSwap and #free == 0 and os.clock() >= (STATE.swapBlockedUntil or 0) then
         local pick, pickScore = bestInvBrainrot()
         local seat = weakestSeat()
         if pick and seat then
@@ -832,15 +979,8 @@ local function placeBrainrots()
         end
     end
 
-    -- Free, and the server does the ranking: on a full plot it seats a better
-    -- spare and pushes the weakest out. Measured delta 0 against an idle drift
-    -- of 0 - correct, because every spare was worth less than the weakest seat
-    -- (1.6-19.7 raw against 24.5). So it is NOT proven as a swapper, only
-    -- proven not to be dead; it costs nothing to keep firing.
-    pcall(function()
-        Net.EquipBest.Fire()
-        if Net.SendEvents then Net.SendEvents() end
-    end)
+    -- (Equip Best used to be fired here. It ranks by levelled income and undid
+    -- every base swap above - see equipAndSell. Never fire it.)
     return placed > 0
 end
 
@@ -949,9 +1089,15 @@ loop(6, "autoHatch", function()
     end
 end)
 
-loop(8, "autoPlace", function()
-    if brainrotCount() > 0 then
-        withChar("place", placeBrainrots)
+loop(3, "autoPlace", function()
+    -- only when there is real work: spares to sell, or new hatches to equip
+    if spareCount() > 0 or (STATE.hatched or 0) > (STATE.equippedAtHatch or -1) then
+        local hatchedNow = STATE.hatched or 0
+        withChar("place", function()
+            equipAndSell()
+            -- marked done only when it actually ran (withChar can skip it)
+            STATE.equippedAtHatch = hatchedNow
+        end)
     end
 end)
 
@@ -987,6 +1133,11 @@ if UI.sweep then UI.sweep("FINDEGG_PANEL") end
 -- Merges the saved file into CONFIG BEFORE the panel is built, so every
 -- control comes up on its saved state by itself.
 UI.config("findegg", CONFIG)
+-- one-time switch-on: every saved file holds the old default `false`
+if not CONFIG.rebirthDefaultMigrated then
+    CONFIG.autoRebirth = true
+    CONFIG.rebirthDefaultMigrated = true
+end
 
 local win = UI.Window({
     title = "FIND", accentTitle = "EGG", subtitle = "seltonmt",
@@ -1004,6 +1155,12 @@ cFarm:Toggle("Leave the treadmill first", CONFIG.stopTreadmill, function(v) CONF
 cFarm:Toggle("Train when the field is exhausted", CONFIG.autoTrain, function(v) CONFIG.autoTrain = v end,
     "Endurance opens the next bridge, and beyond it eggs are worth hundreds of times more",
     UI.theme.good)
+cFarm:Stepper("Train at home",
+    function() return tostring(CONFIG.trainAtHome or 0) .. " s" end,
+    function(dir) CONFIG.trainAtHome = math.clamp((CONFIG.trainAtHome or 5) + dir, 0, 30) end,
+    "Treadmill seconds after every delivery - endurance opens the better zones")
+cFarm:Toggle("Auto rebirth", CONFIG.autoRebirth, function(v) CONFIG.autoRebirth = v end,
+    "Needs money plus N copies of one brainrot (also on the PLOT page)", UI.theme.warn)
 cFarm:Dropdown("Minimum rarity", {
     "common", "rare", "epic", "legendary", "mythic", "secret", "og", "abyssal", "celestial", "omega",
 }, CONFIG.minRarity, function(v) CONFIG.minRarity = v end,
@@ -1021,7 +1178,10 @@ cPlot:Stepper("Hatch from",
     function() return tostring(CONFIG.hatchAt) .. " eggs" end,
     function(dir) CONFIG.hatchAt = math.clamp((CONFIG.hatchAt or 3) + dir, 1, 12) end,
     "Eggs banked before HATCH ALL fires")
-cPlot:Toggle("Place brainrots", CONFIG.autoPlace, function(v) CONFIG.autoPlace = v end)
+cPlot:Toggle("Place brainrots", CONFIG.autoPlace, function(v) CONFIG.autoPlace = v end,
+    "Equip Best at home - the game seats the best ones itself")
+cPlot:Toggle("Sell spares", CONFIG.autoSell, function(v) CONFIG.autoSell = v end,
+    "after Equip Best, sell what is left - rebirth copies and favorites are kept", UI.theme.warn)
 cPlot:Toggle("Swap on base value", CONFIG.autoSwap, function(v) CONFIG.autoSwap = v end,
     "A full plot evicts its weakest BASE, not its lowest label", UI.theme.good)
 cPlot:Stepper("Swap margin",
