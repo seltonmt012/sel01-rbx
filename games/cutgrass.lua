@@ -155,7 +155,8 @@ local CONFIG = {
 
 	click = true,           -- the click engine, 12.5/s is the whole server budget
 	train = true,           -- stand on the best FREE pad; it stacks with clicking
-	trainSecs = 20,         -- seconds on the pad between cutting trips
+	trainSecs = 8,          -- seconds on the pad between cutting trips (was 20 -
+	                        -- "he trains too long"; the click loop runs everywhere)
 	trainMinMult = 2,       -- do not walk off the lane for a pad weaker than this;
 	                        -- x1.5 is +3/s against the click loop's 11.7/s anywhere
 	trainMinShare = 0.25,   -- ...and it must also be worth at least this share of
@@ -322,23 +323,87 @@ end
 -- too, and so is writing WalkSpeed (its own reason, `walkspeed_property`). So the
 -- only mover in this file is the humanoid itself. It is slower than the warp every
 -- other script in games/ uses, and it is the entire reason this one stays quiet.
+-- Straight MoveTo walked into props and stood there until the stuck timer gave
+-- up ("he walks into things and gets stuck", 2026-09-26). So the route now comes
+-- from PathfindingService and the body follows its waypoints, jumping where the
+-- path says so and whenever it stops making progress. Still nothing but the
+-- humanoid walking - no CFrame, no WalkSpeed. Grass that is still standing is
+-- behind a blocker part, so a path INTO a zone can fail by design; then it walks
+-- straight at the target the old way, with the same jump-on-stuck.
+local PathfindingService = game:GetService("PathfindingService")
+
+local function directStep(hum, hrp, pos, state)
+	local d = (hrp.Position - pos).Magnitude
+	if state.lastD and state.lastD - d < 0.5 then
+		local since = os.clock() - state.stuckSince
+		if since > 0.8 and not state.jumped then
+			hum.Jump = true
+			state.jumped = true
+		end
+		if since > 1.6 then
+			-- sidestep: a short walk at right angles, then try again
+			local dir = (pos - hrp.Position)
+			dir = Vector3.new(dir.X, 0, dir.Z)
+			if dir.Magnitude > 0.1 then
+				local side = Vector3.new(-dir.Z, 0, dir.X).Unit * (state.flip and -6 or 6)
+				state.flip = not state.flip
+				hum:MoveTo(hrp.Position + side)
+				task.wait(0.5)
+			end
+			state.stuckSince, state.jumped = os.clock(), false
+			state.stucks = (state.stucks or 0) + 1
+		end
+	else
+		state.stuckSince, state.lastD, state.jumped = os.clock(), d, false
+	end
+	hum:MoveTo(pos)
+end
+
 local function walkTo(pos, timeout, tol)
 	tol = tol or 4
 	timeout = timeout or 20
 	local started = os.clock()
-	local stuckSince, lastD = os.clock(), nil
+	local state = { stuckSince = os.clock() }
+	local waypoints, wi = nil, 1
+	local lastPathAt = 0
+
 	while os.clock() - started < timeout do
 		local _, hrp, hum = char()
 		if not hrp or not hum then return false, "no body" end
 		local d = (hrp.Position - pos).Magnitude
 		if d <= tol then return true end
-		if lastD and lastD - d < 0.5 then
-			if os.clock() - stuckSince > 3.5 then return false, "stuck" end
-		else
-			stuckSince, lastD = os.clock(), d
+		if (state.stucks or 0) >= 6 then return false, "stuck" end
+
+		-- (re)plan every 3 s or after getting stuck
+		if not waypoints or os.clock() - lastPathAt > 3 then
+			lastPathAt = os.clock()
+			waypoints, wi = nil, 1
+			if d > 8 then
+				local path = PathfindingService:CreatePath({
+					AgentRadius = 2, AgentHeight = 5, AgentCanJump = true,
+					WaypointSpacing = 6,
+				})
+				local ok = pcall(function() path:ComputeAsync(hrp.Position, pos) end)
+				if ok and path.Status == Enum.PathStatus.Success then
+					waypoints = path:GetWaypoints()
+					wi = math.min(2, #waypoints)
+				end
+			end
 		end
-		hum:MoveTo(pos)
-		task.wait(0.2)
+
+		if waypoints and waypoints[wi] then
+			local wp = waypoints[wi]
+			if wp.Action == Enum.PathWaypointAction.Jump then hum.Jump = true end
+			if (Vector3.new(hrp.Position.X, wp.Position.Y, hrp.Position.Z) - wp.Position).Magnitude < 3 then
+				wi = wi + 1
+			else
+				directStep(hum, hrp, wp.Position, state)
+				if (state.stucks or 0) > 0 and state.stucks % 2 == 0 then waypoints = nil end
+			end
+		else
+			directStep(hum, hrp, pos, state)
+		end
+		task.wait(0.15)
 	end
 	return false, "timeout"
 end
@@ -401,9 +466,39 @@ end
 -- have indexed a number with 'z' in a game that had been running fine.
 _G.__CUTGRASS_ZPOS = _G.__CUTGRASS_ZPOS or {}
 
+-- Zone numbers are GLOBAL across worlds: World 1 holds Zone_1..13, World 2
+-- Zone_14..21 and so on. Everything in this file counts zones per world from 1,
+-- so local index i is the i-th zone of the current world, sorted by number.
+-- Asking World 2 for "Zone_1" found nothing and the bot stood still with
+-- "zone 2 position unknown yet" (reported 2026-09-26).
+local function zoneNumbers()
+	local zf = zonesFolder()
+	local list = {}
+	if zf then
+		for _, c in ipairs(zf:GetChildren()) do
+			local n = tonumber(c.Name:match("^Zone_(%d+)$"))
+			if n then list[#list + 1] = n end
+		end
+	end
+	table.sort(list)
+	-- zones stream: remember the lowest number ever seen in this world
+	_G.__CUTGRASS_ZBASE = _G.__CUTGRASS_ZBASE or {}
+	local w = worldId()
+	if list[1] and (not _G.__CUTGRASS_ZBASE[w] or list[1] < _G.__CUTGRASS_ZBASE[w]) then
+		_G.__CUTGRASS_ZBASE[w] = list[1]
+	end
+	return list
+end
+
+-- the global number of this world's first zone (1 in World 1, 14 in World 2)
+local function zoneBase()
+	zoneNumbers()
+	return (_G.__CUTGRASS_ZBASE and _G.__CUTGRASS_ZBASE[worldId()]) or 1
+end
+
 local function zoneModel(i)
 	local zf = zonesFolder()
-	return zf and zf:FindFirstChild("Zone_" .. i) or nil
+	return zf and zf:FindFirstChild("Zone_" .. (zoneBase() + i - 1)) or nil
 end
 
 -- Returns the X of the zone and the Z of the CORRIDOR it sits on. The Z matters as
@@ -896,7 +991,8 @@ local function lootPass()
 	local cands = lootCandidates()
 	local best
 	for _, c in ipairs(cands) do
-		local zi = tonumber(c.model:GetAttribute("LootZoneIndex")) or 1
+		-- LootZoneIndex is the GLOBAL zone number; convert to this world's count
+		local zi = (tonumber(c.model:GetAttribute("LootZoneIndex")) or zoneBase()) - zoneBase() + 1
 		if zi <= STATE.zoneBest then
 			-- walking is the real cost here, so the ranking is value per trip, not
 			-- raw price: the deepest open zone wins on price by orders of magnitude
@@ -1375,6 +1471,8 @@ if _G.__CUTGRASS_WIN then pcall(function() _G.__CUTGRASS_WIN:Destroy() end) end
 if UI.sweep then UI.sweep("CutGrassPanel") end
 
 UI.config("cutgrass", CONFIG)
+-- one-time move off the old 20 s default, which is what every saved file holds
+if CONFIG.trainSecs == 20 then CONFIG.trainSecs = 8 end
 
 local win = UI.Window({
 	name = "CutGrassPanel",
