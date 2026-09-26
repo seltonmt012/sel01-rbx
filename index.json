@@ -521,7 +521,7 @@
         112087763192016
       ],
       "status": "ok",
-      "note": "lobby, ranked and the reserved match servers are different places - Config.Matchmaking holds PublicPlaceId 84556640895285 and RankedPlaceId 112087763192016; detection is content based so every match place is caught",
+      "note": "2026-09-26: RAGE (rage bot on the game's own shot, auto shoot, no recoil, fire rate at the server's ~0.85s limit), WORLD (third person on V) and MOVE (bunny hop, air strafe, speed) tabs. lobby, ranked and the reserved match servers are different places - Config.Matchmaking holds PublicPlaceId 84556640895285 and RankedPlaceId 112087763192016; detection is content based so every match place is caught",
       "detect": "local rs = game:GetService('ReplicatedStorage') local m = rs:FindFirstChild('Modules') local s = m and m:FindFirstChild('Shared') return s ~= nil and s:FindFirstChild('DeagleShared') ~= nil and s:FindFirstChild('Config') ~= nil"
     },
     {

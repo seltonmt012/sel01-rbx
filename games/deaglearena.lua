@@ -280,6 +280,44 @@ local CONFIG = {
 	humRoundMs   = 800,
 
 	panicKey     = "End",
+
+	-- rage -----------------------------------------------------------------------
+	-- Unlike the SILENT page this does not send shots of its own: it rewrites the
+	-- target of the shot the game's own DeagleController sends, so the reload,
+	-- the sound, the tracer and the cooldown are all the game's.
+	rageSilent = false,    -- "Rage bot": your own shots go to the target in the circle
+	ragePart   = "Body",   -- Body | Head | Nearest | Random
+	rageFov    = 180,
+	rageCircle = true,
+	rageHitPct = 100,
+	rageWalls  = true,     -- the server checks no line of sight (measured)
+	rageShoot  = false,    -- fire by itself the moment a target is in reach
+	rageSkipProt = true,
+	rageMaxDist = 600,
+	rageNoRecoil = false,  -- the one camera kick per shot is skipped
+	-- Re-arm the gun as soon as the server takes a shot. MEASURED 2026-09-26 with
+	-- two hits on two targets: 0.30 / 0.50 / 0.70 / 0.80s apart -> 1 kill,
+	-- 0.85 / 0.90 / 0.95s -> 2 kills. So the server's own limit is ~0.85s and
+	-- anything faster is thrown away; the win is over the client's 1.1s after a
+	-- (client-side) miss, which every redirected shot counts as.
+	rageFastRate = true,
+	rageRateMs = 860,
+
+	-- world ----------------------------------------------------------------------
+	worldBright = false,
+	worldNoFog = false,
+	worldNoFx  = false,    -- blur, depth of field, bloom, sun rays off
+	tpOn       = false,
+	tpKey      = "V",
+	tpDist     = 12,
+
+	-- movement -------------------------------------------------------------------
+	bhop       = false,
+	strafe     = false,
+	strafeMax  = 40,
+	strafeAccel = 70,
+	speed      = false,
+	speedAdd   = 6,
 }
 
 -- No master switch, for the reason bloxstrike wrote down: every drawing has its
@@ -3041,6 +3079,422 @@ end, "whether the server caps range beyond 600 was NOT measured - no target on t
 silentOut = silentPage:Card("STATUS", 1):Readout(8)
 silentMeasOut = silentPage:Card("WHAT WAS MEASURED", 2):Readout(9)
 end
+
+-- RAGE / WORLD / MOVE ----------------------------------------------------------
+--
+-- The standard shooter pages (games-shooters.md). Wrapped in a function so the
+-- main chunk stays under the 200-locals limit.
+--
+-- The rage silent aim sits on the game's own shot: DeagleController.Shoot ends
+-- in Network:FireServer("Shoot", origin, aimPoint, hitInstance, hitPosition),
+-- and the wrapper below swaps the last three for the target's hitbox when the
+-- client's own ray missed. The server trusts the reported part (measured: 64.6
+-- deg off the crosshair and 164 studs through a wall both killed), so FOV and
+-- walls are purely our own choice. Auto shoot calls DeagleController.Shoot
+-- itself - the game runs its whole shot, cooldown included.
+
+;(function()
+local RG = { target = "-", note = "-", redirects = 0, autoShots = 0, pick = nil,
+	hookOk = false, recoilOk = false }
+
+local circle = make("Circle", { Thickness = 1, NumSides = 48, Filled = false,
+	Transparency = 0.6, ZIndex = 1, Color = Color3.fromRGB(255, 70, 70) })
+
+local function nearestPart(model)
+	local mid = centreOf()
+	local best, bestD
+	for _, part in ipairs({ headPart(model), bodyPart(model) }) do
+		if part then
+			local sp = camera:WorldToViewportPoint(part.Position)
+			if sp.Z > 0 then
+				local d = (Vector2.new(sp.X, sp.Y) - mid).Magnitude
+				if not bestD or d < bestD then best, bestD = part, d end
+			end
+		end
+	end
+	return best or bodyPart(model)
+end
+
+local function ragePartOf(model)
+	local want = CONFIG.ragePart
+	if want == "Random" then want = (math.random(2) == 1) and "Head" or "Body" end
+	if want == "Head" then return headPart(model) end
+	if want == "Nearest" then return nearestPart(model) end
+	return bodyPart(model)
+end
+
+-- The target closest to the crosshair inside the circle. Behind the camera
+-- counts as outside, whatever the radius.
+local function rageCandidate()
+	local camPos = camera.CFrame.Position
+	local mid = centreOf()
+	local best, bestPx
+	for _, e in ipairs(combatants()) do
+		local model = e.model
+		if not ragdolled(model) and aliveOf(model)
+			and not (CONFIG.rageSkipProt and protectedOf(model)) then
+			local part = ragePartOf(model)
+			if part then
+				local dist = (camPos - part.Position).Magnitude
+				if dist <= math.min(CONFIG.rageMaxDist, RANGE) then
+					local sp = camera:WorldToViewportPoint(part.Position)
+					local px = sp.Z > 0 and (Vector2.new(sp.X, sp.Y) - mid).Magnitude or 1e9
+					if px <= CONFIG.rageFov and (not bestPx or px < bestPx)
+						and (CONFIG.rageWalls or visibleTo(model, part)) then
+						best, bestPx = { entry = e, part = part }, px
+					end
+				end
+			end
+		end
+	end
+	return best
+end
+
+-- The wrapper survives a re-execute (the original is kept in _G) and asks the
+-- CURRENT generation through _G.__DEAGLE_RAGE_HOOK, so an old run never
+-- redirects anything.
+if Network and type(Network.FireServer) == "function" then
+	local orig = _G.__DEAGLE_NET_ORIG or Network.FireServer
+	_G.__DEAGLE_NET_ORIG = orig
+	Network.FireServer = function(self, name, ...)
+		local hook = _G.__DEAGLE_RAGE_HOOK
+		if name == "Shoot" and hook then
+			local ok, a, b, c, d = pcall(hook, ...)
+			if ok and a then return orig(self, name, a, b, c, d) end
+		end
+		return orig(self, name, ...)
+	end
+	RG.hookOk = true
+end
+
+_G.__DEAGLE_RAGE_HOOK = function(origin, aimPt, hitInst, hitPos)
+	if _G.__DEAGLE ~= GEN then return nil end
+	if not (CONFIG.rageSilent or CONFIG.rageShoot) then return nil end
+	-- the client's own ray already found a living enemy: leave the shot alone
+	if hitInst then
+		local model = charFromHit(hitInst)
+		if model and model ~= plr.Character and aliveOf(model) then return nil end
+	end
+	local c = RG.pick
+	RG.pick = nil
+	if not (c and c.part.Parent and aliveOf(c.entry.model)) then c = rageCandidate() end
+	if not c then return nil end
+	if math.random(100) > CONFIG.rageHitPct then return nil end
+	RG.redirects = RG.redirects + 1
+	RG.note = "shot sent to " .. c.entry.name
+	local pos = c.part.Position
+	return origin, pos, c.part, pos
+end
+
+-- No recoil: CameraController.Shoot is the one spring kick per shot.
+local CamCtl = tryRequire(ML and ML:FindFirstChild("CameraController"))
+if CamCtl and type(CamCtl.Shoot) == "function" then
+	local orig = _G.__DEAGLE_CAMSHOOT_ORIG or CamCtl.Shoot
+	_G.__DEAGLE_CAMSHOOT_ORIG = orig
+	CamCtl.Shoot = function(...)
+		if _G.__DEAGLE_NORECOIL then return end
+		return orig(...)
+	end
+	RG.recoilOk = true
+end
+
+-- auto shoot + fire rate
+task.spawn(function()
+	claimIdentity()
+	while _G.__DEAGLE == GEN do
+		pcall(function()
+			_G.__DEAGLE_NORECOIL = CONFIG.rageNoRecoil
+			local deployed = DeagleCtl and DeagleCtl.InGame == true
+			if CONFIG.rageFastRate and deployed and DeagleCtl.CanShoot == false
+				and shotAt > 0
+				and os.clock() - shotAt >= math.max(850, CONFIG.rageRateMs) / 1000 then
+				-- Shoot() checks both the flag and the clock stamp
+				DeagleCtl.CanShoot = true
+				DeagleCtl.ShootCooldownUntil = 0
+			end
+			if not (CONFIG.rageSilent or CONFIG.rageShoot) then
+				RG.target = "-"
+				return
+			end
+			local c = rageCandidate()
+			RG.target = c and (c.entry.name .. (c.entry.bot and "  (bot)" or "")) or "-"
+			if not CONFIG.rageShoot or not c then return end
+			if not deployed or DeagleCtl.CanShoot ~= true then return end
+			if UserInputService:GetFocusedTextBox() then return end
+			-- CanShoot drops a moment AFTER Shoot returns; without this gap the
+			-- first test sent 6 shots in one second into a single cooldown
+			if os.clock() < (RG.nextShot or 0) then return end
+			RG.pick = c
+			if pcall(DeagleCtl.Shoot) then
+				RG.autoShots = RG.autoShots + 1
+				RG.nextShot = os.clock() + 0.4
+			end
+		end)
+		task.wait(0.03)
+	end
+	_G.__DEAGLE_NORECOIL = false
+end)
+
+-- WORLD ------------------------------------------------------------------------
+local Lighting = game:GetService("Lighting")
+local lightOrig, fogOrig, atmOrig, fxOrig = nil, nil, {}, {}
+local tpWas, tpKeyWas = false, false
+
+local function worldStep()
+	if CONFIG.worldBright then
+		if not lightOrig then
+			lightOrig = { Lighting.Brightness, Lighting.GlobalShadows,
+				Lighting.Ambient, Lighting.OutdoorAmbient }
+		end
+		Lighting.Brightness = 2
+		Lighting.GlobalShadows = false
+		Lighting.Ambient = Color3.new(1, 1, 1)
+		Lighting.OutdoorAmbient = Color3.new(1, 1, 1)
+	elseif lightOrig then
+		Lighting.Brightness, Lighting.GlobalShadows = lightOrig[1], lightOrig[2]
+		Lighting.Ambient, Lighting.OutdoorAmbient = lightOrig[3], lightOrig[4]
+		lightOrig = nil
+	end
+
+	local atm = Lighting:FindFirstChildOfClass("Atmosphere")
+	if CONFIG.worldNoFog then
+		if not fogOrig then fogOrig = { Lighting.FogStart, Lighting.FogEnd } end
+		Lighting.FogStart, Lighting.FogEnd = 1e9 - 1, 1e9
+		if atm then
+			if not atmOrig[atm] then atmOrig[atm] = { atm.Density, atm.Haze } end
+			atm.Density, atm.Haze = 0, 0
+		end
+	elseif fogOrig then
+		Lighting.FogStart, Lighting.FogEnd = fogOrig[1], fogOrig[2]
+		fogOrig = nil
+		for a, v in pairs(atmOrig) do
+			pcall(function() a.Density, a.Haze = v[1], v[2] end)
+		end
+		atmOrig = {}
+	end
+
+	-- blur (the round intro and the death screen), depth of field, bloom, rays
+	for _, fx in ipairs(Lighting:GetChildren()) do
+		if fx:IsA("BlurEffect") or fx:IsA("DepthOfFieldEffect")
+			or fx:IsA("BloomEffect") or fx:IsA("SunRaysEffect") then
+			if CONFIG.worldNoFx then
+				if fxOrig[fx] == nil then fxOrig[fx] = fx.Enabled end
+				fx.Enabled = false
+			elseif fxOrig[fx] ~= nil then
+				fx.Enabled = fxOrig[fx]
+				fxOrig[fx] = nil
+			end
+		end
+	end
+end
+
+-- Third person has to win against CameraController.LockFirstPerson every frame,
+-- so it is written in a render step after the camera.
+local function tpStep()
+	local held = (not TOUCH) and keyHeld(CONFIG.tpKey) or false
+	if held and not tpKeyWas and not capturing
+		and not UserInputService:GetFocusedTextBox() then
+		CONFIG.tpOn = not CONFIG.tpOn
+	end
+	tpKeyWas = held
+	if CONFIG.tpOn then
+		plr.CameraMode = Enum.CameraMode.Classic
+		plr.CameraMaxZoomDistance = CONFIG.tpDist
+		plr.CameraMinZoomDistance = CONFIG.tpDist
+		tpWas = true
+	elseif tpWas then
+		plr.CameraMinZoomDistance = 0.5
+		plr.CameraMaxZoomDistance = 0.5
+		tpWas = false
+	end
+end
+
+task.spawn(function()
+	claimIdentity()
+	while _G.__DEAGLE == GEN do
+		pcall(worldStep)
+		task.wait(0.1)
+	end
+	CONFIG.worldBright, CONFIG.worldNoFog, CONFIG.worldNoFx = false, false, false
+	pcall(worldStep)
+end)
+
+-- MOVE -------------------------------------------------------------------------
+local function keyWish()
+	if UserInputService:GetFocusedTextBox() then return nil end
+	local look = camera.CFrame.LookVector
+	local fwd = Vector3.new(look.X, 0, look.Z)
+	if fwd.Magnitude < 1e-3 then return nil end
+	fwd = fwd.Unit
+	local right = Vector3.new(-fwd.Z, 0, fwd.X)
+	local w = Vector3.zero
+	if UserInputService:IsKeyDown(Enum.KeyCode.W) then w = w + fwd end
+	if UserInputService:IsKeyDown(Enum.KeyCode.S) then w = w - fwd end
+	if UserInputService:IsKeyDown(Enum.KeyCode.D) then w = w + right end
+	if UserInputService:IsKeyDown(Enum.KeyCode.A) then w = w - right end
+	if w.Magnitude < 1e-3 then return nil end
+	return w.Unit
+end
+
+task.spawn(function()
+	claimIdentity()
+	if _G.__DEAGLE ~= GEN then return end
+	local bind = "SeluxDeagleRage" .. GEN
+	RunService:BindToRenderStep(bind, Enum.RenderPriority.Camera.Value + 3, function()
+		if _G.__DEAGLE ~= GEN then
+			pcall(function() RunService:UnbindFromRenderStep(bind) end)
+			circle.Visible = false
+			if tpWas then
+				plr.CameraMinZoomDistance, plr.CameraMaxZoomDistance = 0.5, 0.5
+			end
+			return
+		end
+		pcall(function()
+			circle.Visible = (CONFIG.rageSilent or CONFIG.rageShoot) and CONFIG.rageCircle
+			if circle.Visible then
+				circle.Position = centreOf()
+				circle.Radius = CONFIG.rageFov
+			end
+			tpStep()
+			local char = plr.Character
+			local hum = char and char:FindFirstChildOfClass("Humanoid")
+			if CONFIG.bhop and hum and hum.Health > 0 and not TOUCH
+				and hum.FloorMaterial ~= Enum.Material.Air
+				and UserInputService:IsKeyDown(Enum.KeyCode.Space)
+				and not UserInputService:GetFocusedTextBox() then
+				hum:ChangeState(Enum.HumanoidStateType.Jumping)
+			end
+		end)
+	end)
+
+	-- Air strafe and speed are written in Stepped, the last point before physics:
+	-- a velocity written in RenderStepped was overwritten in Counter Blox.
+	local conn
+	conn = RunService.Stepped:Connect(function(_, dt)
+		if _G.__DEAGLE ~= GEN then conn:Disconnect() return end
+		if not (CONFIG.strafe or CONFIG.speed) or TOUCH then return end
+		local char = plr.Character
+		local hum = char and char:FindFirstChildOfClass("Humanoid")
+		local root = char and char:FindFirstChild("HumanoidRootPart")
+		if not hum or not root or hum.Health <= 0 then return end
+		local st = hum:GetState()
+		local airborne = hum.FloorMaterial == Enum.Material.Air
+			or st == Enum.HumanoidStateType.Freefall or st == Enum.HumanoidStateType.Jumping
+			or math.abs(root.AssemblyLinearVelocity.Y) > 2
+		local wish = keyWish()
+		if not wish then return end
+		if not airborne then
+			if CONFIG.speed then
+				root.CFrame = root.CFrame + wish * CONFIG.speedAdd * dt
+			end
+			return
+		end
+		if not CONFIG.strafe then return end
+		local v = root.AssemblyLinearVelocity
+		local flat = Vector3.new(v.X, 0, v.Z)
+		local speed = math.clamp(math.max(flat.Magnitude, hum.WalkSpeed, 16), 0,
+			math.max(CONFIG.strafeMax, hum.WalkSpeed))
+		local alpha = math.clamp(CONFIG.strafeAccel * dt / 3, 0, 1)
+		local nextFlat = flat:Lerp(wish * speed, alpha)
+		root.AssemblyLinearVelocity = Vector3.new(nextFlat.X, v.Y, nextFlat.Z)
+		hum:Move(wish, false)
+	end)
+end)
+
+table.insert(panicHandlers, function()
+	CONFIG.rageSilent, CONFIG.rageShoot = false, false
+end)
+
+-- pages ------------------------------------------------------------------------
+local ragePage = win:Page("RAGE", UI.icon.bolt)
+local sa = ragePage:Card("RAGE BOT", 1):Accent()
+sa:Toggle("Rage bot", CONFIG.rageSilent, function(v) CONFIG.rageSilent = v end,
+	"your own shots land on the target in the circle, the view never moves",
+	UI.theme.bad)
+sa:Dropdown("Hit part", { "Body", "Head", "Nearest", "Random" }, CONFIG.ragePart,
+	function(v) CONFIG.ragePart = v end)
+sa:Label("Damage is a flat 100 here, so Body (the bigger hitbox) kills exactly like Head.")
+sa:Slider("FOV (pixels)", 10, 1200, CONFIG.rageFov, function(v) CONFIG.rageFov = v end,
+	"radius around the crosshair; 1200 = the whole screen")
+sa:Toggle("Draw FOV circle", CONFIG.rageCircle, function(v) CONFIG.rageCircle = v end)
+sa:Slider("Hit chance %", 1, 100, CONFIG.rageHitPct, function(v) CONFIG.rageHitPct = v end)
+sa:Toggle("Through walls", CONFIG.rageWalls, function(v) CONFIG.rageWalls = v end,
+	"the server checks no line of sight - measured with a kill through a wall",
+	UI.theme.warn)
+sa:Toggle("Skip spawn protected", CONFIG.rageSkipProt, function(v)
+	CONFIG.rageSkipProt = v
+end, "a protected target eats the shot and the whole cooldown", UI.theme.good)
+sa:Slider("Max distance", 50, 600, CONFIG.rageMaxDist, function(v)
+	CONFIG.rageMaxDist = v
+end, "the gun's hard range is 600 studs")
+
+local as = ragePage:Card("AUTO SHOOT & GUN", 2)
+as:Toggle("Auto shoot", CONFIG.rageShoot, function(v) CONFIG.rageShoot = v end,
+	"fires the game's own shot the moment anybody is in the circle", UI.theme.bad)
+as:Toggle("No recoil", CONFIG.rageNoRecoil, function(v) CONFIG.rageNoRecoil = v end,
+	"skips the camera kick after every shot", UI.theme.good)
+as:Label("No spread and infinite ammo do not exist here: the deagle has no spread value and no magazine - one shot, then the reload.")
+as:Toggle("Fast fire rate", CONFIG.rageFastRate, function(v) CONFIG.rageFastRate = v end,
+	"the gun is ready again after the server's minimum instead of the game's 0.9-1.1s",
+	UI.theme.good)
+as:Slider("Re-arm after (ms)", 850, 1100, CONFIG.rageRateMs, function(v)
+	CONFIG.rageRateMs = v
+end, "measured: the server drops every hit less than ~850ms after the last one")
+as:Label("Faster is not possible here: the server itself only counts one hit per ~0.85s, so shots below that are thrown away.")
+rageOut = ragePage:Card("STATUS", 0):Readout(5)
+
+local worldPage = win:Page("WORLD", UI.icon.map or UI.icon.eye)
+local lc = worldPage:Card("LIGHT & EFFECTS", 1):Accent()
+lc:Toggle("Fullbright", CONFIG.worldBright, function(v) CONFIG.worldBright = v end,
+	"no shadows - dark corners are as bright as open ground", UI.theme.good)
+lc:Toggle("No fog", CONFIG.worldNoFog, function(v) CONFIG.worldNoFog = v end)
+lc:Toggle("No blur & effects", CONFIG.worldNoFx, function(v) CONFIG.worldNoFx = v end,
+	"blur, depth of field, bloom and sun rays off")
+local tc = worldPage:Card("THIRD PERSON", 2)
+tc:Toggle("Third person", CONFIG.tpOn, function(v) CONFIG.tpOn = v end,
+	"the key below toggles it in a round")
+bindButton(tc, "TOGGLE KEY", function() return CONFIG.tpKey end,
+	function(v) CONFIG.tpKey = v end)
+tc:Slider("Distance", 4, 30, CONFIG.tpDist, function(v) CONFIG.tpDist = v end)
+
+local movePage = win:Page("MOVE", UI.icon.loop or UI.icon.bolt)
+local hc = movePage:Card("BUNNY HOP & AIR STRAFE", 1):Accent()
+hc:Toggle("Bunny hop", CONFIG.bhop, function(v) CONFIG.bhop = v end,
+	"hold Space - jumps again the moment you land", UI.theme.good)
+hc:Toggle("Air strafe", CONFIG.strafe, function(v) CONFIG.strafe = v end,
+	"full control in the air - WASD steers mid-jump like on the ground")
+hc:Slider("Strafe max speed", 16, 80, CONFIG.strafeMax,
+	function(v) CONFIG.strafeMax = v end, "studs per second")
+hc:Slider("Air control", 10, 200, CONFIG.strafeAccel,
+	function(v) CONFIG.strafeAccel = v end, "how fast the direction follows WASD")
+local sc = movePage:Card("SPEED", 2)
+sc:Toggle("Speed boost", CONFIG.speed, function(v) CONFIG.speed = v end,
+	"extra ground speed - visible to anyone watching", UI.theme.warn)
+sc:Slider("Extra speed", 1, 30, CONFIG.speedAdd, function(v) CONFIG.speedAdd = v end,
+	"studs per second on top of normal running")
+
+task.spawn(function()
+	claimIdentity()
+	while _G.__DEAGLE == GEN do
+		pcall(function()
+			rageOut:set({
+				"  hook      " .. (RG.hookOk and "on the game's shot" or "Network missing")
+					.. "   recoil hook " .. (RG.recoilOk and "ok" or "missing"),
+				"  target    " .. tostring(RG.target),
+				string.format("  redirected %d shots   auto shots %d", RG.redirects,
+					RG.autoShots),
+				string.format("  gun       ready %s   cooldown %.2fs",
+					tostring(shotReady()), cooldownLeft()),
+				"  last      " .. tostring(RG.note),
+			})
+		end)
+		task.wait(0.4)
+	end
+end)
+
+_G.__DEAGLE_RAGE = { RG = RG, rageCandidate = rageCandidate, ragePartOf = ragePartOf,
+	worldStep = worldStep }
+end)()
 
 -- HUMAN ------------------------------------------------------------------------
 
