@@ -431,6 +431,7 @@
         301549746
       ],
       "status": "ok",
+      "paid": true,
       "detect": "local st = workspace:FindFirstChild('Status') return st ~= nil and st:FindFirstChild('HasBomb') ~= nil and st:FindFirstChild('MapName') ~= nil"
     },
     {
