@@ -919,12 +919,71 @@ local function cthulhuQuests()
 	return false
 end
 
+-- Found by the 2026-09-26 exploit sweep (docs/drainwater-exploits.md): no exploit
+-- survived the server, but three FREE things were being left on the table.
+--   * spins: the daily spin was claimed and never used. TrySpin while the
+--     server's `total` says there is one - strictly one call at a time (parallel
+--     calls pay only once anyway).
+--   * Cthulhu draw tickets: 1 per 15 minutes online, up to 5 a day, counted in
+--     plr.CthulhuCoins.drawTickets. A test draw paid a 16.5M fish.
+--   * Cthulhu coins (paid by the quests above) buy more draw tickets in the
+--     ExchangeShop - id 7, 600 coins - whenever the server says canPurchase.
+local function useSpins()
+	local getData = fn("Spin", "[C-S]GetSpinData")
+	local try = fn("Spin", "[C-S]TrySpin")
+	if not (getData and try) then return false end
+	local used = 0
+	for _ = 1, 10 do
+		local d = invoke(getData)
+		if type(d) ~= "table" or (tonumber(d.total) or 0) <= 0 then break end
+		invoke(try)
+		used = used + 1
+		task.wait(1.2)
+	end
+	if used > 0 then note("used " .. used .. " spin(s)") return true end
+	return false
+end
+
+local function drawTickets()
+	local coins = plr:FindFirstChild("CthulhuCoins")
+	local tickets = coins and coins:FindFirstChild("drawTickets")
+	return tickets and tonumber(tickets.Value) or 0
+end
+
+local function cthulhuDraws()
+	local try = fn("CthulhuDraw", "[C-S]TryDraw")
+	if not try then return false end
+	-- turn spare coins into tickets first, then draw everything
+	local getShop = fn("ExchangeShop", "[C-S]GetState")
+	local buy = fn("ExchangeShop", "[C-S]TryPurchase")
+	if getShop and buy then
+		for _ = 1, 5 do
+			local st = invoke(getShop)
+			local item = type(st) == "table" and type(st.items) == "table" and st.items[7]
+			if not (type(item) == "table" and item.canPurchase == true) then break end
+			invoke(buy, 7)
+			task.wait(0.6)
+		end
+	end
+	local drawn = 0
+	for _ = 1, 10 do
+		if drawTickets() <= 0 then break end
+		invoke(try)
+		drawn = drawn + 1
+		task.wait(1.5)
+	end
+	if drawn > 0 then note("Cthulhu draw x" .. drawn) return true end
+	return false
+end
+
 local function freeRewards()
 	if CONFIG.offline then claimFree() end
 	if CONFIG.freebies then
 		dailySpin()
 		dailySign()
 		cthulhuQuests()
+		useSpins()
+		cthulhuDraws()
 	end
 end
 
