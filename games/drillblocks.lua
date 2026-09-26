@@ -46,11 +46,12 @@ local CONFIG = {
 	buyCarry = true,       -- more carry means more brainrots per trip
 	buySpeed = true,
 	upgradeBrainrots = true,   -- press the Level button on every placed brainrot
+	upgradeHouse = true,   -- raise the house level: every level opens more slots
 	autoRebirth = false,   -- resets strength, so it stays off until asked for
 	spendFraction = 0.5,   -- never spend more than half the balance on one step
 	maxBuysPerRound = 800, -- the server accepts these back to back; the only
 	                       -- reason to stop is running out of money
-	upgradeEvery = 0.2,    -- seconds between upgrade rounds
+	upgradeEvery = 1,      -- seconds between upgrade rounds (each buy is confirmed)
 	minScore = 0,          -- ignore brainrots below this income score
 	settleTime = 2.5,      -- seconds the position is held before firing a prompt
 	scanInterval = 3,
@@ -99,14 +100,26 @@ local function holdAt(position, seconds)
 	local hrp = rootPart()
 	if not hrp then return false end
 
+	-- same rules as newHold below: one hold at a time, no stored velocity
+	if _G.__DRILL_HOLD then pcall(function() _G.__DRILL_HOLD:Disconnect() end) end
 	local target = CFrame.new(position)
-	local connection = RunService.Heartbeat:Connect(function()
+	local connection
+	connection = RunService.Heartbeat:Connect(function()
+		if _G.__DRILL ~= generation then connection:Disconnect() return end
 		local root = rootPart()
-		if root then root.CFrame = target end
+		if root then
+			root.CFrame = target
+			root.AssemblyLinearVelocity = Vector3.zero
+			root.AssemblyAngularVelocity = Vector3.zero
+		end
 	end)
+	_G.__DRILL_HOLD = connection
 
 	task.wait(seconds or CONFIG.settleTime)
 	connection:Disconnect()
+	if _G.__DRILL_HOLD == connection then _G.__DRILL_HOLD = nil end
+	local root = rootPart()
+	if root then root.AssemblyLinearVelocity = Vector3.zero end
 	return true
 end
 
@@ -116,13 +129,90 @@ end
 -- player standing there holding something, so checking Enabled before moving
 -- always failed and the placement silently did nothing. Move first, wait for the
 -- prompt to come alive, then fire - all while still holding the position.
+-- ONE position hold at a time, across re-executes. Two holds alive at once pulled
+-- the body between two points every frame - 81 jumps of 150+ studs in three
+-- seconds, the character flicking between the base and some old target in the
+-- void (2026-09-26). A new hold kills the previous one, and a hold from an older
+-- generation of this script ends itself on the next frame.
+local function newHold(getPos)
+	if _G.__DRILL_HOLD then pcall(function() _G.__DRILL_HOLD:Disconnect() end) end
+	local conn
+	conn = RunService.Heartbeat:Connect(function()
+		if _G.__DRILL ~= generation then conn:Disconnect() return end
+		local root = rootPart()
+		local pos = getPos()
+		if root and pos then
+			root.CFrame = CFrame.new(pos)
+			-- Kill the velocity every frame. Physics keeps integrating gravity and
+			-- collisions under a pinned CFrame, and the moment the hold let go
+			-- that stored speed FLUNG the character far away ("every time we
+			-- place something it flings us away and we get stuck", 2026-09-26).
+			root.AssemblyLinearVelocity = Vector3.zero
+			root.AssemblyAngularVelocity = Vector3.zero
+		end
+	end)
+	_G.__DRILL_HOLD = conn
+	-- the caller disconnects through this wrapper so the release is clean too
+	return {
+		Disconnect = function()
+			pcall(function() conn:Disconnect() end)
+			if _G.__DRILL_HOLD == conn then _G.__DRILL_HOLD = nil end
+			local root = rootPart()
+			if root then
+				root.AssemblyLinearVelocity = Vector3.zero
+				root.AssemblyAngularVelocity = Vector3.zero
+			end
+		end,
+	}
+end
+
+-- FLING GUARD. Measured 2026-09-26: the character left the map at 11,300,000
+-- studs/s and ended 1.38 BILLION studs out, long after every hold had ended -
+-- the carried brainrot tool overlapped slot geometry and the physics solver
+-- ejected the whole assembly. Two defences:
+--   * while a hold is active the character (and the tool in hand) does not
+--     collide, so nothing can overlap at all
+--   * a watchdog snaps the body back to the last calm position the moment its
+--     speed is absurd or it is far outside the map
+local lastSafe
+do
+	local guard
+	guard = RunService.Stepped:Connect(function()
+		if _G.__DRILL ~= generation then guard:Disconnect() return end
+		local char = plr.Character
+		local root = char and char:FindFirstChild("HumanoidRootPart")
+		if not root then return end
+		if _G.__DRILL_HOLD then
+			_G.__DRILL_NOCLIP = _G.__DRILL_NOCLIP or {}
+			for _, p in ipairs(char:GetDescendants()) do
+				if p:IsA("BasePart") then
+					if _G.__DRILL_NOCLIP[p] == nil then _G.__DRILL_NOCLIP[p] = p.CanCollide end
+					p.CanCollide = false
+				end
+			end
+		elseif _G.__DRILL_NOCLIP then
+			for p, was in pairs(_G.__DRILL_NOCLIP) do
+				pcall(function() if p.Parent then p.CanCollide = was end end)
+			end
+			_G.__DRILL_NOCLIP = nil
+		end
+		local speed = root.AssemblyLinearVelocity.Magnitude
+		if speed > 400 or root.Position.Magnitude > 50000 then
+			root.AssemblyLinearVelocity = Vector3.zero
+			root.AssemblyAngularVelocity = Vector3.zero
+			if lastSafe then root.CFrame = lastSafe end
+			STATE.flings = (STATE.flings or 0) + 1
+			STATE.note = "fling caught and undone"
+		elseif speed < 120 and root.Position.Magnitude < 50000 then
+			lastSafe = root.CFrame
+		end
+	end)
+end
+
 local function usePrompt(prompt, position)
 	if not prompt then return false end
 
-	local hold = RunService.Heartbeat:Connect(function()
-		local root = rootPart()
-		if root then root.CFrame = CFrame.new(position) end
-	end)
+	local hold = newHold(function() return position end)
 
 	local deadline = os.clock() + CONFIG.settleTime + 2
 	local ready = false
@@ -204,13 +294,31 @@ end
 
 -- What the character is carrying, if anything. The brainrot is reparented under
 -- the character, next to EquippedShovel.
+-- Brainrots are TOOLS now (game update): with Carry > 1 the others wait in the
+-- Backpack, and only the one in hand can be placed. So when the hand is empty
+-- but the backpack still holds a brainrot, it is equipped here - otherwise every
+-- extra carried brainrot was left in the backpack and never placed.
+local function brainrotTool(container)
+	for _, t in ipairs(container and container:GetChildren() or {}) do
+		if t:IsA("Tool") and itemsConfig[t.Name] then return t end
+	end
+	return nil
+end
+
 local function carriedModel()
 	local char = plr.Character
 	if not char then return nil end
 	for _, descendant in ipairs(char:GetDescendants()) do
-		if descendant:IsA("Model") and descendant ~= char then
+		if (descendant:IsA("Model") or descendant:IsA("Tool")) and descendant ~= char then
 			if itemsConfig[descendant.Name] then return descendant end
 		end
+	end
+	local waiting = brainrotTool(plr:FindFirstChild("Backpack"))
+	local hum = char:FindFirstChildOfClass("Humanoid")
+	if waiting and hum then
+		pcall(function() hum:EquipTool(waiting) end)
+		task.wait(0.3)
+		if waiting.Parent == char then return waiting end
 	end
 	return nil
 end
@@ -266,12 +374,21 @@ local function freeSlot()
 		return false
 	end
 
+	-- owned floors only: a locked floor's slots look empty forever (see
+	-- placeCarried); the ground floor is the lowest spawn height in the base
+	local groundY = math.huge
+	for _, slot in ipairs(slots:GetChildren()) do
+		local sp = slot:FindFirstChild("Spawn")
+		if sp then groundY = math.min(groundY, sp.Position.Y) end
+	end
+
 	local free = 0
 	local pick, pickPrompt
 	for _, slot in ipairs(slots:GetChildren()) do
 		local prompt = slot:FindFirstChild("PlaceProximityPrompt", true)
 		local spawn = slot:FindFirstChild("Spawn")
-		if prompt and spawn and not isOccupied(slot) then
+		local owned = prompt and (prompt.Enabled or (spawn and spawn.Position.Y - groundY < 8))
+		if prompt and spawn and owned and not isOccupied(slot) and not slot:GetAttribute("BigSlot") then
 			free += 1
 			if not pick then pick, pickPrompt = slot, prompt end
 		end
@@ -306,18 +423,71 @@ local function slotIncome(slot)
 	return best
 end
 
--- Every occupied slot with what it earns, weakest first. The base spans several
--- floors once the house is upgraded, so slots are gathered from the whole model
--- rather than a single level.
+-- The BASE value of a brainrot: config BaseMoney times its mutation, with no
+-- level. The slot's income figure includes the upgrades, so ranking by it kept a
+-- weak brainrot that had been levelled up and threw a far better new find away
+-- ("do not be fooled just because it was upgraded", 2026-09-26). Levels can be
+-- bought again; the base value cannot.
+local function baseScore(name, mutation)
+	local config = itemsConfig[name]
+	if not config then return 0 end
+	return (config.BaseMoney or 0) * mutationMultiplier(mutation)
+end
+
+-- Placed brainrots are loose models directly in the workspace, named after the
+-- item and standing on their slot's Spawn - there is no link from the slot. The
+-- one closest to the spawn (within a few studs) is that slot's brainrot. Its
+-- mutation is read from its own labels when one of them names a mutation.
+local function placedModels()
+	local list = {}
+	for _, m in ipairs(workspace:GetChildren()) do
+		if m:IsA("Model") and itemsConfig[m.Name] then list[#list + 1] = m end
+	end
+	return list
+end
+
+local function mutationOfModel(model)
+	local attr = model:GetAttribute("Mutation")
+	if attr and attr ~= "" then return attr end
+	for _, l in ipairs(model:GetDescendants()) do
+		if l:IsA("TextLabel") and mutationsConfig[l.Text] then return l.Text end
+	end
+	return nil
+end
+
+local function slotBrainrot(slot, models)
+	local spawn = slot:FindFirstChild("Spawn")
+	if not spawn then return nil end
+	local best, bestD
+	for _, m in ipairs(models) do
+		local ok, pos = pcall(function() return m:GetPivot().Position end)
+		if ok then
+			local d = (Vector3.new(pos.X, 0, pos.Z) - Vector3.new(spawn.Position.X, 0, spawn.Position.Z)).Magnitude
+			if d < 8 and (not bestD or d < bestD) then best, bestD = m, d end
+		end
+	end
+	return best
+end
+
+-- Every occupied slot, weakest BASE value first. The base spans several floors
+-- once the house is upgraded, so slots are gathered from the whole model rather
+-- than a single level. Income stays as a fallback when no model can be matched.
 local function occupiedSlots(base)
 	local list = {}
+	local models = placedModels()
 	for _, slot in ipairs(base.Slots:GetChildren()) do
 		local income = slotIncome(slot)
 		if income > 0 then
-			table.insert(list, { slot = slot, income = income, name = slot.Name })
+			local model = slotBrainrot(slot, models)
+			local value = model and baseScore(model.Name, mutationOfModel(model)) or 0
+			table.insert(list, {
+				slot = slot, income = income, name = slot.Name,
+				brainrot = model and model.Name or "?",
+				value = value > 0 and value or income,
+			})
 		end
 	end
-	table.sort(list, function(a, b) return a.income < b.income end)
+	table.sort(list, function(a, b) return a.value < b.value end)
 	return list
 end
 
@@ -342,11 +512,10 @@ local function placeCarried()
 	local carried = carriedModel()
 	if not carried then return false end
 
-	local slot, prompt = freeSlot()
-	if not slot then
-		STATE.note = "no free slot"
-		return false
-	end
+	-- No early "no free slot" return any more: with every slot taken the swap /
+	-- sell path further down is exactly what has to run, and returning here kept
+	-- the carrier walking around with a brainrot it could never get rid of.
+	freeSlot()
 
 	STATE.phase = "placing " .. carried.Name
 
@@ -366,10 +535,7 @@ local function placeCarried()
 	-- anchor point is simply moved while the connection stays alive.
 	STATE.phase = "returning to base"
 	local anchor = baseSpawn.Position + Vector3.new(0, 3, 0)
-	local hold = RunService.Heartbeat:Connect(function()
-		local root = rootPart()
-		if root then root.CFrame = CFrame.new(anchor) end
-	end)
+	local hold = newHold(function() return anchor end)
 
 	task.wait(CONFIG.settleTime)
 
@@ -388,7 +554,10 @@ local function placeCarried()
 				break
 			end
 		end
-		if live and spawn and not occupied then
+		-- BIG SLOTs (3X CASH, UNSTEALABLE, one per floor) are a paid feature; their
+		-- prompt never lights up for a normal account, and trying them first is
+		-- what walked the carrier from slot to slot without placing anything.
+		if live and spawn and not occupied and not candidate:GetAttribute("BigSlot") then
 			table.insert(candidates, {
 				prompt = live,
 				position = spawn.Position,
@@ -397,6 +566,25 @@ local function placeCarried()
 			})
 		end
 	end
+	-- Only slots on a floor the player OWNS. Floors 2 and 3 of the house exist
+	-- for everyone but stay locked until bought, and their Place prompt never
+	-- lights up; sorting purely by distance sent the carrier up onto those
+	-- floors, hovering over slots it could never use ("it does not know which
+	-- floors I have", 2026-09-26). Standing at the base, the game already marks
+	-- the usable empty slots Enabled - that is the ownership test. If none is lit
+	-- (the server has not caught up yet), fall back to the ground floor only.
+	local lit = {}
+	for _, c in ipairs(candidates) do
+		if c.prompt.Enabled then lit[#lit + 1] = c end
+	end
+	if #lit == 0 then
+		local groundY = math.huge
+		for _, c in ipairs(candidates) do groundY = math.min(groundY, c.position.Y) end
+		for _, c in ipairs(candidates) do
+			if c.position.Y - groundY < 8 then lit[#lit + 1] = c end
+		end
+	end
+	candidates = lit
 	table.sort(candidates, function(a, b) return a.distance < b.distance end)
 	STATE.freeSlots = #candidates
 
@@ -405,12 +593,14 @@ local function placeCarried()
 	if #candidates == 0 and CONFIG.replaceWeak then
 		local placed = occupiedSlots(base)
 		local weakest = placed[1]
-		local incoming = scoreOf(carried)
-		if weakest and incoming > weakest.income then
+		-- base value against base value - levels do not count on either side
+		local incoming = baseScore(carried.Name, carried:GetAttribute("Mutation"))
+		if weakest and incoming > weakest.value then
 			local spawn = weakest.slot:FindFirstChild("Spawn")
 			local grab = weakest.slot:FindFirstChild("GrabProximityPrompt", true)
 			if spawn and grab then
-				STATE.note = string.format("swapping out slot %s (%s)", weakest.name, shortNumber(weakest.income))
+				STATE.note = string.format("swapping out %s (base %s) for %s (base %s)",
+					weakest.brainrot, shortNumber(weakest.value), carried.Name, shortNumber(incoming))
 				anchor = spawn.Position + Vector3.new(0, 3, 0)
 				task.wait(CONFIG.settleTime)
 				local swap = weakest.slot:FindFirstChild("SwapProximityPrompt", true)
@@ -434,19 +624,45 @@ local function placeCarried()
 
 	if #candidates == 0 then
 		hold:Disconnect()
-		STATE.note = "base full"
+		-- Every slot taken and the find is not worth a swap: sell it instead of
+		-- carrying it around forever (user rule, 2026-09-26). Tried the game's
+		-- own sell remote in the shapes it plausibly takes; the carried model
+		-- disappearing is the only proof that counts.
+		local sell = Remotes:FindFirstChild("SellItem")
+		if sell then
+			for _, args in ipairs({ {}, { carried.Name }, { carried } }) do
+				if not carriedModel() then break end
+				pcall(function() sell:FireServer(table.unpack(args)) end)
+				local gone = os.clock() + 1.2
+				while carriedModel() and os.clock() < gone do task.wait(0.1) end
+			end
+		end
+		if not carriedModel() then
+			STATE.carrying = "-"
+			STATE.sold = (STATE.sold or 0) + 1
+			STATE.note = "base full - sold " .. carried.Name
+			return true
+		end
+		STATE.note = "base full, could not sell " .. carried.Name
 		return false
 	end
 
+	-- Per slot: wait only until ITS prompt lights up (the server has caught up with
+	-- the position), press once, and move on the moment it does not light up. The
+	-- old flat 2.5 s per slot made the carrier drift from slot to slot for ten
+	-- seconds whenever the nearest ones were locked ("teleports slowly from slot to
+	-- slot and does not place", 2026-09-26).
 	local success = false
-	for attempt = 1, math.min(4, #candidates) do
+	for attempt = 1, math.min(8, #candidates) do
 		local choice = candidates[attempt]
 		anchor = choice.position + Vector3.new(0, 3, 0)   -- walk the hold over
-		task.wait(CONFIG.settleTime)
-
+		local lit = os.clock() + 1.5
+		while not choice.prompt.Enabled and os.clock() < lit do task.wait(0.1) end
 		if choice.prompt.Enabled then
+			task.wait(0.25)
 			fireproximityprompt(choice.prompt)   -- once; a second press undoes it
-			task.wait(1.2)
+			local gone = os.clock() + 1.5
+			while carriedModel() and os.clock() < gone do task.wait(0.1) end
 		end
 
 		if not carriedModel() then
@@ -543,6 +759,7 @@ local function collect()
 		local money = entry.slot:FindFirstChild("Money")
 		if money and money:IsA("BasePart") then
 			hrp.CFrame = CFrame.new(money.Position + Vector3.new(0, 2, 0))
+			hrp.AssemblyLinearVelocity = Vector3.zero
 			task.wait()
 			firetouchinterest(hrp, money, 0)
 			firetouchinterest(hrp, money, 1)
@@ -631,17 +848,26 @@ local function upgradeBrainrots()
 	for _, entry in ipairs(occupiedSlots(base)) do
 		local info = slotUpgradeInfo(entry.slot)
 		while info and not info.maxed do
-			if info.cost <= 0 or info.cost > balance() * CONFIG.spendFraction then break end
+			-- "FREE" parses to 0 and used to count as "no price read" - so the free
+			-- first levels were never pressed (brainrot levels stayed at 0 all run)
+			local free = tostring(info.costText):upper():find("FREE") ~= nil
+			if not free and (info.cost <= 0 or info.cost > balance() * CONFIG.spendFraction) then break end
 
+			local levelBefore = info.levelText
 			for _, connection in pairs(getconnections(info.button.Activated)) do
 				pcall(function() connection:Fire() end)
 			end
 			fired += 1
-			STATE.brainrotUpgrades += 1
-			if fired % 25 == 0 then task.wait() end
 			if fired >= CONFIG.maxBuysPerRound then break end
 
-			info = slotUpgradeInfo(entry.slot)
+			-- same rule as the stat buys: only continue once the level really moved
+			local deadline = os.clock() + 0.5
+			repeat
+				task.wait(0.05)
+				info = slotUpgradeInfo(entry.slot)
+			until not info or info.levelText ~= levelBefore or os.clock() > deadline
+			if not info or info.levelText == levelBefore then break end
+			STATE.brainrotUpgrades += 1
 		end
 		if fired >= CONFIG.maxBuysPerRound then break end
 	end
@@ -649,6 +875,42 @@ local function upgradeBrainrots()
 	if fired > 0 then
 		STATE.note = string.format("upgraded brainrots x%d", fired)
 	end
+end
+
+-- House level. The sign on the base (Base.Level.BaseLevelGui.Level, "Level 0 >
+-- Level 1", $100K) raises the house and opens the next floor of slots - more
+-- room for brainrots. Same kind of button as the slot levels: pressed through
+-- its Activated connection and confirmed by the level text moving.
+local function upgradeHouse()
+	local base = findBase()
+	if not base or not getconnections then return false end
+	local part = base:FindFirstChild("Level")
+	local gui = part and part:FindFirstChild("BaseLevelGui")
+	local button = gui and gui:FindFirstChild("Level")
+	if not button then return false end
+	local levelLabel, costLabel
+	for _, l in ipairs(button:GetDescendants()) do
+		if l:IsA("TextLabel") then
+			if l.Name == "Level" then levelLabel = l end
+			if l.Name == "Money" then costLabel = l end
+		end
+	end
+	local levelText = levelLabel and levelLabel.Text or ""
+	if levelText == "" or not levelText:find(">") then return false end   -- maxed
+	local costText = costLabel and costLabel.Text or ""
+	local cost = parseMoney(costText)
+	local free = costText:upper():find("FREE") ~= nil
+	if not free and (cost <= 0 or cost > balance() * CONFIG.spendFraction) then return false end
+	for _, connection in pairs(getconnections(button.Activated)) do
+		pcall(function() connection:Fire() end)
+	end
+	local deadline = os.clock() + 1
+	repeat task.wait(0.1) until (levelLabel and levelLabel.Text ~= levelText) or os.clock() > deadline
+	if levelLabel and levelLabel.Text ~= levelText then
+		STATE.note = "house " .. levelText .. " (" .. costText .. ")"
+		return true
+	end
+	return false
 end
 
 -- Stat upgrades and rebirth ---------------------------------------------------
@@ -705,9 +967,20 @@ local function buyUpgrades()
 
 				remote:FireServer(1)          -- the amount argument is mandatory
 				fired += 1
+				-- Confirm before the next one. The cost label and the balance lag
+				-- behind the server, so firing on stale numbers sent hundreds of
+				-- refused buys a second - a wall of "Not enough money!" and heavy
+				-- lag (2026-09-26). No rise inside 0.5 s = out of money, stop.
+				local confirmed = false
+				local deadline = os.clock() + 0.5
+				repeat
+					task.wait(0.05)
+					local now = upgradeRow(entry.row, entry.stat)
+					if now and now.current > info.current then confirmed = true end
+				until confirmed or os.clock() > deadline
+				if not confirmed then break end
 				STATE.upgrades += 1
 				STATE.note = string.format("%s -> %d (%s)", entry.stat, info.current + 1, info.costText)
-				if fired % 25 == 0 then task.wait() end
 			end
 		end
 	end
@@ -758,10 +1031,22 @@ end
 
 -- Farm loop -------------------------------------------------------------------
 
+local nextCollectAt = 0
+
 local function farmStep()
 	if carriedModel() then
 		placeCarried()
 		return
+	end
+
+	-- Money collection happens HERE, between trips with empty hands. It used to
+	-- run in its own loop every 45 s and teleport the body across the slots while
+	-- the farm was holding it somewhere else - the two fought, the character
+	-- flicked far away and the placement loop got stuck ("teleports randomly far
+	-- away, then stuck", 2026-09-26).
+	if CONFIG.autoCollect and os.clock() >= nextCollectAt then
+		nextCollectAt = os.clock() + CONFIG.collectEvery
+		pcall(collect)
 	end
 
 	local model, score, prompt = bestItem()
@@ -774,6 +1059,22 @@ local function farmStep()
 
 	STATE.target = string.format("%s (%s)", model.Name, shortNumber(score))
 	STATE.targetScore = score
+
+	-- Base full: only fetch what beats the weakest placed brainrot on BASE value,
+	-- otherwise the trip ends in a sale of something just walked across the map.
+	local base = findBase()
+	if base and not freeSlot() and CONFIG.replaceWeak then
+		local placed = occupiedSlots(base)
+		local weakest = placed[1]
+		local incoming = baseScore(model.Name, model:GetAttribute("Mutation"))
+		if weakest and incoming <= weakest.value then
+			STATE.phase = "base full"
+			STATE.note = string.format("base full - best find %s (base %s) is not above %s (base %s)",
+				model.Name, shortNumber(incoming), weakest.brainrot, shortNumber(weakest.value))
+			task.wait(2)
+			return
+		end
+	end
 
 	if pickUp(model, prompt) then
 		placeCarried()
@@ -800,322 +1101,67 @@ end
 
 -- UI ---------------------------------------------------------------------------
 
-local COLORS = {
-	bg = Color3.fromRGB(15, 16, 20),
-	header = Color3.fromRGB(22, 23, 29),
-	panel = Color3.fromRGB(30, 32, 40),
-	panelHover = Color3.fromRGB(38, 40, 50),
-	on = Color3.fromRGB(72, 205, 130),
-	off = Color3.fromRGB(58, 60, 70),
-	text = Color3.fromRGB(232, 234, 240),
-	dim = Color3.fromRGB(138, 142, 155),
-	accent = Color3.fromRGB(255, 186, 90),
-	warn = Color3.fromRGB(250, 176, 96),
-	bad = Color3.fromRGB(232, 104, 104),
-	line = Color3.fromRGB(44, 46, 56),
-}
+-- The shared Selux panel (lib/ui-template.lua), like every other script. This
+-- file shipped its own hand-built ScreenGui for months - reported 2026-09-26 as
+-- "why does this one still have the old UI". Same switches, same logic.
+local UI = (_G.__SEL and _G.__SEL.ui) or loadstring(readfile("ui-template.lua"))()
+if _G.__DRILL_GUI then pcall(function() _G.__DRILL_GUI:Destroy() end) end
+if _G.__DRILL_WIN then pcall(function() _G.__DRILL_WIN:Destroy() end) end
+if UI.sweep then UI.sweep("DRILLBLOCKS") end
+UI.config("drillblocks", CONFIG)
+if (CONFIG.upgradeEvery or 0) < 1 then CONFIG.upgradeEvery = 1 end   -- old 0.2 s saves
 
-local function corner(parent, radius)
-	local c = Instance.new("UICorner")
-	c.CornerRadius = UDim.new(0, radius or 6)
-	c.Parent = parent
-end
+local win = UI.Window({
+	name = "DRILLBLOCKS",
+	title = "DRILL", accentTitle = "BLOCKS", subtitle = "seltonmt",
+	width = 820, height = 582,
+})
+_G.__DRILL_WIN = win
 
-local gui = Instance.new("ScreenGui")
-gui.Name = "DrillBlocks"
-gui.ResetOnSpawn = false
-gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-pcall(function() gui.Parent = (gethui and gethui()) or game:GetService("CoreGui") end)
-if not gui.Parent then gui.Parent = plr:WaitForChild("PlayerGui", 10) end
-_G.__DRILL_GUI = gui
+local MIN_STEPS = { 0, 1e6, 1e7, 1e8, 1e9, 5e9, 1e10, 5e10 }
 
-local frame = Instance.new("Frame")
-frame.Size = UDim2.fromOffset(340, 420)
-frame.Position = UDim2.new(0, 20, 0.5, -210)
-frame.BackgroundColor3 = COLORS.bg
-frame.BorderSizePixel = 0
-frame.Active = true
-frame.Draggable = true
-frame.Parent = gui
-corner(frame, 12)
+local page = win:Page("FARMING", UI.icon and UI.icon.coin or nil)
 
-local stroke = Instance.new("UIStroke")
-stroke.Color = COLORS.line
-stroke.Parent = frame
-
-local header = Instance.new("Frame")
-header.Size = UDim2.new(1, 0, 0, 52)
-header.BackgroundColor3 = COLORS.header
-header.BorderSizePixel = 0
-header.Parent = frame
-corner(header, 12)
-
-local headerFill = Instance.new("Frame")
-headerFill.Size = UDim2.new(1, 0, 0, 12)
-headerFill.Position = UDim2.new(0, 0, 1, -12)
-headerFill.BackgroundColor3 = COLORS.header
-headerFill.BorderSizePixel = 0
-headerFill.Parent = header
-
-local accentBar = Instance.new("Frame")
-accentBar.Size = UDim2.fromOffset(3, 18)
-accentBar.Position = UDim2.new(0, 12, 0, 9)
-accentBar.BackgroundColor3 = COLORS.accent
-accentBar.BorderSizePixel = 0
-accentBar.Parent = header
-corner(accentBar, 2)
-
-local title = Instance.new("TextLabel")
-title.Size = UDim2.new(0, 120, 0, 20)
-title.Position = UDim2.new(0, 22, 0, 8)
-title.BackgroundTransparency = 1
-title.Text = "DRILL BLOCKS"
-title.TextXAlignment = Enum.TextXAlignment.Left
-title.TextColor3 = COLORS.text
-title.Font = Enum.Font.GothamBold
-title.TextSize = 13
-title.Parent = header
-
-local credit = Instance.new("TextLabel")
-credit.Size = UDim2.fromOffset(120, 20)
-credit.Position = UDim2.new(0, 140, 0, 8)
-credit.BackgroundTransparency = 1
-credit.Text = "by seltonmt"
-credit.TextXAlignment = Enum.TextXAlignment.Left
-credit.TextColor3 = COLORS.accent
-credit.Font = Enum.Font.GothamMedium
-credit.TextSize = 11
-credit.Parent = header
-
-local headline = Instance.new("TextLabel")
-headline.Size = UDim2.new(1, -24, 0, 16)
-headline.Position = UDim2.new(0, 22, 0, 28)
-headline.BackgroundTransparency = 1
-headline.Text = "idle"
-headline.TextXAlignment = Enum.TextXAlignment.Left
-headline.TextColor3 = COLORS.dim
-headline.Font = Enum.Font.Gotham
-headline.TextSize = 11
-headline.Parent = header
-
-local body = Instance.new("Frame")
-body.Size = UDim2.new(1, -16, 1, -150)
-body.Position = UDim2.new(0, 8, 0, 58)
-body.BackgroundTransparency = 1
-body.Parent = frame
-
-local layout = Instance.new("UIListLayout")
-layout.Padding = UDim.new(0, 5)
-layout.SortOrder = Enum.SortOrder.LayoutOrder
-layout.Parent = body
-
-local order = 0
-local function nextOrder()
-	order += 1
-	return order
-end
-
-local function makeToggle(text, key, onChange, tone)
-	local button = Instance.new("TextButton")
-	button.Size = UDim2.new(1, -6, 0, 30)
-	button.BackgroundColor3 = COLORS.panel
-	button.BorderSizePixel = 0
-	button.Text = ""
-	button.AutoButtonColor = false
-	button.LayoutOrder = nextOrder()
-	button.Parent = body
-	corner(button, 7)
-
-	local mark = Instance.new("Frame")
-	mark.Size = UDim2.fromOffset(3, 16)
-	mark.Position = UDim2.new(0, 8, 0.5, -8)
-	mark.BackgroundColor3 = CONFIG[key] and (tone or COLORS.on) or COLORS.off
-	mark.BorderSizePixel = 0
-	mark.Parent = button
-	corner(mark, 2)
-
-	local label = Instance.new("TextLabel")
-	label.Size = UDim2.new(1, -66, 1, 0)
-	label.Position = UDim2.new(0, 18, 0, 0)
-	label.BackgroundTransparency = 1
-	label.Text = text
-	label.TextXAlignment = Enum.TextXAlignment.Left
-	label.TextColor3 = tone or COLORS.text
-	label.Font = Enum.Font.Gotham
-	label.TextSize = 12
-	label.Parent = button
-
-	local pill = Instance.new("Frame")
-	pill.Size = UDim2.fromOffset(34, 18)
-	pill.Position = UDim2.new(1, -44, 0.5, -9)
-	pill.BackgroundColor3 = CONFIG[key] and COLORS.on or COLORS.off
-	pill.BorderSizePixel = 0
-	pill.Parent = button
-	corner(pill, 9)
-
-	local knob = Instance.new("Frame")
-	knob.Size = UDim2.fromOffset(14, 14)
-	knob.Position = CONFIG[key] and UDim2.new(1, -16, 0, 2) or UDim2.new(0, 2, 0, 2)
-	knob.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
-	knob.BorderSizePixel = 0
-	knob.Parent = pill
-	corner(knob, 7)
-
-	button.MouseEnter:Connect(function()
-		TweenService:Create(button, TweenInfo.new(0.12), { BackgroundColor3 = COLORS.panelHover }):Play()
-	end)
-	button.MouseLeave:Connect(function()
-		TweenService:Create(button, TweenInfo.new(0.12), { BackgroundColor3 = COLORS.panel }):Play()
-	end)
-	button.MouseButton1Click:Connect(function()
-		CONFIG[key] = not CONFIG[key]
-		local info = TweenInfo.new(0.15, Enum.EasingStyle.Quad)
-		TweenService:Create(pill, info, { BackgroundColor3 = CONFIG[key] and COLORS.on or COLORS.off }):Play()
-		TweenService:Create(knob, info, {
-			Position = CONFIG[key] and UDim2.new(1, -16, 0, 2) or UDim2.new(0, 2, 0, 2),
-		}):Play()
-		mark.BackgroundColor3 = CONFIG[key] and (tone or COLORS.on) or COLORS.off
-		if onChange then onChange(CONFIG[key]) end
-	end)
-end
-
-local function makeRow(labelText, getValue, onStep)
-	local row = Instance.new("Frame")
-	row.Size = UDim2.new(1, -6, 0, 30)
-	row.BackgroundColor3 = COLORS.panel
-	row.BorderSizePixel = 0
-	row.LayoutOrder = nextOrder()
-	row.Parent = body
-	corner(row, 7)
-
-	local label = Instance.new("TextLabel")
-	label.Size = UDim2.new(0, 110, 1, 0)
-	label.Position = UDim2.new(0, 12, 0, 0)
-	label.BackgroundTransparency = 1
-	label.TextXAlignment = Enum.TextXAlignment.Left
-	label.TextColor3 = COLORS.dim
-	label.Font = Enum.Font.Gotham
-	label.TextSize = 12
-	label.Text = labelText
-	label.Parent = row
-
-	local valueBox = Instance.new("Frame")
-	valueBox.Size = UDim2.new(1, -188, 0, 20)
-	valueBox.Position = UDim2.new(0, 122, 0.5, -10)
-	valueBox.BackgroundColor3 = COLORS.bg
-	valueBox.BorderSizePixel = 0
-	valueBox.Parent = row
-	corner(valueBox, 5)
-
-	local value = Instance.new("TextLabel")
-	value.Size = UDim2.new(1, -6, 1, 0)
-	value.Position = UDim2.new(0, 3, 0, 0)
-	value.BackgroundTransparency = 1
-	value.TextColor3 = COLORS.text
-	value.Font = Enum.Font.GothamMedium
-	value.TextSize = 11
-	value.Text = getValue()
-	value.Parent = valueBox
-
-	local function step(text, x, delta)
-		local b = Instance.new("TextButton")
-		b.Size = UDim2.fromOffset(26, 20)
-		b.Position = UDim2.new(1, x, 0.5, -10)
-		b.BackgroundColor3 = COLORS.bg
-		b.BorderSizePixel = 0
-		b.Text = text
-		b.TextColor3 = COLORS.accent
-		b.Font = Enum.Font.GothamBold
-		b.TextSize = 15
-		b.AutoButtonColor = false
-		b.Parent = row
-		corner(b, 5)
-		b.MouseButton1Click:Connect(function()
-			onStep(delta)
-			value.Text = getValue()
-		end)
-	end
-	step("−", -62, -1)
-	step("+", -32, 1)
-	return function() value.Text = getValue() end
-end
-
-local function makeButton(text, tone)
-	local b = Instance.new("TextButton")
-	b.Size = UDim2.new(1, -6, 0, 28)
-	b.BackgroundColor3 = COLORS.panel
-	b.BorderSizePixel = 0
-	b.Text = text
-	b.TextColor3 = tone or COLORS.accent
-	b.Font = Enum.Font.GothamMedium
-	b.TextSize = 12
-	b.AutoButtonColor = false
-	b.LayoutOrder = nextOrder()
-	b.Parent = body
-	corner(b, 7)
-	return b
-end
-
-makeToggle("Auto Farm brainrots", "autoFarm", nil, COLORS.warn)
-makeToggle("Clear mining blocks", "killBlocks", setBlockClearing)
-makeToggle("Auto collect money", "autoCollect")
-makeToggle("Buy Strength", "buyStrength")
-makeToggle("Buy Carry", "buyCarry")
-makeToggle("Buy Speed", "buySpeed")
-makeToggle("Upgrade brainrots", "upgradeBrainrots")
-makeToggle("Auto Rebirth", "autoRebirth", nil, COLORS.warn)
-makeToggle("Replace weakest when full", "replaceWeak", nil, COLORS.warn)
-local refreshMin = makeRow("Min score", function() return shortNumber(CONFIG.minScore) end, function(delta)
-	local steps = { 0, 1e6, 1e7, 1e8, 1e9, 5e9, 1e10, 5e10 }
-	local index = 1
-	for i, v in ipairs(steps) do if CONFIG.minScore >= v then index = i end end
-	CONFIG.minScore = steps[math.clamp(index + delta, 1, #steps)]
-end)
-
-local grabButton = makeButton("Fetch best brainrot now")
-grabButton.MouseButton1Click:Connect(function() task.spawn(farmStep) end)
-
-local baseButton = makeButton("Teleport to base")
-baseButton.MouseButton1Click:Connect(function()
+local farmCard = page:Card("BRAINROTS", 1):Accent()
+farmCard:Toggle("Auto farm brainrots", CONFIG.autoFarm, function(v) CONFIG.autoFarm = v end,
+	"hunt the best brainrot, carry it home, put it on a slot - in a loop",
+	UI.theme and UI.theme.warn)
+farmCard:Toggle("Replace weakest when full", CONFIG.replaceWeak, function(v) CONFIG.replaceWeak = v end,
+	"with every slot taken, swap out the worst earner for a better find")
+farmCard:Stepper("Min score", function() return shortNumber(CONFIG.minScore) end,
+	function(dir)
+		local index = 1
+		for i, v in ipairs(MIN_STEPS) do if CONFIG.minScore >= v then index = i end end
+		CONFIG.minScore = MIN_STEPS[math.clamp(index + dir, 1, #MIN_STEPS)]
+	end, "ignore brainrots earning less than this")
+farmCard:Button("Fetch best brainrot now", function() task.spawn(farmStep) end)
+farmCard:Button("Teleport to base", function()
 	pcall(function() Remotes.TeleportToBase:FireServer() end)
 end)
 
-local footer = Instance.new("Frame")
-footer.Size = UDim2.new(1, -16, 0, 84)
-footer.Position = UDim2.new(0, 8, 1, -92)
-footer.BackgroundColor3 = COLORS.header
-footer.BorderSizePixel = 0
-footer.Parent = frame
-corner(footer, 8)
+local mapCard = page:Card("MAP & MONEY", 2)
+mapCard:Toggle("Clear mining blocks", CONFIG.killBlocks, function(v)
+	CONFIG.killBlocks = v
+	setBlockClearing(v)
+end, "removes the blocks so the map is walkable")
+mapCard:Toggle("Auto collect money", CONFIG.autoCollect, function(v) CONFIG.autoCollect = v end,
+	"touches every slot's money part to bank what pooled")
 
-local footerCredit = Instance.new("TextLabel")
-footerCredit.Size = UDim2.fromOffset(120, 14)
-footerCredit.Position = UDim2.new(1, -128, 1, -18)
-footerCredit.BackgroundTransparency = 1
-footerCredit.Text = "seltonmt"
-footerCredit.TextXAlignment = Enum.TextXAlignment.Right
-footerCredit.TextColor3 = COLORS.accent
-footerCredit.Font = Enum.Font.GothamBold
-footerCredit.TextSize = 10
-footerCredit.TextTransparency = 0.25
-footerCredit.Parent = footer
+local shopCard = page:Card("UPGRADES", 1)
+shopCard:Toggle("Buy strength", CONFIG.buyStrength, function(v) CONFIG.buyStrength = v end,
+	"strength is the rebirth gate, so it comes first")
+shopCard:Toggle("Buy carry", CONFIG.buyCarry, function(v) CONFIG.buyCarry = v end)
+shopCard:Toggle("Buy speed", CONFIG.buySpeed, function(v) CONFIG.buySpeed = v end)
+shopCard:Toggle("Upgrade brainrots", CONFIG.upgradeBrainrots, function(v) CONFIG.upgradeBrainrots = v end,
+	"presses the Level button on every placed brainrot, free levels included")
+shopCard:Toggle("Upgrade house", CONFIG.upgradeHouse, function(v) CONFIG.upgradeHouse = v end,
+	"raises the house level - each level opens another floor of slots")
 
-local status = Instance.new("TextLabel")
-status.Size = UDim2.new(1, -18, 1, -12)
-status.Position = UDim2.new(0, 9, 0, 6)
-status.BackgroundTransparency = 1
-status.TextXAlignment = Enum.TextXAlignment.Left
-status.TextYAlignment = Enum.TextYAlignment.Top
-status.TextColor3 = COLORS.dim
-status.Font = Enum.Font.Code
-status.TextSize = 11
-status.Text = ""
-status.Parent = footer
+local rebirthCard = page:Card("REBIRTH", 2)
+rebirthCard:Toggle("Auto rebirth", CONFIG.autoRebirth, function(v) CONFIG.autoRebirth = v end,
+	"resets strength - off until you want it", UI.theme and UI.theme.warn)
 
-UserInputService.InputBegan:Connect(function(input, typing)
-	if typing then return end
-	if input.KeyCode == Enum.KeyCode.RightShift then frame.Visible = not frame.Visible end
-end)
+local statusOut = page:Card("STATUS", 0):Readout(7)
 
 -- Loops -------------------------------------------------------------------------
 
@@ -1129,15 +1175,18 @@ local function loop(interval, key, fn)
 end
 
 
+-- Standalone collection only while the farm is OFF; with the farm on it is done
+-- inside farmStep so the two never move the body at the same time.
 task.spawn(function()
 	while _G.__DRILL == generation do
-		if CONFIG.autoCollect then pcall(collect) end
+		if CONFIG.autoCollect and not CONFIG.autoFarm then pcall(collect) end
 		task.wait(CONFIG.collectEvery)
 	end
 end)
 
 task.spawn(function()
 	while _G.__DRILL == generation do
+		if CONFIG.upgradeHouse then pcall(upgradeHouse) end
 		pcall(buyUpgrades)
 		if CONFIG.upgradeBrainrots then pcall(upgradeBrainrots) end
 		if CONFIG.autoRebirth then pcall(tryRebirth) end
@@ -1166,21 +1215,32 @@ end)
 
 task.spawn(function()
 	while _G.__DRILL == generation do
-		refreshMin()
-		headline.Text = string.format("$%s   rb %d   trips %d%s",
-			STATE.money, STATE.rebirths, STATE.trips,
-			liveMoney and ("   exact " .. shortNumber(liveMoney)) or "")
-		status.Text = string.format(
-			"items %d   free slots %d   swaps %d\ncarrying %s\ntarget %s\npicked %d  placed %d\n%s\n%s",
-			STATE.itemsSeen, STATE.freeSlots, STATE.swaps, STATE.collects, STATE.collects,
-			STATE.carrying, STATE.target,
-			STATE.picked, STATE.placed,
-			STATE.phase, STATE.note
-		)
+		pcall(function()
+			statusOut:set({
+				string.format("  phase %s", tostring(STATE.phase)),
+				string.format("  carrying %s   target %s", tostring(STATE.carrying), tostring(STATE.target)),
+				string.format("  picked %d   placed %d   swaps %d   trips %d",
+					STATE.picked, STATE.placed, STATE.swaps, STATE.trips),
+				string.format("  items seen %d   free slots %d   collects %d",
+					STATE.itemsSeen, STATE.freeSlots, STATE.collects),
+				string.format("  upgrades %d   brainrot levels %d", STATE.upgrades, STATE.brainrotUpgrades),
+				"  " .. tostring(STATE.note),
+			})
+			win:SetStat(1, "$" .. tostring(STATE.money), "money")
+			win:SetStat(2, tostring(STATE.mps), "per sec")
+			win:SetStat(3, tostring(STATE.rebirths), "rebirths")
+			win:SetStatus(string.format("$%s   %s/s   rb %d   trips %d",
+				tostring(STATE.money), tostring(STATE.mps), STATE.rebirths, STATE.trips))
+		end)
 		task.wait(0.5)
 	end
-	gui:Destroy()
 end)
+
+pcall(function()
+	win:SetMaster(CONFIG.autoFarm, "Auto farm running")
+	win:OnMaster(function(on) CONFIG.autoFarm = on end)
+end)
+pcall(function() win:Home() end)
 
 _G.__DRILL_DBG = {
 	CONFIG = CONFIG, STATE = STATE,
