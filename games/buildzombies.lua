@@ -81,6 +81,9 @@ local CONFIG = {
 	ghostObstacles = true, -- rocks/walls in front of the bumper lose collision (local)
 	endOnStall   = true,   -- end the run once the distance stops growing
 	stallSeconds = 3,
+	zoneData     = "",     -- learned "at:spd,at:spd" speed zones; a STRING because
+	                       -- UI.config only merges keys the defaults already have,
+	                       -- so a table that starts empty would never load back
 
 	autoRoll     = true,
 	rollBlocks   = true,   -- Blocks station: blocks, engines, fuel, wheels
@@ -506,6 +509,12 @@ local function walkTo(pos, radius, timeout)
 	local lastIssue = 0
 	while alive() and os.clock() - t0 < (timeout or 10) do
 		if (root.Position - pos).Magnitude <= (radius or 4) then return true end
+		-- After DespawnCar the humanoid can stay Sit=true with no seat, and
+		-- MoveTo does not move a sitting humanoid ("could not reach RollBlocks").
+		if hum.Sit and not hum.SeatPart then
+			hum.Sit = false
+			hum.Jump = true
+		end
 		if os.clock() - lastIssue > 1.5 then
 			hum:MoveTo(pos)
 			lastIssue = os.clock()
@@ -870,7 +879,9 @@ local function doRun(manual)
 	-- runs slow down 250 studs before it instead of eating the correction again.
 	local zones = STATE.speedZones
 	local function zoneSpeed(along)
-		local cur = spd
+		-- Both corrections of the first long runs came past 3000 studs (3430,
+		-- 3821), so the deep part of the road starts 15% slower on its own.
+		local cur = along > 3000 and math.floor(spd * 0.85) or spd
 		if CONFIG.adaptive then
 			for _, z in ipairs(zones) do
 				if along > z.at - 250 and along < z.at + 400 and z.spd < cur then cur = z.spd end
@@ -947,6 +958,9 @@ local function doRun(manual)
 	if CONFIG.adaptive and snaps == 0 then
 		for _, z in ipairs(STATE.speedZones) do z.spd = math.min(z.spd + 5, spd) end
 	end
+	local parts = {}
+	for _, z in ipairs(STATE.speedZones) do table.insert(parts, string.format("%d:%d", math.floor(z.at), math.floor(z.spd))) end
+	CONFIG.zoneData = table.concat(parts, ",")
 	note(string.format("run %d: %s studs, +%s cash at %s studs/s", STATE.runs, fmt(dist), fmt(gained), fmt(spd)))
 end
 
@@ -1066,6 +1080,9 @@ _G.__BUILDZOMBIES_DBG = {
 local UI = (_G.__SEL and _G.__SEL.ui) or loadstring(readfile("ui-template.lua"))()
 UI.config("buildzombies", CONFIG)
 applyAntiAfk()
+for at, sp in string.gmatch(CONFIG.zoneData or "", "(%-?%d+):(%d+)") do
+	table.insert(STATE.speedZones, { at = tonumber(at), spd = tonumber(sp) })
+end
 
 local win = UI.Window({
 	name = "BuildZombies",
