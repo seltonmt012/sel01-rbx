@@ -96,7 +96,9 @@ local UI = {}
 -- 3.10: the Hypershot panel's strings. 3.11: its WORLD / MISC / GUN additions.
 -- 3.12: Steal An Egg's offline money / rift switches.
 -- 3.15: the report card's category, confirmation popup and validation strings.
-UI.VERSION = "3.15"
+-- 3.16: phones scale by width (~0.8) and shorten the window instead of shrinking
+--       everything to 0.54 - body text went from ~6pt to ~10pt.
+UI.VERSION = "3.16"
 UI.BRAND = "SELUX"
 UI.DISCORD = "discord.gg/ARdpzFuKMm"
 UI.REPO = "seltonmt012/sel01-rbx"
@@ -748,15 +750,46 @@ _G.__SEL_DEVICE_ASKED = UI.deviceAsked
 -- How much of the screen a panel is allowed to take. On a phone the point is
 -- that the GAME stays visible, so it is capped well below the full height; on a
 -- desktop the cap of 1 means nothing changes at all.
-UI.deviceFill = { pc = 0.98, mobile = 0.80 }
+UI.deviceFill = { pc = 0.98, mobile = 0.92 }
 
-function UI.scaleFor(width, height)
+-- THE PHONE PANEL WAS SCALED BY ITS HEIGHT, AND THAT MADE IT UNREADABLE. A
+-- landscape phone is ~844x390, 582 logical pixels had to fit into 390, so the
+-- whole panel came out at 0.54 and 12px body text rendered at ~6pt - reported
+-- over and over as "text too small, can't read anything" (v3.16).
+--
+-- So on mobile the panel keeps its width and gives up HEIGHT instead: the scale
+-- aims for UI.MOBILE_SCALE (text 12px -> ~10pt), and the window is made as short
+-- as the screen needs. The body is scale-sized and scrolls, so a shorter window
+-- only means more scrolling - no layout in this file is measured against 582.
+-- A screen that fits the full panel anyway (tablet) is not touched: the height
+-- fit wins there and the window stays 582 at up to 1:1.
+UI.MOBILE_SCALE = 0.8
+UI.MOBILE_MIN_HEIGHT = 330 -- 162px of chrome plus a body that still shows a card
+
+-- Returns scale, logical height. PC is exactly the old formula with the height
+-- unchanged, so nothing moves on a monitor.
+function UI.layoutFor(width, height)
 	local vp = UI.viewport()
 	local vx = tonumber(vp.X) or 1280
 	local vy = tonumber(vp.Y) or 720
 	local fill = UI.deviceFill[UI.device] or 0.98
-	local s = math.min(vx * fill / math.max(width, 1), vy * fill / math.max(height, 1), 1)
-	return math.max(s, 0.3)
+	local fitW = vx * fill / math.max(width, 1)
+	local fitH = vy * fill / math.max(height, 1)
+	if UI.device ~= "mobile" or fitH >= 1 then
+		return math.max(math.min(fitW, fitH, 1), 0.3), height
+	end
+	local s = math.min(fitW, math.max(fitH, UI.MOBILE_SCALE), 1)
+	local h = math.min(height, math.floor(vy * fill / s))
+	local minH = math.min(height, UI.MOBILE_MIN_HEIGHT)
+	if h < minH then
+		h = minH
+		s = math.min(s, vy * fill / h)
+	end
+	return math.max(s, 0.3), h
+end
+
+function UI.scaleFor(width, height)
+	return (UI.layoutFor(width, height))
 end
 
 -- SMALL TEXT IS THE FIRST THING THAT BREAKS WHEN THE PANEL IS SCALED DOWN, and
@@ -768,7 +801,7 @@ end
 -- under it: whatever is requested, what finally renders never falls below a few
 -- real pixels. The layout absorbs the bigger type because the rows and the page
 -- size themselves; only the read-out box has to do its own arithmetic.
-UI.MIN_TEXT_PX = 8
+UI.MIN_TEXT_PX = 9
 
 function UI.small(size, minPx)
 	if UI.device ~= "mobile" then return size end
@@ -1776,6 +1809,9 @@ function UI.Window(options)
 	options = options or {}
 	local width = options.width or 820
 	local height = options.height or 582
+	-- height is the CURRENT logical height (shorter on a phone, see UI.layoutFor);
+	-- baseHeight is what the script asked for.
+	local baseHeight = height
 	local window = {}
 
 	local gui = Instance.new("ScreenGui")
@@ -2091,10 +2127,15 @@ function UI.Window(options)
 	-- panel towards its top-left corner, so a scaled window left at the old
 	-- position sits high and to the left of centre instead of in the middle.
 	function window.applyScale(value)
-		local s = value or UI.scaleFor(width, height)
+		local s, h = UI.layoutFor(width, baseHeight)
+		if value then s, h = value, baseHeight end
+		height = h
 		rootScale.Scale = s
+		if not window.collapsed then root.Size = UDim2.fromOffset(width, height) end
 		root.Position = UDim2.new(0.5, -(width * s) / 2, 0.5, -(height * s) / 2)
 		window.scale = s
+		-- a shorter window leaves the last card's filler too tall; recompute it
+		if window.current and window.current.Fill then pcall(window.current.Fill, window.current) end
 		return s
 	end
 	liveScales[window] = true

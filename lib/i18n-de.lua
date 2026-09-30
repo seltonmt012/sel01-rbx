@@ -8,7 +8,7 @@
 -- they are - they keep passing "Auto rebirth" and only this file decides what
 -- the player reads.
 --
--- 2330 entries.
+-- 2332 entries.
 
 return {
 	["$%s   %s/s   slots %d/%d   R%d   endurance %s"] = "%s$   %s/s   Plaetze %d/%d   R%d   Ausdauer %s",
@@ -98,6 +98,7 @@ return {
 	["Amber x1.5 @5K ... Void x7.5, stacks with the trail"] = "Amber x1.5 @5K ... Void x7.5, stapelt mit dem Trail",
 	["Ammo"] = "Munition",
 	["An error message, or the game freezes / crashes"] = "Eine Fehlermeldung, oder das Spiel hängt / stürzt ab",
+	["Any-world zones"] = "Zonen aller Welten",
 	["Anything below the chosen rarity is left standing in the field. Only three pets can be seated at once, so buying stops there."] = "Alles unterhalb der gewählten Seltenheit bleibt stehen. Es können nur drei Pets gleichzeitig gesetzt werden, danach wird nicht mehr gekauft.",
 	["Armour marker"] = "Rüstungs-Markierung",
 	["Ascend now"] = "Jetzt aufsteigen",
@@ -2056,6 +2057,7 @@ return {
 	["train, break walls, cash in, spend, repeat"] = "trainieren, Wände brechen, kassieren, ausgeben, wiederholen",
 	["train, cash out, ascend, spend, repeat"] = "trainieren, auszahlen, aufsteigen, ausgeben, wiederholen",
 	["train, mog, buy gear, rebirth, repeat"] = "trainieren, moggen, Gear kaufen, Rebirth, wiederholen",
+	["trains in the best zone of any world you have the rebirths for - the server only checks rebirths"] = "trainiert in der besten Zone jeder Welt, für die deine Rebirths reichen - der Server prüft nur die Rebirths",
 	["trains throw power instead of fishing - hold the dumbbell OUTSIDE the zone"] = "trainiert Wurfkraft statt Angeln - Hantel AUSSERHALB der Zone halten",
 	["travels to the strongest NPC your looks beat; the contest is position gated"] = "reist zum stärksten NPC den deine Looks schlagen; der Wettkampf prüft die Position",
 	["treadmill held, 1 stamina/s - the server throttle, not ours"] = "Laufband gehalten, 1 Ausdauer/s - die Server-Drossel, nicht unsere",

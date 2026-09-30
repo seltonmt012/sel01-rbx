@@ -8,7 +8,7 @@
 -- they are - they keep passing "Auto rebirth" and only this file decides what
 -- the player reads.
 --
--- 2330 entries.
+-- 2332 entries.
 
 return {
 	["$%s   %s/s   slots %d/%d   R%d   endurance %s"] = "%s$   %s/с   слоты %d/%d   R%d   выносливость %s",
@@ -120,6 +120,7 @@ return {
 	["Angekommen. Nummer #%s - die kannst du im Support-Forum nennen."] = "Доставлено. Номер #%s - можете указать его в форуме поддержки.",
 	["Anti AFK"] = "Анти-АФК",
 	["Anti-AFK"] = "Анти-АФК",
+	["Any-world zones"] = "Зоны всех миров",
 	["Anything below the chosen rarity is left standing in the field. Only three pets can be seated at once, so buying stops there."] = "Всё ниже выбранной редкости остаётся на месте. Одновременно можно разместить только трёх питомцев, дальше покупка прекращается.",
 	["Armour marker"] = "Метка брони",
 	["Ascend now"] = "Вознестись сейчас",
@@ -2240,6 +2241,7 @@ return {
 	["train, break walls, cash in, spend, repeat"] = "тренировка, стены, обналичка, траты, повтор",
 	["train, cash out, ascend, spend, repeat"] = "тренировка, выплата, вознесение, траты, повтор",
 	["train, mog, buy gear, rebirth, repeat"] = "тренировка, моггинг, снаряжение, ребёрн, повтор",
+	["trains in the best zone of any world you have the rebirths for - the server only checks rebirths"] = "тренируется в лучшей зоне любого мира, на которую хватает перерождений - сервер проверяет только перерождения",
 	["trains throw power instead of fishing - hold the dumbbell OUTSIDE the zone"] = "качает силу броска вместо рыбалки - держать гантель ВНЕ зоны",
 	["travels to the strongest NPC your looks beat; the contest is position gated"] = "идёт к сильнейшему NPC, которого бьют ваши looks; конкурс зависит от позиции",
 	["treadmill held, 1 stamina/s - the server throttle, not ours"] = "дорожка удержана, 1 выносливость/с - лимит сервера, не наш",

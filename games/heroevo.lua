@@ -7,7 +7,7 @@
       the WIN PAD of the deepest cleared stage pays that stage's WinAmount
       Wins                      -> morphs (Gain), eggs/pets (multiplier)
       Rebirth                   -> a flat multiplier and the next training zones
-      three worlds, ALL IN ONE PLACE (Map / MapTest / Map3), 45 stages, 27 zones
+      nine worlds, ALL IN ONE PLACE (Map / MapTest / Map3..Map9), 135 stages, 81 zones
 
   Everything below was measured against the server through the bridge before it
   was written down. The five findings that shape this file:
@@ -75,6 +75,7 @@ local CONFIG = {
 	stages = true,          -- walk the stage chain and claim the deepest pad
 	train = true,           -- stand in the best training zone between runs
 	trainSecs = 15,         -- seconds of training after every run
+	anyWorldZone = true,    -- train in the best zone of ANY world - see bestZone
 	stageMode = "Auto",     -- Auto | Manual
 	stageTarget = 1,        -- manual target, world-local (1..15)
 	maxRunSecs = 180,       -- a run longer than this is never worth its wins
@@ -343,11 +344,41 @@ local function unpin() pinTo = nil end
 -- A stage's wave spawns on the gate CROSSING, so the body has to arrive from the
 -- outside and travel through the plane. The direction is read off the geometry
 -- (gate -> spawn) because the three worlds do not share an axis or an origin.
+-- THE MAP STREAMS. From the lobby, stages 1-7 of world 1 are there and stage 8
+-- onwards is only its `Barrier` model - no Gate, no Spawn, no pad part. Standing
+-- at stage 5 brought in up to stage 11. So a part the run needs is asked for
+-- explicitly: around the stage's own barrier and the previous stage's (a gate sits
+-- ~20 studs past the previous barrier and ~97 before its own), then waited on.
+local function streamIn(folder, names)
+	local missing = false
+	for _, n in ipairs(names) do
+		if not folder:FindFirstChild(n) then missing = true end
+	end
+	if not missing then return end
+	local spots = {}
+	local own = folder:FindFirstChild("Barrier")
+	if own then spots[#spots + 1] = own:GetPivot().Position end
+	local world, stage = folder:GetAttribute("World"), folder:GetAttribute("Stage")
+	local prev = stage and stageFolder(world, stage - 1)
+	local prevBarrier = prev and prev:FindFirstChild("Barrier")
+	if prevBarrier then spots[#spots + 1] = prevBarrier:GetPivot().Position end
+	for _, pos in ipairs(spots) do
+		pcall(function() plr:RequestStreamAroundAsync(pos, 3) end)
+	end
+	for _, n in ipairs(names) do folder:WaitForChild(n, 2) end
+end
+
 local function enterStage(folder)
+	streamIn(folder, { "Gate", "Spawn" })
 	local gate = folder:FindFirstChild("Gate")
 	local spawn = folder:FindFirstChild("Spawn")
 	if not (gate and gate:IsA("BasePart")) then return false end
-	local aim = spawn and spawn.Position or (gate.Position + Vector3.new(0, 0, 10))
+	-- The barrier sits on the far side of the gate in every world, so it is the
+	-- direction when the spawn part has not streamed in; a fixed +Z is not.
+	local barrier = folder:FindFirstChild("Barrier")
+	local aim = spawn and spawn.Position
+		or (barrier and barrier:GetPivot().Position)
+		or (gate.Position + Vector3.new(0, 0, 10))
 	local flat = Vector3.new(aim.X - gate.Position.X, 0, aim.Z - gate.Position.Z)
 	if flat.Magnitude < 1 then return false end
 	local dir = flat.Unit
@@ -401,6 +432,14 @@ local function claimPad(folder)
 	local pad = folder:FindFirstChild("Pad")
 	local free = pad and pad:FindFirstChild("Free")
 	local part = free and free:FindFirstChild("Pad")
+	if not part and pad then
+		local barrier = folder:FindFirstChild("Barrier")
+		if barrier then
+			pcall(function() plr:RequestStreamAroundAsync(barrier:GetPivot().Position, 3) end)
+		end
+		free = pad:WaitForChild("Free", 2)
+		part = free and free:WaitForChild("Pad", 2)
+	end
 	if not (part and part:IsA("BasePart")) then return false end
 	local before = lastPayAt
 	pin(part.Position + Vector3.new(0, 4, 0))
@@ -463,7 +502,10 @@ local function raidPass()
 			local folder = stageFolder(world, s)
 			if not folder then note("stage " .. s .. " is not in the map") break end
 			note("stage " .. s)
-			enterStage(folder)
+			if not enterStage(folder) then
+				note("stage " .. s .. " gate did not load")
+				break
+			end
 			local budget = math.min(CONFIG.stageTimeout, clearSecs(world, s, STATE.power) * 2.5 + 4)
 			local t = os.clock()
 			while not RUN.cleared[s] and os.clock() - t < budget do task.wait(0.1) end
@@ -501,19 +543,33 @@ end
 -- training
 --------------------------------------------------------------------------------
 
+-- The game grew from three worlds to NINE (Map, MapTest, Map3 .. Map9), and the
+-- first version only knew the first three - every zone in Map4..Map9 read as
+-- world 1. A world-4+ player then found no zone of their own world at all, the
+-- training pass returned without moving the body, and the character stayed on
+-- the win pad after the claim: the "it claims but never teleports back" report.
+-- `ZoneConfig[id].World` is the authority (absent means world 1); the map name
+-- is only the fallback for a zone the config does not know.
 local function worldOfInstance(inst)
-	local map3 = workspace:FindFirstChild("Map3")
-	local map2 = workspace:FindFirstChild("MapTest")
-	local map1 = workspace:FindFirstChild("Map")
-	if map3 and inst:IsDescendantOf(map3) then return 3 end
-	if map2 and inst:IsDescendantOf(map2) then return 2 end
-	if map1 and inst:IsDescendantOf(map1) then return 1 end
-	return 1
+	local id = inst:GetAttribute("ZoneId")
+	local cfg = id and ZoneConfig and (ZoneConfig[tostring(id)] or ZoneConfig[tonumber(id) or -1])
+	if cfg then return tonumber(cfg.World) or 1 end
+	local node = inst
+	while node and node.Parent ~= workspace do node = node.Parent end
+	if not node then return 1 end
+	if node.Name == "MapTest" then return 2 end
+	return tonumber(node.Name:match("^Map(%d+)$")) or 1
 end
 
 -- A zone above the rebirth count sets the multiplier to 1, which is worse than
 -- entering none, and a zone with a GamepassId is the Robux one. Both are read off
 -- the CONFIG entry, never off the model's name.
+--
+-- THE WORLD IS NOT CHECKED BY THE SERVER, the rebirth requirement is. Measured
+-- from world 1 at 0 rebirths, 5s each: lobby zone x1 +36 Power, Map9's base zone
+-- 73 (x250M, RebirthRequirement 0) +4.8e9, Map9's zone 78 (x2.5e9, needs 1800
+-- rebirths) +20. So with `anyWorldZone` the best zone is picked across all nine
+-- worlds, filtered only on the requirement and the gamepass.
 local function bestZone(world, rebirths)
 	local best, bestMulti = nil, -1
 	for _, model in ipairs(CollectionService:GetTagged("TrainingZone")) do
@@ -525,7 +581,8 @@ local function bestZone(world, rebirths)
 		if cfg and not cfg.GamepassId then
 			local multi = tonumber(cfg.Multiplier) or 1
 			local need = tonumber(cfg.RebirthRequirement) or 0
-			if worldOfInstance(model) == world and need <= rebirths and multi > bestMulti then
+			local here = CONFIG.anyWorldZone or worldOfInstance(model) == world
+			if here and need <= rebirths and multi > bestMulti then
 				best, bestMulti = model, multi
 			end
 		end
@@ -895,9 +952,20 @@ task.spawn(function()
 				end
 			end
 
+			-- A rebirth with Training off leaves Power at 0 for good (there is no
+			-- other source), and every run then waits out the full stage timeout on
+			-- stage 1 - "stuck in raid" with nothing to show for it.
+			if doRaid and STATE.power <= 0 then
+				doRaid = false
+				note("no power - turn Training on")
+			end
 			if doRaid then
 				local ok, err = pcall(raidPass)
-				if not ok then note("raid failed: " .. tostring(err)) end
+				if not ok then
+					note("raid failed: " .. tostring(err))
+					unpin()
+					STATE.phase = "idle"
+				end
 			end
 			if CONFIG.rebirth then
 				local ok, err = pcall(rebirthPass)
@@ -976,6 +1044,8 @@ main:Toggle("Stage runs", CONFIG.stages, function(v) CONFIG.stages = v end,
 	"walks the gates in order and claims the deepest pad - the only income", UI.theme.good)
 main:Toggle("Training", CONFIG.train, function(v) CONFIG.train = v end,
 	"the only source of Power, and Power is the damage")
+main:Toggle("Any-world zones", CONFIG.anyWorldZone, function(v) CONFIG.anyWorldZone = v end,
+	"trains in the best zone of any world you have the rebirths for - the server only checks rebirths", UI.theme.warn)
 main:Slider("Train secs/run", 0, 60, CONFIG.trainSecs, function(v) CONFIG.trainSecs = v end)
 main:Dropdown("Target stage", { "Auto", "Manual" }, CONFIG.stageMode, function(v)
 	CONFIG.stageMode = v
