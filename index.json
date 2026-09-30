@@ -34,6 +34,17 @@
       "detect": "local rs = game:GetService('ReplicatedStorage') local n = rs:FindFirstChild('Network') local roll = n and n:FindFirstChild('RollService') return roll ~= nil and n:FindFirstChild('DiceShopService') ~= nil and rs:FindFirstChild('Framework') ~= nil"
     },
     {
+      "alias": "buildzombies",
+      "name": "Build and Kill Zombies",
+      "file": "games/buildzombies.lua",
+      "places": [
+        105011592530400
+      ],
+      "status": "ok",
+      "note": "Build-a-car distance runner. The car is simulated on the client and validated by the server; the script drives it with the game's own CarController by feeding Humanoid:Move and raising TopSpeed/Accel locally (100 studs/s - the zombie zones snap back anything above ~110). Cash is paid live per stud, so a run ends on stall. Track obstacles (rock piles, road hump walls) are made non-collidable client side when they are small or thick-and-narrow AND stand 3+ studs above the ground under the car; floors, ramp planks and road-level blocks stay solid, with a fall guard. Free rolls at the two plot machines (RollConfirmation setting turned Off - answering the skip packet instantly jammed the station), buys only real upgrades (buy prompt is off during the 2.5s spin), swaps them into the same grid cell, mounts weapons into free support slots, skill tree, codes, quests, and the game's own 15-minute AFK rejoin is disabled via AfkConfig.IdleSeconds. Exact cash from Packets.GetData('Cash')",
+      "detect": "local rs = game:GetService('ReplicatedStorage') local p = rs:FindFirstChild('Packages') local c = rs:FindFirstChild('Controllers') return p ~= nil and p:FindFirstChild('Packets') ~= nil and c ~= nil and c:FindFirstChild('CarController') ~= nil and c:FindFirstChild('BuildController') ~= nil"
+    },
+    {
       "alias": "clickersim",
       "name": "[NEW] Clicker Simulator!",
       "file": "games/clickersim.lua",
