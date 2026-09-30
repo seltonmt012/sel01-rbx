@@ -8,7 +8,7 @@
 -- they are - they keep passing "Auto rebirth" and only this file decides what
 -- the player reads.
 --
--- 2391 entries.
+-- 2393 entries.
 
 return {
 	["$%s   %s/s   slots %d/%d   R%d   endurance %s"] = "%s$   %s/с   слоты %d/%d   R%d   выносливость %s",
@@ -376,6 +376,7 @@ return {
 	["Circle colour"] = "Цвет круга",
 	["Claim achievements"] = "Забирать достижения",
 	["Claim daily"] = "Забрать ежедневное",
+	["Claim event drops"] = "Собирать дропы ивентов",
 	["Claim every"] = "Забирать каждые",
 	["Claim every (s)"] = "Забирать каждые (с)",
 	["Claim everything"] = "Забрать всё",
@@ -844,6 +845,7 @@ return {
 	["Line of sight only"] = "Только по линии видимости",
 	["Linear"] = "Линейно",
 	["Lock break %/s"] = "Срыв захвата %/с",
+	["Loot Rain and Zeus crates are claimed wherever the car is"] = "Ящики Loot Rain и Zeus собираются, где бы ни была машина.",
 	["Loot range"] = "Радиус лута",
 	["Loot range (studs)"] = "Радиус добычи (стады)",
 	["Loot the drops, carry them home, sell the stock at the market."] = "Собирать дроп, нести домой, продавать склад на рынке.",
@@ -1682,6 +1684,7 @@ return {
 	["bots publish BotAiming while they are lining a shot up"] = "боты выставляют BotAiming, пока целятся",
 	["bots publish BotLevel, players publish Elo"] = "у ботов BotLevel, у игроков Elo",
 	["bought furnace"] = "печь куплена",
+	["brakes where the server pulled the car back and remembers the spot for the next runs"] = "Тормозит там, где сервер откатил машину, и запоминает место для следующих заездов.",
 	["bullets here fly 2800-2950 studs per second and fall at 196"] = "пули летят 2800-2950 стадов в секунду и падают с ускорением 196",
 	["burns a Win Potion before each race"] = "тратит зелье побед перед каждой гонкой",
 	["buttons"] = "кнопки",
@@ -2161,7 +2164,6 @@ return {
 	["skips a race while a treadmill is waiting only on rebirths"] = "пропускает гонку, пока дорожке не хватает только ребёрнов",
 	["skips the fight animation; drops boosts, gems, trait rerolls"] = "Пропускает анимацию боя; даёт бусты, самоцветы, перебросы черт.",
 	["slow continuous wander of the aim point - smooth noise, not per-frame noise"] = "медленное блуждание точки прицела - плавный шум, а не дрожь каждый кадр",
-	["slows down after an early correction, speeds back up after clean runs"] = "Сбавляет после ранней коррекции, снова разгоняется после чистых заездов.",
 	["so the offset drifts during a long hold instead of standing still"] = "чтобы смещение дрейфовало при долгом удержании, а не стояло на месте",
 	["sold"] = "продано",
 	["spawns the car, drives the road, ends the run, repeats"] = "Спавнит машину, едет по трассе, завершает заезд и повторяет.",

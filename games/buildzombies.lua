@@ -103,6 +103,7 @@ local CONFIG = {
 
 	autoCodes    = true,
 	autoQuests   = true,
+	autoDrops    = true,   -- claim Loot Rain / Zeus event crates
 	antiAfk      = true,
 }
 
@@ -110,7 +111,7 @@ local STATE = {
 	cash = 0, record = 0, plot = "-",
 	runs = 0, runCash = 0, lastDist = 0, bestDist = 0, lastRunCash = 0,
 	runStart = 0, cashStart = nil, sessionStart = os.clock(),
-	snaps = 0, speedAdj = 0, cleanRuns = 0,
+	snaps = 0, speedAdj = 0, cleanRuns = 0, speedZones = {}, drops = 0,
 	rolls = 0, bought = 0, swaps = 0, weaponsAdded = 0, skills = 0, codes = 0,
 	hold = {},             -- station -> {id, cost}
 	lastRoll = {},         -- station -> id
@@ -613,6 +614,34 @@ local confirmConn = Packets.RollConfirmation.OnClientEvent:Connect(function(_, s
 	end)
 end)
 
+-- Event drops. Loot Rain (every hour at minute 20 for 5 min: cash 50-500,
+-- boosts, parts, weapons) and Zeus strikes drop crates that the CLIENT claims:
+-- the game's own code checks the touch locally and then sends
+-- LiveEventClientSignal{eventName, action = "claimDrop", args = {id}}. The
+-- crate is announced by LiveEventSignal (action "crate" / "strike", with id and
+-- fall time), so every one is claimed after it lands, wherever the car is.
+-- Fuel Surge cans need nothing: the server credits them to the car itself
+-- (measured: "fuelCan" signals with our userId while parked on the plot).
+local dropSeen = {}
+local dropConn = Packets.LiveEventSignal.OnClientEvent:Connect(function(msg)
+	if not live or not CONFIG.autoDrops or type(msg) ~= "table" then return end
+	local ev, act = msg.eventName, msg.action
+	if not ((ev == "lootRain" and act == "crate") or (ev == "zeusAbuse" and act == "strike")) then return end
+	for _, a in ipairs(type(msg.args) == "table" and msg.args or {}) do
+		if type(a) == "table" and type(a.id) == "number" and not dropSeen[ev .. a.id] then
+			local id = a.id
+			dropSeen[ev .. id] = true
+			task.delay((tonumber(a.fall) or 1.5) + 0.4 + math.random() * 0.8, function()
+				if not live then return end
+				pcall(function()
+					Packets.LiveEventClientSignal:Fire({ eventName = ev, action = "claimDrop", args = { id } })
+				end)
+				STATE.drops = STATE.drops + 1
+			end)
+		end
+	end
+end)
+
 local function rollStation(station, manual)
 	local st = stationFolder(station)
 	if not st or not st:FindFirstChild("Roll") then return end
@@ -835,9 +864,36 @@ local function doRun(manual)
 		end
 	end)
 
+	-- Speed zones: the server's allowance is tighter in some stretches than
+	-- others, and a correction there teleports the car back ("snap"). Every snap
+	-- drops the speed of THAT stretch by 15% at once and is remembered, so later
+	-- runs slow down 250 studs before it instead of eating the correction again.
+	local zones = STATE.speedZones
+	local function zoneSpeed(along)
+		local cur = spd
+		if CONFIG.adaptive then
+			for _, z in ipairs(zones) do
+				if along > z.at - 250 and along < z.at + 400 and z.spd < cur then cur = z.spd end
+			end
+		end
+		return cur
+	end
+	local function onSnap(along, cur)
+		if not CONFIG.adaptive then return end
+		for _, z in ipairs(zones) do
+			if math.abs(z.at - along) < 150 then
+				z.spd = math.max(math.floor(math.min(z.spd, cur) * 0.85), 45)
+				return
+			end
+		end
+		table.insert(zones, { at = along, spd = math.max(math.floor(cur * 0.85), 45) })
+	end
+
 	RunService:BindToRenderStep(BIND, Enum.RenderPriority.Last.Value, function()
 		if not pp.Parent then return end
-		if car:GetAttribute("TopSpeed") ~= spd then car:SetAttribute("TopSpeed", spd) end
+		local nowAlong = (pp.Position - origin):Dot(axis)
+		local cur = zoneSpeed(nowAlong)
+		if car:GetAttribute("TopSpeed") ~= cur then car:SetAttribute("TopSpeed", cur) end
 		if (car:GetAttribute("Accel") or 0) < accel then car:SetAttribute("Accel", accel) end
 		local hum = humanoid()
 		if not hum then return end
@@ -846,7 +902,10 @@ local function doRun(manual)
 		local err = targetLat - rel:Dot(side)
 		local k = math.clamp(err * 0.02, -0.5, 0.5)
 		hum:Move((axis + side * k).Unit, false)
-		if lastP and along < lastP - 5 then snaps = snaps + 1 end
+		if lastP and along < lastP - 5 then
+			snaps = snaps + 1
+			onSnap(along, cur)
+		end
 		lastP = along
 	end)
 
@@ -883,20 +942,10 @@ local function doRun(manual)
 	if dist > STATE.bestDist then STATE.bestDist = dist end
 	STATE.snaps = snaps
 
-	-- Adaptive speed: corrections plus a run that fell well short of the best one
-	-- means the zone allowance was exceeded (115 snapped at 2.1K where 105 reached
-	-- the real wall at 2.7K); clean runs earn the speed back.
-	if CONFIG.adaptive then
-		if snaps > 0 and bestBefore > 0 and dist < bestBefore * 0.9 then
-			STATE.speedAdj = math.max(STATE.speedAdj - 10, 60 - CONFIG.speed)
-			STATE.cleanRuns = 0
-		else
-			STATE.cleanRuns = STATE.cleanRuns + 1
-			if STATE.cleanRuns >= 3 and STATE.speedAdj < 0 then
-				STATE.speedAdj = math.min(0, STATE.speedAdj + 5)
-				STATE.cleanRuns = 0
-			end
-		end
+	-- A clean run lets every learned zone creep back up 5 studs/s, so a zone
+	-- that was slowed by bad luck (a zombie pack) does not stay slow forever.
+	if CONFIG.adaptive and snaps == 0 then
+		for _, z in ipairs(STATE.speedZones) do z.spd = math.min(z.spd + 5, spd) end
 	end
 	note(string.format("run %d: %s studs, +%s cash at %s studs/s", STATE.runs, fmt(dist), fmt(gained), fmt(spd)))
 end
@@ -1041,7 +1090,7 @@ local runCard = farmPage:Card("DRIVING", 1):Accent()
 toggle(runCard, "Auto Drive", "autoRun", "spawns the car, drives the road, ends the run, repeats")
 runCard:Slider("Speed (studs/s)", 40, 200, CONFIG.speed, function(v) CONFIG.speed = v end,
 	"100 is safe; above ~110 the server corrects the car inside zombie zones")
-toggle(runCard, "Adaptive speed", "adaptive", "slows down after an early correction, speeds back up after clean runs")
+toggle(runCard, "Adaptive speed", "adaptive", "brakes where the server pulled the car back and remembers the spot for the next runs")
 toggle(runCard, "Drive through obstacles", "ghostObstacles", "rocks, blocks and walls on the track lose their collision, only on your screen",
 	nil, function(on) if on then task.spawn(applyGhosts) else restoreGhosts() end end)
 toggle(runCard, "End run on stall", "endOnStall", "ends the run when the zombies stop the car instead of waiting to die")
@@ -1104,6 +1153,7 @@ local rewPage = win:Page("REWARDS", UI.icon.bag)
 local rewCard = rewPage:Card("REWARDS", 1):Accent()
 toggle(rewCard, "Auto Redeem Codes", "autoCodes", "every active code once, including the distance-gated ones")
 toggle(rewCard, "Auto Claim Quests", "autoQuests", "weekly quests and offline cash")
+toggle(rewCard, "Claim event drops", "autoDrops", "Loot Rain and Zeus crates are claimed wherever the car is")
 toggle(rewCard, "Anti AFK", "antiAfk", "stops the game's 15-minute idle rejoin", nil, function() applyAntiAfk() end)
 rewCard:Button("Redeem codes now", function() task.spawn(doCodes) end)
 
@@ -1145,6 +1195,7 @@ task.spawn(function()
 	pcall(function() RunService:UnbindFromRenderStep(BIND) end)
 	pcall(function() invConn:Disconnect() end)
 	pcall(function() confirmConn:Disconnect() end)
+	pcall(function() dropConn:Disconnect() end)
 	pcall(function() idleConn:Disconnect() end)
 end)
 
@@ -1205,7 +1256,7 @@ task.spawn(function()
 			string.format("  rolls      %d", STATE.rolls),
 			string.format("  bought     %d", STATE.bought),
 			string.format("  swaps %d   weapons %d", STATE.swaps, STATE.weaponsAdded),
-			string.format("  skills %d  codes %d", STATE.skills, STATE.codes),
+			string.format("  skills %d  codes %d  drops %d", STATE.skills, STATE.codes, STATE.drops),
 			string.format("  plot       %s", STATE.plot),
 		})
 

@@ -8,7 +8,7 @@
 -- they are - they keep passing "Auto rebirth" and only this file decides what
 -- the player reads.
 --
--- 2391 entries.
+-- 2393 entries.
 
 return {
 	["$%s   %s/s   slots %d/%d   R%d   endurance %s"] = "%s$   %s/s   Plaetze %d/%d   R%d   Ausdauer %s",
@@ -333,6 +333,7 @@ return {
 	["Circle colour"] = "Kreisfarbe",
 	["Claim achievements"] = "Erfolge abholen",
 	["Claim daily"] = "Täglich abholen",
+	["Claim event drops"] = "Event-Drops einsammeln",
 	["Claim every"] = "Abholen alle",
 	["Claim every (s)"] = "Abholen alle (s)",
 	["Claim everything"] = "Alles abholen",
@@ -747,6 +748,7 @@ return {
 	["Levels the unit that returns the most per dollar"] = "Levelt die Einheit, die pro Dollar am meisten bringt",
 	["Line of sight only"] = "Nur mit Sichtlinie",
 	["Lock break %/s"] = "Lock-Abbruch %/s",
+	["Loot Rain and Zeus crates are claimed wherever the car is"] = "Loot-Rain- und Zeus-Kisten werden eingesammelt, egal wo das Auto ist.",
 	["Loot range"] = "Loot-Reichweite",
 	["Loot range (studs)"] = "Beute-Reichweite (Studs)",
 	["Loot the drops, carry them home, sell the stock at the market."] = "Drops einsammeln, nach Hause tragen, das Lager am Markt verkaufen.",
@@ -1505,6 +1507,7 @@ return {
 	["bots publish BotAiming while they are lining a shot up"] = "Bots zeigen BotAiming, während sie zielen",
 	["bots publish BotLevel, players publish Elo"] = "Bots zeigen BotLevel, echte Spieler zeigen Elo",
 	["bought furnace"] = "Ofen gekauft",
+	["brakes where the server pulled the car back and remembers the spot for the next runs"] = "Bremst dort, wo der Server das Auto zurückgesetzt hat, und merkt sich die Stelle für die nächsten Fahrten.",
 	["bullets here fly 2800-2950 studs per second and fall at 196"] = "Kugeln fliegen hier 2800-2950 Studs pro Sekunde und fallen mit 196",
 	["burns a Win Potion before each race"] = "verbraucht vor jedem Rennen einen Siegtrank",
 	["buttons"] = "Knöpfe",
@@ -1977,7 +1980,6 @@ return {
 	["skips a race while a treadmill is waiting only on rebirths"] = "lässt ein Rennen aus, solange ein Laufband nur noch Wiedergeburten braucht",
 	["skips the fight animation; drops boosts, gems, trait rerolls"] = "Überspringt die Kampfanimation; droppt Boosts, Gems, Trait Rerolls.",
 	["slow continuous wander of the aim point - smooth noise, not per-frame noise"] = "langsames Wandern des Zielpunkts - weiches Rauschen, kein Zittern pro Frame",
-	["slows down after an early correction, speeds back up after clean runs"] = "Bremst nach einer frühen Korrektur, beschleunigt nach sauberen Fahrten wieder.",
 	["so the offset drifts during a long hold instead of standing still"] = "damit der Versatz während eines langen Haltens driftet statt still zu stehen",
 	["sold"] = "verkauft",
 	["spawns the car, drives the road, ends the run, repeats"] = "Spawnt das Auto, fährt die Strecke, beendet die Fahrt, von vorn.",
