@@ -514,6 +514,17 @@
       "detect": "local rs = game:GetService('ReplicatedStorage') local r = rs:FindFirstChild('Remotes') local f = r and r:FindFirstChild('Functions') local sh = rs:FindFirstChild('Shared') return f ~= nil and f:FindFirstChild('RequestOpenCase') ~= nil and f:FindFirstChild('RequestPlaceGun') ~= nil and sh ~= nil and sh:FindFirstChild('CaseData') ~= nil"
     },
     {
+      "alias": "coldwar",
+      "name": "Cold War [VIETNAM]",
+      "file": "games/coldwar.lua",
+      "places": [
+        13687899540
+      ],
+      "status": "ok",
+      "note": "2026-10-05 v1: ESP (class, weapon, limb health, downed/spawn/disguise flags, vehicles by crew team), camera aimbot with the game's own ballistics, silent aim as a BENT shot (ClientFire volley field swap, measured 0.1-7.2 deg accepted). Hidden anticheat in PlayerScripts.PlayerModule is left running and nothing it detects is done",
+      "detect": "local rs = game:GetService('ReplicatedStorage') local s = rs:FindFirstChild('Shared') return rs:FindFirstChild('BallisticsNet') ~= nil and s ~= nil and s:FindFirstChild('Ballistics') ~= nil"
+    },
+    {
       "alias": "deaglearena",
       "name": "[EVENT] Deagle Arena",
       "file": "games/deaglearena.lua",
