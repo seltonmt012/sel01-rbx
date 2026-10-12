@@ -8,7 +8,7 @@
 -- they are - they keep passing "Auto rebirth" and only this file decides what
 -- the player reads.
 --
--- 2458 entries.
+-- 2472 entries.
 
 return {
 	["$%s   %s/s   slots %d/%d   R%d   endurance %s"] = "%s$   %s/s   Plaetze %d/%d   R%d   Ausdauer %s",
@@ -49,6 +49,7 @@ return {
 	["64 steps, Cockroach x1 to Pteranodon x1550, level + wins"] = "64 Stufen, Cockroach x1 bis Pteranodon x1550, Level + Wins",
 	["67 billion gum for one prestige point; it will park the cycle for months"] = "67 Milliarden Gum für einen Prestige-Punkt; das legt den Zyklus für Monate still",
 	["7.99 cash, only after the bag ladder is done"] = "7.99 Geld, erst wenn die Taschen-Leiter fertig ist",
+	["70 means a reload takes 30 percent as long; 95 is as close to instant as it goes"] = "70 heißt, Nachladen dauert nur noch 30 Prozent so lange; 95 ist so nah an sofort wie es geht",
 	["A 12% / A+ 4% / S 1% per roll - higher costs far more Gems"] = "A 12 % / A+ 4 % / S 1 % pro Roll - höher kostet deutlich mehr Gems.",
 	["A boss too tough to kill blocks every drop - this rolls a new one"] = "Ein zu harter Boss blockiert jeden Drop - das rollt einen neuen",
 	["A feature does the wrong thing"] = "Eine Funktion macht das Falsche",
@@ -184,6 +185,7 @@ return {
 	["Auto rank"] = "Auto Rang",
 	["Auto reads the scoreboard: Player.Team is nil for everyone in this game"] = "Auto liest die Tabelle: Player.Team ist in diesem Spiel fuer jeden nil",
 	["Auto rebirth"] = "Auto Rebirth",
+	["Auto rejoin when needed"] = "Automatisch neu joinen, wenn nötig",
 	["Auto respawn"] = "Auto-Respawn",
 	["Auto roll"] = "Auto Roll",
 	["Auto run"] = "Auto-Lauf",
@@ -312,6 +314,7 @@ return {
 	["CROSSHAIR & CAMERA"] = "FADENKREUZ & KAMERA",
 	["Calls per second"] = "Aufrufe pro Sekunde",
 	["Calls/frame"] = "Calls/Frame",
+	["Camera turns the game's own camera and needs no mousemoverel - phones and executors without it use it by themselves"] = "Camera dreht die spieleigene Kamera und braucht kein mousemoverel - Handys und Executor ohne es nutzen das automatisch",
 	["Campfire, crafting table, storage, furnace"] = "Lagerfeuer, Werkbank, Lager, Schmelzofen",
 	["CanAccessAdminPanel on a player, or a tester / creator / developer rank in the game's group"] = "CanAccessAdminPanel an einem Spieler, oder ein Tester- / Creator- / Developer-Rang in der Gruppe des Spiels",
 	["Carry slots decide how much treasure a run brings home, and treasure is the only real income."] = "Die Trageplätze entscheiden, wie viel Treasure ein Lauf heimbringt, und Treasure ist das einzige echte Einkommen.",
@@ -627,6 +630,7 @@ return {
 	["Ground condition"] = "Bodenbedingung",
 	["Group boost"] = "Gruppen-Boost",
 	["Guard radius"] = "Wachradius",
+	["Gun mods and Silent Aim need one rejoin - rejoining in %ss"] = "Gun-Mods und Silent Aim brauchen einen Rejoin - neu joinen in %ss",
 	["Gun range"] = "Schuss-Reichweite",
 	["Guns"] = "Waffen",
 	["HANDLING"] = "HANDHABUNG",
@@ -1054,8 +1058,10 @@ return {
 	["Redeem codes once"] = "Codes einmalig einlösen",
 	["Redeems every code in the game's own config"] = "Löst jeden Code aus der spieleigenen Config ein",
 	["Refire lockout (ms)"] = "Nachfeuer-Sperre (ms)",
+	["Rejoin now"] = "Jetzt neu joinen",
 	["Rejoin this server now"] = "Server jetzt neu betreten",
 	["Reload speed x"] = "Nachladetempo x",
+	["Reload time taken away (%)"] = "Nachladezeit weggenommen (%)",
 	["Repeats the sweep instead of running once. Needs the master switch on."] = "Wiederholt den Durchgang, statt einmal zu laufen. Braucht den Hauptschalter an.",
 	["Replace weak brainrots"] = "Schwache Brainrots ersetzen",
 	["Replaces the honest chop pass while it is on."] = "Ersetzt den ehrlichen Hack-Durchgang, solange er an ist.",
@@ -1289,8 +1295,11 @@ return {
 	["Thickness"] = "Dicke",
 	["This device has no keyboard and no mouse - a hotkey it cannot press falls back to holding the screen, and Screen held does the same on purpose."] = "Dieses Gerät hat weder Tastatur noch Maus - eine Taste, die es nicht drücken kann, greift stattdessen auf Bildschirm halten zurück, und Bildschirm halten macht genau dasselbe.",
 	["This device has no keyboard and no mouse - a hotkey it cannot press falls back to holding the screen."] = "Dieses Gerät hat weder Tastatur noch Maus - eine Taste, die es nicht drücken kann, wird zu \"Bildschirm halten\".",
+	["This device has no keyboard and no mouse - a key it cannot press falls back to holding the screen, and While firing follows your own shots as the server sees them."] = "Dieses Gerät hat weder Tastatur noch Maus - eine Taste, die es nicht drücken kann, wird zu \"Bildschirm halten\", und \"While firing\" folgt deinen eigenen Schüssen, so wie der Server sie sieht.",
 	["This executor offers no way to click - neither mouse1click nor VirtualInputManager. Trigger and auto fire cannot fire here."] = "Dieser Executor bietet keine Möglichkeit zu klicken - weder mouse1click noch VirtualInputManager. Trigger und Autofeuer können hier nicht schießen.",
 	["This game keeps its client in an Actor VM and nothing there can be touched from outside. The script sets the Roblox debug flag that moves that code onto the main thread when it starts, but a flag only takes effect on a FRESH JOIN - so silent aim is dead in the session you first run it in and alive in every one after. The line above says which of the two you are in right now."] = "Dieses Spiel haelt seinen Client in einer Actor-VM, und von aussen ist da nichts zu erreichen. Das Script setzt beim Start das Roblox-Debug-Flag, das diesen Code auf den Haupt-Thread schiebt, aber ein Flag greift erst bei einem FRISCHEN JOIN - Silent Aim ist also in der Sitzung, in der du es zum ersten Mal startest, tot und in jeder danach lebendig. Die Zeile darueber sagt dir, in welcher von beiden du gerade bist.",
+	["This game keeps its client in an Actor VM and nothing there can be touched from outside. The script sets the Roblox debug flag that moves that code onto the main thread, but a flag only takes effect on a FRESH JOIN - so after every Roblox start silent aim needs one rejoin. With Auto rejoin on, the script does that by itself after a 5 second countdown. The line above says where you are right now."] = "Dieses Spiel hält seinen Client in einer Actor-VM, und von außen ist da nichts zu erreichen. Das Script setzt das Roblox-Debug-Flag, das diesen Code auf den Haupt-Thread schiebt, aber ein Flag greift erst bei einem FRISCHEN JOIN - nach jedem Roblox-Start braucht Silent Aim also einen Rejoin. Mit \"Automatisch neu joinen\" macht das Script das selbst, nach 5 Sekunden Countdown. Die Zeile darüber sagt, wo du gerade stehst.",
+	["This game runs its client in an Actor VM, where nothing can be hooked from outside. One Roblox debug flag moves that code onto the main thread, and then all of the above works - including Silent Aim. A flag only takes effect on a fresh join, so with Auto rejoin on the script sets it and rejoins you once by itself, after a 5 second countdown."] = "Dieses Spiel lässt seinen Client in einer Actor-VM laufen, wo von außen nichts gehookt werden kann. Ein Roblox-Debug-Flag schiebt diesen Code auf den Haupt-Thread, und dann funktioniert alles oben - Silent Aim eingeschlossen. Ein Flag greift erst bei einem frischen Join, deshalb setzt das Script es mit \"Automatisch neu joinen\" selbst und joint dich einmal neu, nach 5 Sekunden Countdown.",
 	["This game runs its client in an Actor VM, where nothing can be hooked from outside. One Roblox debug flag moves that code onto the main thread, and then all of the above works - including Silent Aim. The script sets the flag by itself when it starts, and a flag only takes effect on a fresh join, so your NEXT join is hookable either way. The button is only for having it now: it puts you back into the SAME server."] = "Dieses Spiel laesst seinen Client in einer Actor-VM laufen, wo von aussen nichts gehookt werden kann. Ein Roblox-Debug-Flag schiebt diesen Code auf den Haupt-Thread, und dann funktioniert alles oben - Silent Aim eingeschlossen. Das Script setzt das Flag beim Start selbst, und ein Flag greift erst bei einem frischen Join, also ist dein NAECHSTER Join so oder so hookbar. Der Knopf ist nur dafuer da, es sofort zu haben: er setzt dich in denselben Server zurueck.",
 	["This game runs its client in an Actor VM, where nothing can be hooked from outside. One Roblox debug flag moves that code onto the main thread, and then all of the above works. It only takes effect on a fresh join, so the button below sets it and puts you back into the SAME server."] = "Dieses Spiel laesst seinen Client in einer Actor-VM laufen, wo von aussen nichts gehookt werden kann. Ein Roblox-Debug-Flag verschiebt diesen Code auf den Haupt-Thread, und dann funktioniert alles oben. Es greift erst bei einem frischen Join, deshalb setzt der Knopf unten das Flag und bringt dich in denselben Server zurueck.",
 	["This is exactly what the developer will get. Check it, then send."] = "Genau das bekommt der Entwickler. Prüf es, dann senden.",
@@ -1336,6 +1345,7 @@ return {
 	["Trip secs"] = "Rundensekunden",
 	["Trophies"] = "Trophäen",
 	["Tune the boost automatically"] = "Boost automatisch regeln",
+	["Turn Auto rejoin off to stop it"] = "Schalte \"Automatisch neu joinen\" aus, um es zu stoppen",
 	["Turn speed cap (deg/s)"] = "Drehtempo-Limit (Grad/s)",
 	["Turns a rarity off in the summoner settings once the plot has outgrown it"] = "Schaltet eine Raritaet in den Summoner-Einstellungen ab, sobald die Basis sie ueberholt hat",
 	["UNITS"] = "EINHEITEN",
@@ -1907,7 +1917,9 @@ return {
 	["only targets inside this circle around the crosshair"] = "nur Ziele innerhalb dieses Kreises um das Fadenkreuz",
 	["only used when the learning above is off"] = "wird nur benutzt wenn das Lernen darüber aus ist",
 	["only used while Target stage is Manual"] = "wird nur benutzt, wenn Ziel-Stage auf Manuell steht",
+	["only when Silent Aim or a gun mod is on and cannot work yet"] = "nur wenn Silent Aim oder ein Gun-Mod an ist und noch nicht funktionieren kann",
 	["only when a rebirth is worth more per click than the best egg"] = "Nur wenn ein Rebirth pro Klick mehr bringt als das beste Egg.",
+	["only when a switch here or Silent Aim is on and cannot work yet"] = "nur wenn ein Schalter hier oder Silent Aim an ist und noch nicht funktionieren kann",
 	["only with cash the next aura does not need"] = "nur mit Geld, das die nächste Aura nicht braucht",
 	["only you see it"] = "nur du siehst es",
 	["opens held blocks at the stand, reward is picked up by the farm"] = "öffnet gehaltene Blöcke am Stand, die Belohnung holt der Farm",

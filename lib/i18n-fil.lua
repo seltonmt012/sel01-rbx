@@ -8,7 +8,7 @@
 -- they are - they keep passing "Auto rebirth" and only this file decides what
 -- the player reads.
 --
--- 2458 entries.
+-- 2472 entries.
 
 return {
 	["%d Einstellungen - Code steht im Feld, von dort kopieren."] = "%d settings - the code is in the field, copy it from there.",
@@ -28,6 +28,7 @@ return {
 	["Auf Standard zurückgesetzt - Script neu starten."] = "Naibalik sa default - i-restart ang script.",
 	["Auf Standard zurückgesetzt."] = "Naibalik sa default.",
 	["Auf Standard zurücksetzen"] = "Ibalik sa default",
+	["Auf dem Handy wird die Schrift größer und das Panel kompakter."] = "Sa telepono, lumalaki ang teksto at nagiging mas siksik ang panel.",
 	["Aus: das Panel kommt nur in dem Spiel, in dem du den Loader ausführst."] = "Off: lalabas lang ang panel sa larong pinatakbo mo ng loader.",
 	["Auto Farm läuft"] = "Auto farm running",
 	["Auto-Start in neuen Spielen"] = "Auto-start sa mga bagong laro",
@@ -79,6 +80,7 @@ return {
 	["Ohne das startet Selux nur in dem Spiel, in dem du es aufrufst."] = "Kung wala ito, sa laro lang na pinatakbo mo magsisimula ang Selux.",
 	["PROBLEM MELDEN"] = "MAG-REPORT NG PROBLEMA",
 	["Panel-Größe: PC oder Handy"] = "Laki ng panel: PC o telepono",
+	["Panel-Größe: PC oder Handy?"] = "Laki ng panel: PC o telepono?",
 	["Ready"] = "Handa",
 	["SCHON GEMELDET  #%s"] = "NAIREPORT NA  #%s",
 	["Script kaputt oder Spiel geupdatet? Ein Klick reicht - wenn du willst, schreib kurz dazu was nicht geht."] = "Script broken or the game updated? One click is enough - and if you like, add a line about what is wrong.",

@@ -102,7 +102,9 @@ local UI = {}
 --       Cold War and Loot To Forge strings that shipped under 3.16 and so never
 --       reached a cached client.
 -- 3.18: Redliner's "keep aiming after a shot" slider.
-UI.VERSION = "3.18"
+-- 3.19: phones scale text UP (1.2) and get a compact layout instead of a
+--       shrunken panel; Phantom Forces' auto-rejoin strings.
+UI.VERSION = "3.19"
 UI.BRAND = "SELUX"
 UI.DISCORD = "discord.gg/ARdpzFuKMm"
 UI.REPO = "seltonmt012/sel01-rbx"
@@ -756,22 +758,33 @@ _G.__SEL_DEVICE_ASKED = UI.deviceAsked
 -- desktop the cap of 1 means nothing changes at all.
 UI.deviceFill = { pc = 0.98, mobile = 0.92 }
 
--- THE PHONE PANEL WAS SCALED BY ITS HEIGHT, AND THAT MADE IT UNREADABLE. A
--- landscape phone is ~844x390, 582 logical pixels had to fit into 390, so the
--- whole panel came out at 0.54 and 12px body text rendered at ~6pt - reported
--- over and over as "text too small, can't read anything" (v3.16).
+-- A PHONE MUST NEVER SCALE THE PANEL DOWN, and every version before 3.19 did.
+-- 3.15 fitted 582 logical pixels into a 390-tall screen: scale 0.54, 12px body
+-- text at ~6pt. 3.16 "fixed" that by aiming for 0.8 and shortening the window -
+-- still SMALLER than on a monitor, and the reports kept coming, all from phones:
+-- "the letters are super small i can't read it so i just guess what it does".
+-- The user put it exactly: on mobile the text gets smaller instead of bigger.
+-- Any scale below 1 on a phone is that bug; the only question was how far.
 --
--- So on mobile the panel keeps its width and gives up HEIGHT instead: the scale
--- aims for UI.MOBILE_SCALE (text 12px -> ~10pt), and the window is made as short
--- as the screen needs. The body is scale-sized and scrolls, so a shorter window
--- only means more scrolling - no layout in this file is measured against 582.
--- A screen that fits the full panel anyway (tablet) is not touched: the height
--- fit wins there and the window stays 582 at up to 1:1.
-UI.MOBILE_SCALE = 0.8
-UI.MOBILE_MIN_HEIGHT = 330 -- 162px of chrome plus a body that still shows a card
+-- So the scale is a TEXT size now, not a fit. On mobile it is UI.MOBILE_SCALE
+-- (1.2 - 12px captions render at 14.4 logical px, 10px hints at 12) and the
+-- WINDOW takes whatever logical size is left: 844x390 at 1.2 is a 647x299
+-- window. The layout survives that because applyScale switches the panel into
+-- its compact form - no search box, a slimmer status strip, a one-line Discord
+-- bar, no footer, a scrolling rail, and one column instead of two when two
+-- would be too narrow (see window.layoutChrome and page:SetColumns).
+--
+-- A screen that fits the WHOLE panel at a scale of at least 1 (a tablet) keeps
+-- the whole panel, as large as MOBILE_SCALE allows. Only a screen too small for
+-- even the compact layout at that scale makes the scale give way, and the
+-- minimums are set so a real phone never gets there.
+UI.MOBILE_SCALE = 1.2
+UI.MOBILE_MIN_WIDTH = 460   -- logical: rail + header clusters + one column
+UI.MOBILE_MIN_HEIGHT = 230  -- logical: compact chrome (108) + a card's worth of body
+UI.COMPACT_ONE_COLUMN = 680 -- logical window width below which pages are one column
 
--- Returns scale, logical height. PC is exactly the old formula with the height
--- unchanged, so nothing moves on a monitor.
+-- Returns scale, logical height, logical width. PC is exactly the old formula
+-- with the size unchanged, so nothing moves on a monitor.
 function UI.layoutFor(width, height)
 	local vp = UI.viewport()
 	local vx = tonumber(vp.X) or 1280
@@ -779,17 +792,22 @@ function UI.layoutFor(width, height)
 	local fill = UI.deviceFill[UI.device] or 0.98
 	local fitW = vx * fill / math.max(width, 1)
 	local fitH = vy * fill / math.max(height, 1)
-	if UI.device ~= "mobile" or fitH >= 1 then
-		return math.max(math.min(fitW, fitH, 1), 0.3), height
+	if UI.device ~= "mobile" then
+		return math.max(math.min(fitW, fitH, 1), 0.3), height, width
 	end
-	local s = math.min(fitW, math.max(fitH, UI.MOBILE_SCALE), 1)
+	local whole = math.min(fitW, fitH, UI.MOBILE_SCALE)
+	if whole >= 1 then return whole, height, width end
+	local s = UI.MOBILE_SCALE
+	local w = math.min(width, math.floor(vx * fill / s))
 	local h = math.min(height, math.floor(vy * fill / s))
+	local minW = math.min(width, UI.MOBILE_MIN_WIDTH)
 	local minH = math.min(height, UI.MOBILE_MIN_HEIGHT)
-	if h < minH then
-		h = minH
-		s = math.min(s, vy * fill / h)
+	if w < minW or h < minH then
+		s = math.max(math.min(s, vx * fill / minW, vy * fill / minH), 0.3)
+		w = math.min(width, math.floor(vx * fill / s))
+		h = math.min(height, math.floor(vy * fill / s))
 	end
-	return math.max(s, 0.3), h
+	return s, h, w
 end
 
 function UI.scaleFor(width, height)
@@ -1687,7 +1705,7 @@ function UI.askDevice(onDone)
 	question.Position = UDim2.fromOffset(16, 34)
 	question.Size = UDim2.new(1, -32, 0, 20)
 
-	local hint = label(card, "Auf dem Handy wird das Panel kleiner skaliert, damit das Spiel sichtbar bleibt.",
+	local hint = label(card, "Auf dem Handy wird die Schrift größer und das Panel kompakter.",
 		11, UI.font.body, UI.theme.muted)
 	hint.Position = UDim2.fromOffset(16, 56)
 	hint.Size = UDim2.new(1, -32, 0, 30)
@@ -1813,9 +1831,9 @@ function UI.Window(options)
 	options = options or {}
 	local width = options.width or 820
 	local height = options.height or 582
-	-- height is the CURRENT logical height (shorter on a phone, see UI.layoutFor);
-	-- baseHeight is what the script asked for.
-	local baseHeight = height
+	-- width / height are the CURRENT logical size (smaller on a phone, see
+	-- UI.layoutFor); baseWidth / baseHeight are what the script asked for.
+	local baseWidth, baseHeight = width, height
 	local window = {}
 
 	local gui = Instance.new("ScreenGui")
@@ -1914,7 +1932,22 @@ function UI.Window(options)
 	badgeHit.Parent = rail
 	badgeHit.MouseButton1Click:Connect(function() pcall(UI.askDevice) end)
 
-	local railList = frame(rail, UDim2.new(1, 0, 1, -100), UDim2.fromOffset(0, 46), UI.theme.rail, 1)
+	-- A ScrollingFrame, invisible as one while everything fits. The compact phone
+	-- window is ~230-300 logical px tall, which leaves room for five icons, and
+	-- a panel with ten pages would otherwise draw the rest under the settings
+	-- gear and off the bottom of the window - unreachable.
+	local railList = Instance.new("ScrollingFrame")
+	railList.Size = UDim2.new(1, 0, 1, -100)
+	railList.Position = UDim2.fromOffset(0, 46)
+	railList.BackgroundColor3 = UI.theme.rail
+	railList.BackgroundTransparency = 1
+	railList.BorderSizePixel = 0
+	railList.ScrollBarThickness = 0
+	railList.CanvasSize = UDim2.new()
+	railList.AutomaticCanvasSize = Enum.AutomaticSize.Y
+	railList.ScrollingDirection = Enum.ScrollingDirection.Y
+	railList.ElasticBehavior = Enum.ElasticBehavior.Never
+	railList.Parent = rail
 	railList.ZIndex = 3
 	local railLayout = listLayout(railList, 6)
 	railLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
@@ -2009,10 +2042,10 @@ function UI.Window(options)
 	activeCount.ZIndex = 3
 	window.activeCount = activeCount
 
-	-- 20x20 is a mouse target. On a phone the panel is scaled to about half, so
-	-- the same button lands near 10 points across - smaller than a fingertip and
-	-- effectively unpressable. The background is transparent and the glyph is
-	-- centred, so growing the button only grows what can be hit.
+	-- 20x20 is a mouse target, and before 3.19 the phone panel was scaled DOWN,
+	-- which put the same button near 10 points across - unpressable. At the
+	-- phone's 1.2 it is 36 real px. The background is transparent and the glyph
+	-- is centred, so growing the button only grows what can be hit.
 	local headHit = (UI.device == "mobile") and 30 or 20
 	local function headButton(text, offset, onClick)
 		local b = Instance.new("TextButton")
@@ -2131,13 +2164,23 @@ function UI.Window(options)
 	-- panel towards its top-left corner, so a scaled window left at the old
 	-- position sits high and to the left of centre instead of in the middle.
 	function window.applyScale(value)
-		local s, h = UI.layoutFor(width, baseHeight)
-		if value then s, h = value, baseHeight end
-		height = h
+		local s, h, w = UI.layoutFor(baseWidth, baseHeight)
+		if value then s, h, w = value, baseHeight, baseWidth end
+		width, height = w, h
+		-- COMPACT is a phone whose window had to give up size to keep the text
+		-- large. A tablet that fits the whole panel keeps the whole panel.
+		window.compact = UI.device == "mobile" and (w < baseWidth or h < baseHeight)
+		window.oneColumn = window.compact and w < UI.COMPACT_ONE_COLUMN
 		rootScale.Scale = s
 		if not window.collapsed then root.Size = UDim2.fromOffset(width, height) end
 		root.Position = UDim2.new(0.5, -(width * s) / 2, 0.5, -(height * s) / 2)
 		window.scale = s
+		-- Defined further down, once the strip, body and Discord bar exist; the
+		-- first call here comes before them and the build calls it itself.
+		if window.layoutChrome then pcall(window.layoutChrome) end
+		for _, p in ipairs(window.pages or {}) do
+			if p.SetColumns then pcall(p.SetColumns, p, window.oneColumn and 1 or 2) end
+		end
 		-- a shorter window leaves the last card's filler too tall; recompute it
 		if window.current and window.current.Fill then pcall(window.current.Fill, window.current) end
 		return s
@@ -2355,7 +2398,8 @@ function UI.Window(options)
 	-- - the collapsed panel was a blue block with the title behind it.
 	headButton("–", -46, function()
 		window.collapsed = not window.collapsed
-		local target = window.collapsed and 90 or height
+		-- header + strip, which is 38 + 40 in the compact phone layout
+		local target = window.collapsed and (window.compact and 78 or 90) or height
 		if window.collapsed then
 			body.Visible = false
 			discord.Visible = false
@@ -2364,7 +2408,7 @@ function UI.Window(options)
 			-- back BEFORE the tween, so the panel does not open onto a blank area
 			body.Visible = true
 			discord.Visible = true
-			foot.Visible = true
+			foot.Visible = not window.compact
 		end
 		tween(root, EASE.slow, { Size = UDim2.fromOffset(width, target) })
 	end)
@@ -2393,16 +2437,76 @@ function UI.Window(options)
 	-- UI. So both start HIDDEN and appear the first time a script actually uses
 	-- them; the title slides left to take the space back.
 	stripToggle.Visible = false
-	stripTitle.Position = UDim2.fromOffset(15, 12)
-	stripSub.Position = UDim2.fromOffset(15, 30)
 	statHolder.Visible = false
+
+	-- Everything in the strip is placed from here, because three things move it:
+	-- the master toggle appearing, the numbers appearing, and the compact phone
+	-- layout (40px instead of 52, and the two text lines given only what the
+	-- numbers leave, cut at the end, since a narrow window runs them underneath).
+	local function placeStrip()
+		local c = window.compact
+		local x = stripToggle.Visible and 63 or 15
+		strip.Size = UDim2.new(1, 0, 0, c and 40 or 52)
+		stripToggle.Position = UDim2.fromOffset(15, c and 11 or 17)
+		stripTitle.Position = UDim2.fromOffset(x, c and 5 or 12)
+		stripSub.Position = UDim2.fromOffset(x, c and 22 or 30)
+		statHolder.Size = UDim2.fromOffset(240, c and 40 or 52)
+		if c then
+			local room = -(x + (statHolder.Visible and 262 or 15))
+			stripTitle.Size = UDim2.new(1, room, 0, 14)
+			stripSub.Size = UDim2.new(1, room, 0, 12)
+			stripTitle.TextTruncate = Enum.TextTruncate.AtEnd
+			stripSub.TextTruncate = Enum.TextTruncate.AtEnd
+		else
+			stripTitle.Size = UDim2.fromOffset(240, 14)
+			stripSub.Size = UDim2.fromOffset(300, 12)
+			stripTitle.TextTruncate = Enum.TextTruncate.None
+			stripSub.TextTruncate = Enum.TextTruncate.None
+		end
+	end
+	placeStrip()
+
+	-- THE COMPACT PHONE LAYOUT, and the way back out of it. Called by applyScale
+	-- on every device switch, so every value here is set in BOTH directions -
+	-- the PC branch is exactly what the build above produced, which is what
+	-- keeps a monitor bit-identical and a phone switched back to PC whole.
+	-- Chrome on a phone is 38 + 40 + 30 = 108 logical px instead of 162: the
+	-- search box and the subtitle leave the header (there is no room between
+	-- the two clusters), the Discord bar becomes one line and the footer goes.
+	local dIconIsImage = dIconId ~= nil
+	function window.layoutChrome()
+		local c = window.compact
+		searchWrap.Visible = not c
+		headSub.Visible = not c
+		placeStrip()
+		local stripH = c and 40 or 52
+		local discH = c and 30 or 50
+		local footH = c and 0 or 22
+		body.Position = UDim2.fromOffset(0, 38 + stripH)
+		body.Size = UDim2.new(1, 0, 1, -(38 + stripH + discH + footH))
+		discord.Size = UDim2.new(1, 0, 0, discH)
+		discord.Position = UDim2.new(0, 0, 1, -(discH + footH))
+		dSub.Visible = not c
+		dTitle.Position = UDim2.fromOffset(c and 40 or 52, c and 8 or 11)
+		if dIconIsImage then
+			dIcon.Size = UDim2.fromOffset(c and 18 or 24, c and 18 or 24)
+			dIcon.Position = UDim2.fromOffset(c and 12 or 15, c and 6 or 13)
+		else
+			dIcon.Position = UDim2.fromOffset(c and 12 or 15, 0)
+			dIcon.Size = UDim2.fromOffset(c and 18 or 24, discH)
+		end
+		dPill.Size = UDim2.fromOffset(c and 54 or 62, c and 20 or 26)
+		dPill.Position = UDim2.new(1, c and -66 or -77, 0, c and 5 or 12)
+		if not window.collapsed then foot.Visible = not c end
+		railList.ScrollBarThickness = c and 2 or 0
+	end
+	window.layoutChrome()
 
 	local masterState, masterCb = false, nil
 	function window:SetMaster(on, caption, sub)
 		if not stripToggle.Visible then
 			stripToggle.Visible = true
-			stripTitle.Position = UDim2.fromOffset(63, 12)
-			stripSub.Position = UDim2.fromOffset(63, 30)
+			placeStrip()
 		end
 		masterState = on and true or false
 		tween(stripToggle, EASE.soft, {
@@ -2432,7 +2536,10 @@ function UI.Window(options)
 	function window:SetStat(index, value, caption)
 		local s = stats[index]
 		if not s then return end
-		statHolder.Visible = true
+		if not statHolder.Visible then
+			statHolder.Visible = true
+			if window.compact then placeStrip() end
+		end
 		s.value.Text = tostring(value)
 		if caption then setText(s.caption, caption) end
 	end
@@ -2557,6 +2664,32 @@ function UI.Window(options)
 			page.columns[i] = col
 		end
 
+		-- ONE COLUMN on a narrow phone window. The cards stay in the column the
+		-- script put them in - nothing is re-parented - and a list layout on the
+		-- grid simply stacks column 2 under column 1, full width. Undone exactly
+		-- (layout removed, the two positions put back) when the window widens,
+		-- because a device switch runs this on every page that already exists.
+		function page:SetColumns(n)
+			local one = (n == 1)
+			if one == (self.single == true) then return end
+			self.single = one
+			if one then
+				self.gridList = listLayout(grid, 12)
+				for i, col in ipairs(self.columns) do
+					col.LayoutOrder = i
+					col.Size = UDim2.new(1, 0, 0, 0)
+				end
+			else
+				if self.gridList then self.gridList:Destroy() self.gridList = nil end
+				for i, col in ipairs(self.columns) do
+					col.Size = colWidth
+					col.Position = UDim2.new(0.5 * (i - 1), (i - 1) * 6, 0, 0)
+				end
+			end
+			if window.current == self then self:Fill() end
+		end
+		if window.oneColumn then page:SetColumns(1) end
+
 		-- full-width strip UNDER the grid, for wide content (read-outs)
 		page.wide = frame(stack, UDim2.new(1, 0, 0, 0), nil, UI.theme.window, 1)
 		page.wide.AutomaticSize = Enum.AutomaticSize.Y
@@ -2584,17 +2717,26 @@ function UI.Window(options)
 		function page:Fill()
 			task.defer(function()
 				if not self.holder.Parent then return end
-				local viewport = body.AbsoluteSize.Y
-				local content = self.stack.AbsoluteSize.Y
+				-- MEASURED in real pixels, WRITTEN in logical ones, and the root's
+				-- UIScale sits between the two. At 1 (any monitor) that is the same
+				-- number; at a phone's 1.2 an undivided filler came out 20 per cent
+				-- too tall and pushed every short page into scrolling empty space.
+				local s = window.scale or 1
+				local viewport = body.AbsoluteSize.Y / s
+				local content = self.stack.AbsoluteSize.Y / s
 				local heights = {}
+				local spacers = 0
 				for i, col in ipairs(self.columns) do
 					local used, last = 0, nil
 					for _, child in ipairs(col:GetChildren()) do
 						if child:IsA("Frame") and child.Name ~= "__fill" then
-							used = used + child.AbsoluteSize.Y + 12
+							used = used + child.AbsoluteSize.Y / s + 12
 							if not last or child.LayoutOrder >= last.LayoutOrder then
 								last = child
 							end
+							local inner0 = child:FindFirstChildOfClass("Frame")
+							local old = inner0 and inner0:FindFirstChild("__fill")
+							if old then spacers = spacers + old.AbsoluteSize.Y / s end
 						end
 					end
 					heights[i] = { used = math.max(0, used - 12), last = last }
@@ -2602,11 +2744,19 @@ function UI.Window(options)
 				local tallest = math.max(heights[1].used, heights[2].used)
 				-- if the whole page already overflows, no filling - just scroll
 				local slackPage = viewport - content
+				-- One column (phone): there is nothing to level, so only the card
+				-- that is visually last takes the page's slack - measured WITHOUT
+				-- the filler the last pass left, so a second pass agrees with the
+				-- first instead of tearing it down.
+				local bottom = self.single and ((heights[2].last and heights[2]) or heights[1])
 				for _, h in ipairs(heights) do
 					if h.last then
 						local inner3 = h.last:FindFirstChildOfClass("Frame")
 						local spacer = inner3 and inner3:FindFirstChild("__fill")
 						local want = (tallest - h.used) + math.max(0, slackPage)
+						if self.single then
+							want = (h == bottom) and math.max(0, slackPage + spacers) or 0
+						end
 						if want > 2 and inner3 then
 							if not spacer then
 								spacer = frame(inner3, UDim2.new(1, 0, 0, 0), nil,
@@ -3253,9 +3403,13 @@ function UI.Window(options)
 
 				box.MouseButton1Click:Connect(function()
 					if not menu.Visible then
-						local at = box.AbsolutePosition - root.AbsolutePosition
-						menu.Position = UDim2.fromOffset(at.X, at.Y + box.AbsoluteSize.Y + 3)
-						menu.Size = UDim2.fromOffset(box.AbsoluteSize.X, 0)
+						-- Absolute positions are real pixels and the menu lives inside
+						-- the scaled root, so they are divided back into logical ones.
+						-- Undivided, the menu opened 20 per cent off on a phone.
+						local s = window.scale or 1
+						local at = (box.AbsolutePosition - root.AbsolutePosition) / s
+						menu.Position = UDim2.fromOffset(at.X, at.Y + box.AbsoluteSize.Y / s + 3)
+						menu.Size = UDim2.fromOffset(box.AbsoluteSize.X / s, 0)
 					end
 					menu.Visible = not menu.Visible
 					arrow.Text = menu.Visible and "▲" or "▼"
@@ -3942,9 +4096,33 @@ function UI.Window(options)
 			corner(scrim, 13)
 			confirmGui = scrim
 
-			local box = frame(scrim, UDim2.fromOffset(470, 0), nil, UI.theme.window)
-			box.AnchorPoint = Vector2.new(0.5, 0.5)
-			box.Position = UDim2.fromScale(0.5, 0.5)
+			-- The popup is ~350 logical px tall and the compact phone window is
+			-- 230-300, so there it hangs in a scroller from the top instead of
+			-- being centred and clipped - YES / CANCEL would be cut off otherwise.
+			local host = scrim
+			if window.compact then
+				host = Instance.new("ScrollingFrame")
+				host.Size = UDim2.fromScale(1, 1)
+				host.BackgroundTransparency = 1
+				host.BorderSizePixel = 0
+				host.ScrollBarThickness = 4
+				host.ScrollBarImageColor3 = UI.theme.accent
+				host.CanvasSize = UDim2.new()
+				host.AutomaticCanvasSize = Enum.AutomaticSize.Y
+				host.ScrollingDirection = Enum.ScrollingDirection.Y
+				host.ZIndex = 301
+				host.Parent = scrim
+				pad(host, 0, 0, 10, 10)
+			end
+			local box = frame(host, UDim2.fromOffset(math.min(470, width - 24), 0), nil,
+				UI.theme.window)
+			if window.compact then
+				box.AnchorPoint = Vector2.new(0.5, 0)
+				box.Position = UDim2.fromScale(0.5, 0)
+			else
+				box.AnchorPoint = Vector2.new(0.5, 0.5)
+				box.Position = UDim2.fromScale(0.5, 0.5)
+			end
 			box.AutomaticSize = Enum.AutomaticSize.Y
 			box.Active = true
 			box.ZIndex = 301

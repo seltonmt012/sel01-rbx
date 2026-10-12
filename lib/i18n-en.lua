@@ -8,7 +8,7 @@
 -- they are - they keep passing "Auto rebirth" and only this file decides what
 -- the player reads.
 --
--- 2458 entries.
+-- 2472 entries.
 
 return {
 	["%d Einstellungen - Code steht im Feld, von dort kopieren."] = "%d settings - the code is in the field, copy it from there.",
@@ -27,6 +27,7 @@ return {
 	["Auf Standard zurückgesetzt - Script neu starten."] = "Reset to defaults - restart the script.",
 	["Auf Standard zurückgesetzt."] = "Reset to defaults.",
 	["Auf Standard zurücksetzen"] = "Reset to defaults",
+	["Auf dem Handy wird die Schrift größer und das Panel kompakter."] = "On a phone the text gets bigger and the panel more compact.",
 	["Aus: das Panel kommt nur in dem Spiel, in dem du den Loader ausführst."] = "Off: the panel only comes up in the game you run the loader in.",
 	["Auto Farm läuft"] = "Auto farm running",
 	["Auto-Start in neuen Spielen"] = "Auto-start in new games",
@@ -75,6 +76,7 @@ return {
 	["Ohne das startet Selux nur in dem Spiel, in dem du es aufrufst."] = "Without it Selux only starts in the game you run it in.",
 	["PROBLEM MELDEN"] = "REPORT A PROBLEM",
 	["Panel-Größe: PC oder Handy"] = "Panel size: PC or phone",
+	["Panel-Größe: PC oder Handy?"] = "Panel size: PC or phone?",
 	["SCHON GEMELDET  #%s"] = "ALREADY REPORTED  #%s",
 	["Script kaputt oder Spiel geupdatet? Ein Klick reicht - wenn du willst, schreib kurz dazu was nicht geht."] = "Script broken or the game updated? One click is enough - and if you like, add a line about what is wrong.",
 	["Selux v%s  ·  Sprache und Größe gelten für alle Scripts."] = "Selux v%s  ·  language and size apply to every script.",

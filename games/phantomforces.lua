@@ -197,9 +197,12 @@ pcall(function() VIM = game:GetService("VirtualInputManager") end)
 -- only in that mode; the ESP, the aimbot, the triggerbot and the recoil
 -- compensation work either way, so the script does not insist on it.
 --
--- The flag only takes effect on a fresh join, which is why this is offered as a
--- button rather than done silently: it teleports the player back into the same
--- server and that is not something a panel should do behind their back.
+-- The flag only takes effect on a fresh join. A fresh Roblox START is a process
+-- without it, so the first session after every launch has the gun mods and the
+-- silent aim dead - which is what "almost nothing works" was, 2026-10-13. The
+-- script therefore rejoins once by itself when a switch needs it, with a
+-- countdown on screen and a switch to stop it; see "the rejoin that makes the
+-- flag bite" below.
 
 local MODS = ENV.__SELPF_MODS or {
 	noRecoil = false, noSpread = false, noSway = false, noEquipTime = false,
@@ -282,10 +285,12 @@ local silentAimPoint = nil
 -- allows 200 locals per function, this chunk has been at that ceiling before,
 -- and the hook machinery is a dozen names that nothing outside needs. Only
 -- armHooks and hookList come back out.
-local armHooks, hookList
+local armHooks, hookList, gameCamera
 do
 
-local HOOK_VERSION = 7
+-- 8: the firearm table is now the GUN's class, not the knife's (see WANTED).
+-- A VM still carrying v7 hooks has them on the wrong class and is told to rejoin.
+local HOOK_VERSION = 8
 
 local FOUND = HOOKS.found or {}
 HOOKS.found = FOUND
@@ -296,8 +301,16 @@ HOOKS.on = HOOKS.on or {}
 -- other fragility in here: these names are the only part of this script the
 -- game's authors can break for free, and one rename should not be allowed to
 -- take the whole toolkit down with it.
+--
+-- BUT A COMPANION HAS TO BE SOMETHING ONLY A GUN HAS. `getAnimLength` was one,
+-- and it is not: THREE classes carry their own getWeaponStat - the knife, the
+-- grenade and the gun - and all three have getAnimLength. Measured 2026-10-13:
+-- the sweep met the knife first, so the stat hook and the reload hook sat on
+-- the KNIFE, and No Spread, No Sway, Rapid Fire, Instant ADS, No Bolt,
+-- Stability, Equip Time and Fast Reload did nothing to a gun while the panel
+-- read "ok - hooked". Only the gun class has fireRound and the reload methods.
 local WANTED = {
-	firearm = { "getWeaponStat", { "fireRound", "getAnimLength", "getCurrentReloadFile" } },
+	firearm = { "getWeaponStat", { "fireRound", "getCurrentReloadLength", "getCurrentReloadFile" } },
 	bullets = { "newBullet",     { "cleanBullets", "updateBullets", "getBullets" } },
 	net     = { "send",          { "getPing", "getNetworkTime", "getServerTime" } },
 }
@@ -365,7 +378,24 @@ INSTALL.stat = function(hookfn)
 	old = hookfn(t.getWeaponStat, function(self, name, ...)
 		if type(name) == "string" then
 			local v = HOOKS.statOverride[name]
-			if v ~= nil then return v end
+			if v ~= nil then
+				-- A stat can be a TABLE, one entry per fire mode: measured, one of
+				-- two guns in the gc answered `firerate` with a table. A bare
+				-- number where the game indexes a table is an error inside its
+				-- own fire loop - a gun that stops shooting - so the override
+				-- takes the real value's shape.
+				if type(v) == "number" then
+					local real = old(self, name, ...)
+					if type(real) == "table" then
+						local shaped = {}
+						for k, x in pairs(real) do
+							shaped[k] = (type(x) == "number") and v or x
+						end
+						return shaped
+					end
+				end
+				return v
+			end
 			local f = HOOKS.statScale[name]
 			if f ~= nil then
 				local real = old(self, name, ...)
@@ -734,6 +764,67 @@ function armHooks()
 	return all
 end
 
+-- THE GAME'S OWN CAMERA, as an aim delivery that needs no mousemoverel. Writing
+-- workspace.CurrentCamera is thrown away within a frame (header 6) because the
+-- game rebuilds the view from angles it keeps itself - so the place to write is
+-- those angles. The camera class carries `setLookVector`, decompiled 2026-10-13:
+--
+--     self._didChange = true
+--     local pitch, yaw = toanglesyx(look)        -- pitch clamped to min/max
+--     self._angles = Vector3.new(pitch, <yaw unwrapped near the old one>, 0)
+--
+-- Measured with a 3 deg yaw write while the player was turning the mouse: the
+-- 3 deg offset was still there, unchanged to 0.01 deg, on every one of the next
+-- eight frames. That is the delivery for an executor without mousemoverel -
+-- reported as "aimbot doesnt work" with the panel reading "aim Camera" - and the
+-- only one a phone has. Needs the client on the main thread, like the hooks.
+local camAt = -99
+function gameCamera()
+	local inst = FOUND.camInst
+	if inst then
+		-- still the live one? The class is the same for a stale object, so the
+		-- view itself is the check: the game's look and the camera's agree.
+		local ok, lv = pcall(function() return inst:getLookVector() end)
+		if ok and typeof(lv) == "Vector3" and lv:Dot(camera.CFrame.LookVector) > 0.98 then
+			return inst
+		end
+		FOUND.camInst = nil
+	end
+	if not parallelOnMainThread() then return nil end
+	-- A getgc pass is ~250 ms over this client, so never per frame - and this is
+	-- only ever asked while the aim is on a target. The camera object is built
+	-- anew on every SPAWN (measured: a different instance after a respawn, held
+	-- by nothing but the registry), so a stale one is expected, not an error.
+	local now = os.clock()
+	if now - camAt < 5 then return nil end
+	camAt = now
+	pcall(function()
+		local list = getgc(true)
+		local cls = FOUND.camera
+		if not cls then
+			for _, v in ipairs(list) do
+				if type(v) == "table" and type(rawget(v, "setLookVector")) == "function"
+					and type(rawget(v, "_applyLookDelta")) == "function" then
+					cls = v
+					break
+				end
+			end
+			FOUND.camera = cls
+		end
+		if not cls then return end
+		for _, v in ipairs(list) do
+			if type(v) == "table" and v ~= cls then
+				local mt = getmetatable(v)
+				if type(mt) == "table" and rawget(mt, "__index") == cls then
+					FOUND.camInst = v
+					break
+				end
+			end
+		end
+	end)
+	return FOUND.camInst
+end
+
 end   -- hook machinery
 
 -- The stat table is rebuilt from the toggles rather than patched in place, so a
@@ -871,6 +962,7 @@ local CONFIG = {
 	noGrass    = false,
 
 	-- gun mods - these need the FFlag and a rejoin, see the header --------------
+	autoRejoin = true,        -- rejoin once by itself when a switch below needs it
 	noRecoil   = false,
 	recoilPct  = 100,         -- how much of the kick is taken away, 100 = all
 	noSpread   = false,
@@ -885,7 +977,12 @@ local CONFIG = {
 	noBolt     = false,
 	stability  = false,
 	fastReload = false,
-	reloadFactor = 0.3,
+	-- Per cent of the reload TAKEN AWAY, the same direction as the recoil and
+	-- spread sliders. It used to be "time left" (1 = normal), the one slider on
+	-- the page running backwards: dragged to the top it meant "no change", and
+	-- the saved configs read 1 on the very client where "Fast Reload does
+	-- nothing" was reported. A new key, so an old 1 cannot come back with it.
+	reloadCut  = 70,
 
 	-- trigger --------------------------------------------------------------------
 	trg        = false,
@@ -993,12 +1090,127 @@ local function syncMods()
 	MODS.silentMaxBend = CONFIG.silentMaxBend
 	MODS.silentChance  = CONFIG.silentChance
 	MODS.fastReload    = CONFIG.fastReload
-	MODS.reloadFactor  = CONFIG.reloadFactor
+	MODS.reloadFactor  = 1 - math.clamp(tonumber(CONFIG.reloadCut) or 70, 0, 95) / 100
 	refreshStatOverride()
 	-- Hooks are installed on demand, so this is where a switch that was just
 	-- turned on gets the function it needs patched - and where one that was
 	-- never touched stays unpatched for the whole session.
 	pcall(armHooks)
+end
+
+--------------------------------------------------------------------------------
+-- the rejoin that makes the flag bite
+--------------------------------------------------------------------------------
+--
+-- THE SAME SERVER IS REFUSED. The first version went back into this exact
+-- server with TeleportToPlaceInstance(PlaceId, JobId), and Phantom Forces
+-- answers that with "Can't join private instance through specific joins
+-- (Unauthorized)" - its servers are reserved instances, which a client cannot
+-- name. Measured 2026-10-13 in the client log: the button wrote that one line
+-- and the player stayed exactly where they were, still in the Actor VM. A plain
+-- Teleport(PlaceId) goes through the game's own matchmaking and is accepted;
+-- the Roblox process survives it, so the flag does too - getactors 1 -> 0, and
+-- on that measurement it even landed back in the same JobId.
+--
+-- AND IT HAPPENS BY ITSELF, because "press this button first" is the one step
+-- nobody takes. With a switch on that needs a hook and the client measurably in
+-- an Actor VM, the loop near the end of this file counts down on screen and
+-- rejoins once. A file remembers when, so a flag that does not reach the game on
+-- some executor costs one rejoin, never a loop.
+local rejoinNow, rejoinState
+do
+	local REJOIN_FILE = "selux-pf-rejoin.txt"
+	local AUTO_GAP = 180   -- seconds; an automatic rejoin inside this is a loop
+
+	local function lastRejoin()
+		local ok, s = pcall(function()
+			return isfile(REJOIN_FILE) and readfile(REJOIN_FILE) or nil
+		end)
+		return ok and tonumber(s) or nil
+	end
+
+	local function needsHooks()
+		return CONFIG.silent or CONFIG.noRecoil or CONFIG.noSpread or CONFIG.noSway
+			or CONFIG.noBob or CONFIG.noSuppression or CONFIG.noBolt or CONFIG.stability
+			or CONFIG.noEquipTime or CONFIG.instantAds or CONFIG.rapidFire
+			or CONFIG.fastReload
+	end
+
+	-- POSITIVE evidence only. An executor without getactors must never read as
+	-- "still in the VM", or it would rejoin on every single load.
+	local function inActorVM()
+		local ok, n = pcall(function() return #getactors() end)
+		return ok and type(n) == "number" and n > 0
+	end
+
+	local watching = false
+
+	function rejoinNow(why)
+		local ok, msg = setFlag()
+		if not ok then note(msg) return false end
+		pcall(function() writefile(REJOIN_FILE, tostring(os.time())) end)
+
+		-- The panel comes back BY HAND: the hub does not follow this game across
+		-- a join (`noqueue` in index.json - the "it keeps running by itself"
+		-- report), so this one deliberate rejoin carries the script itself,
+		-- gated on the place so it cannot land anywhere else, and armed at most
+		-- once per half minute so a double press does not build two panels.
+		local now = os.time()
+		if now - (ENV.__SELPF_REQUEUED_AT or 0) > 30 then
+			local q = globalFn("queue_on_teleport")
+			if q then
+				ENV.__SELPF_REQUEUED_AT = now
+				pcall(q, 'if game.PlaceId ~= 292439477 then return end '
+					.. '_G.__SEL_TP = "phantomforces" '
+					.. 'pcall(function() getgenv().__SEL_TP = "phantomforces" end) '
+					.. 'pcall(function() writefile("selux-queue.txt", "phantomforces") end) '
+					.. 'loadstring(game:HttpGet("https://raw.githubusercontent.com/'
+					.. 'seltonmt012/sel01-rbx/main/loader.lua"))()')
+			end
+		end
+
+		local TS = game:GetService("TeleportService")
+		-- A refused teleport is silent otherwise: the player simply stays put,
+		-- which is how the JobId version went unnoticed.
+		if not watching then
+			watching = true
+			pcall(function()
+				TS.TeleportInitFailed:Connect(function(who, result, message)
+					if who == plr then
+						note("rejoin refused: " .. tostring(message or result))
+					end
+				end)
+			end)
+		end
+		note("rejoining - " .. tostring(why))
+		task.delay(0.6, function()
+			local okT, err = pcall(function() TS:Teleport(game.PlaceId, plr) end)
+			if not okT then note("rejoin failed: " .. tostring(err)) end
+		end)
+		return true
+	end
+
+	-- What the automatic rejoin would do right now: a code for the loop and a
+	-- line for the panel, from one place so the two cannot disagree.
+	local SAYS = {
+		due     = "needs one rejoin - rejoining by itself",
+		off     = "needs one rejoin - Auto rejoin is off, press Rejoin now",
+		tried   = "rejoined once and still in the Actor VM - the flag does not reach the game here",
+		nosetf  = "this executor has no setfflag",
+		nohook  = "this executor has no hookfunction",
+	}
+	local function answer(code) return code, SAYS[code] end
+
+	function rejoinState()
+		if not inActorVM() then return answer("ok") end
+		if not needsHooks() then return answer("idle") end
+		if not globalFn("setfflag") then return answer("nosetf") end
+		if not globalFn("hookfunction") then return answer("nohook") end
+		local last = lastRejoin()
+		if last and os.time() - last < AUTO_GAP then return answer("tried") end
+		if not CONFIG.autoRejoin then return answer("off") end
+		return answer("due")
+	end
 end
 
 --------------------------------------------------------------------------------
@@ -1584,21 +1796,32 @@ local function renderPass()
 	end
 
 	local mid = centre()
+	-- NEVER READ A DRAWING PROPERTY BACK. Potassium answers `circle.Visible`,
+	-- other executors implement Drawing as write-only and throw on the read -
+	-- and a throw here, at the top of the pass, is every box, every cham and the
+	-- target counter gone for the whole session: "0 targets", reported three
+	-- times from one executor. The wanted state is a local instead.
+	local showFov = CONFIG.aim and CONFIG.aimCircle
+	local showSil = CONFIG.silent and CONFIG.silentCircle
 	if fovCircle then
-		fovCircle.Visible = CONFIG.aim and CONFIG.aimCircle
-		if fovCircle.Visible then
-			fovCircle.Position = mid
-			fovCircle.Radius = CONFIG.aimFov
-			fovCircle.Color = CONFIG.colFov
-		end
+		pcall(function()
+			fovCircle.Visible = showFov
+			if showFov then
+				fovCircle.Position = mid
+				fovCircle.Radius = CONFIG.aimFov
+				fovCircle.Color = CONFIG.colFov
+			end
+		end)
 	end
 	if silCircle then
-		silCircle.Visible = CONFIG.silent and CONFIG.silentCircle
-		if silCircle.Visible then
-			silCircle.Position = mid
-			silCircle.Radius = CONFIG.silentFov
-			silCircle.Color = CONFIG.colSilentFov
-		end
+		pcall(function()
+			silCircle.Visible = showSil
+			if showSil then
+				silCircle.Position = mid
+				silCircle.Radius = CONFIG.silentFov
+				silCircle.Color = CONFIG.colSilentFov
+			end
+		end)
 	end
 
 	if not CONFIG.esp or not HAS_DRAWING then
@@ -1650,6 +1873,13 @@ local function renderPass()
 										hideCham(info.name)
 									end
 
+									-- ONE TARGET'S DRAWING MAY FAIL, THE PASS MAY NOT.
+									-- A Drawing type this executor lacks leaves its slot
+									-- nil, a property it does not know throws - either
+									-- way only this player's shapes are lost, the chams
+									-- above and the counter below still happen, and the
+									-- reason lands on the diagnostics page.
+									local okDraw, errDraw = pcall(function()
 									if CONFIG.espBox then
 										set.outline.Position = Vector2.new(x, y)
 										set.outline.Size = Vector2.new(w, h)
@@ -1749,6 +1979,8 @@ local function renderPass()
 											end
 										end
 									end
+									end)
+									if not okDraw then STATE.drawErr = tostring(errDraw) end
 								end
 							end
 						end
@@ -1793,8 +2025,71 @@ local function keyFromName(name)
 	return ok and k or nil
 end
 
+-- A PHONE HAS NO MOUSE, and this script used to read nothing but the mouse: the
+-- default aim key is MouseButton2, "While firing" asked IsMouseButtonPressed,
+-- so on a touch client the aimbot and the trigger could never arm and nothing
+-- on screen said why. Same four reads that were fixed in Counter Blox and
+-- Arsenal (games-shooters.md, "A phone has no mouse"), ported here 2026-10-13.
+-- Additive: on a desktop every one of these answers exactly what it did before.
+STATE.touch = false
+pcall(function()
+	STATE.touch = UserInputService.TouchEnabled
+		and not UserInputService.MouseEnabled
+		and not UserInputService.KeyboardEnabled
+end)
+-- Test hook: a desktop cannot be given a phone's input. Never set in normal use.
+if ENV.__SELPF_FORCE_TOUCH then STATE.touch = true end
+-- When the server last echoed a bullet of OURS back (see tapNetwork). On a
+-- phone the fire button is a touch like every camera drag, so "a finger is
+-- down" says nothing - our own bullets arriving is the one firing signal that
+-- cannot be confused with looking around.
+STATE.lastShotAt = -1e9
+
+-- Fingers are kept by InputObject and re-checked on read, so an InputEnded that
+-- never arrives (a finger leaving over the top bar) cannot leave it stuck on.
+local screenHeld
+do
+	local touches = setmetatable({}, { __mode = "k" })
+	function screenHeld()
+		local n = 0
+		for input in pairs(touches) do
+			local ok, st = pcall(function() return input.UserInputState end)
+			if ok and st ~= Enum.UserInputState.End and st ~= Enum.UserInputState.Cancel then
+				n = n + 1
+			else
+				touches[input] = nil
+			end
+		end
+		return n > 0
+	end
+	UserInputService.InputBegan:Connect(function(input)
+		if ENV.__SELPF ~= GEN then return end
+		if input.UserInputType == Enum.UserInputType.Touch then touches[input] = true end
+	end)
+	UserInputService.InputEnded:Connect(function(input)
+		if ENV.__SELPF ~= GEN then return end
+		if input.UserInputType == Enum.UserInputType.Touch then touches[input] = nil end
+	end)
+end
+
 local function hotkeyHeld(name)
 	local k = keyFromName(name)
+	-- A binding this device cannot produce falls back to holding the screen, so
+	-- a saved config with MouseButton2 comes back WORKING on a phone instead of
+	-- dead with nothing to say why.
+	if STATE.touch then
+		local reachable = false
+		if k then
+			pcall(function()
+				if typeof(k) == "EnumItem" and k.EnumType == Enum.UserInputType then
+					reachable = UserInputService.MouseEnabled
+				else
+					reachable = UserInputService.KeyboardEnabled
+				end
+			end)
+		end
+		if not reachable then return screenHeld() end
+	end
 	if not k then return false end
 	local ok, held = pcall(function()
 		if typeof(k) == "EnumItem" and k.EnumType == Enum.UserInputType then
@@ -1806,7 +2101,10 @@ local function hotkeyHeld(name)
 end
 
 local function firing()
-	return UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton1)
+	if UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton1) then
+		return true
+	end
+	return STATE.touch and (os.clock() - STATE.lastShotAt < 0.35) or false
 end
 
 -- Probed, never assumed. Measured in Potassium: keypress exists and delivers
@@ -1898,6 +2196,7 @@ local function aimActive()
 	if CONFIG.hum and CONFIG.humPanelOff and STATE.panelOpen then return false end
 	if CONFIG.aimActive == "Always" then return true end
 	if CONFIG.aimActive == "While firing" then return firing() end
+	if CONFIG.aimActive == "Screen held" then return screenHeld() end
 	return hotkeyHeld(CONFIG.aimKey)
 end
 
@@ -2446,14 +2745,18 @@ local mouseSensY, mouseSensP = 0, 0
 local askedX, askedY = 0, 0
 local preYaw, prePitch = nil, nil
 
+-- "Camera" means the GAME's camera whenever it can be reached (see gameCamera),
+-- and the bare workspace camera only as the last resort. Without that, an
+-- executor with no mousemoverel - and every phone - had an aimbot that wrote
+-- into a camera the game throws away, and read "aim Camera" while doing nothing.
 local function deliverMode()
-	if CONFIG.aimDeliver == "Mouse"  then return moveMouse and "Mouse" or "Camera" end
-	if CONFIG.aimDeliver == "Camera" then return "Camera" end
-	if not moveMouse then return "Camera" end
+	if CONFIG.aimDeliver == "Mouse" and moveMouse then return "Mouse" end
+	local cam = gameCamera() and "Game camera" or "Camera"
+	if CONFIG.aimDeliver ~= "Auto" or not moveMouse then return cam end
 	local n = stickHits + stickMiss
-	if n < 90 then return "Camera" end
+	if n < 90 then return cam end
 	STATE.stickPct = math.floor(stickHits / n * 100)
-	return (STATE.stickPct >= 50) and "Camera" or "Mouse"
+	return (STATE.stickPct >= 50) and cam or "Mouse"
 end
 
 local stickyName, lockedAt, reactUntil = nil, 0, 0
@@ -2666,8 +2969,13 @@ local function aimPass(dt)
 		lastNX, lastNY = 0, 0
 	else
 		lastNX, lastNY = nx, ny
-		camera.CFrame = CFrame.new(pos)
-			* CFrame.fromOrientation(curPitch + movePitch + ny, curYaw + moveYaw + nx, 0)
+		local look = CFrame.fromOrientation(curPitch + movePitch + ny, curYaw + moveYaw + nx, 0)
+		local gcam = (mode == "Game camera") and gameCamera()
+		if gcam then
+			pcall(function() gcam:setLookVector(look.LookVector) end)
+		else
+			camera.CFrame = CFrame.new(pos) * look
+		end
 		leftYaw = curYaw + moveYaw + nx
 	end
 
@@ -2948,6 +3256,7 @@ local function tapNetwork()
 				STATE.snapPartHits = STATE.snapPartHits + 1
 			end
 		elseif cmd == "newbullets" and type(a) == "table" and a.player == plr then
+			STATE.lastShotAt = os.clock()
 			local bullet = a.bullets and a.bullets[1]
 			if bullet then
 				if typeof(bullet.velocity) == "Vector3" then
@@ -2994,6 +3303,7 @@ local function triggerActive()
 	if not CONFIG.trg then return false end
 	if CONFIG.hum and CONFIG.humPanelOff and STATE.panelOpen then return false end
 	if CONFIG.trgActive == "Always" then return true end
+	if CONFIG.trgActive == "Screen held" then return screenHeld() end
 	return hotkeyHeld(CONFIG.trgKey)
 end
 
@@ -3260,6 +3570,7 @@ local KEYS = { "MouseButton2", "MouseButton1", "LeftShift", "LeftAlt", "LeftCont
 -- declared out here.
 local teamOut, aimOut, trgOut, modOut, silOut, moveOut, rcsOut
 local roundOut, boardOut, diagOut
+local rejoinToggles = {}   -- the same switch on two pages, kept in step
 
 do
 
@@ -3325,8 +3636,13 @@ local aimPage = win:Page("AIM", UI.icon.target)
 
 local aimCard = aimPage:Card("ACTIVATION", 1):Accent()
 aimCard:Toggle("Aimbot", CONFIG.aim, function(v) CONFIG.aim = v end)
-aimCard:Dropdown("Mode", { "Hotkey", "Always", "While firing" }, CONFIG.aimActive,
-	function(v) CONFIG.aimActive = v end)
+aimCard:Dropdown("Mode", { "Hotkey", "Always", "While firing", "Screen held" },
+	CONFIG.aimActive, function(v) CONFIG.aimActive = v end)
+if STATE.touch then
+	aimCard:Label("This device has no keyboard and no mouse - a key it cannot press "
+		.. "falls back to holding the screen, and While firing follows your own "
+		.. "shots as the server sees them.")
+end
 aimCard:Dropdown("Aim key", KEYS, CONFIG.aimKey, function(v) CONFIG.aimKey = v end)
 aimCard:Dropdown("Hit part", { "Head", "Torso", "Nearest" }, CONFIG.aimPart,
 	function(v) CONFIG.aimPart = v end)
@@ -3334,7 +3650,8 @@ aimCard:Dropdown("Target selection", { "Crosshair", "Closest" }, CONFIG.aimPick,
 	function(v) CONFIG.aimPick = v end)
 aimCard:Dropdown("Aim method", { "Mouse", "Auto", "Camera" }, CONFIG.aimDeliver,
 	function(v) CONFIG.aimDeliver = v end,
-	"measured here: camera writes are thrown away within a frame")
+	"Camera turns the game's own camera and needs no mousemoverel - phones and "
+	.. "executors without it use it by themselves")
 aimCard:Toggle("Sticky target", CONFIG.aimSticky, function(v) CONFIG.aimSticky = v end)
 aimCard:Toggle("Visible only", CONFIG.aimVisible, function(v) CONFIG.aimVisible = v end,
 	"never aim through a wall", UI.theme.good)
@@ -3363,7 +3680,7 @@ local trgPage = win:Page("TRIGGER", UI.icon.bolt or UI.icon.target)
 
 local trgCard = trgPage:Card("TRIGGER", 1):Accent()
 trgCard:Toggle("Trigger", CONFIG.trg, function(v) CONFIG.trg = v end)
-trgCard:Dropdown("Activation", { "Hotkey", "Always" }, CONFIG.trgActive,
+trgCard:Dropdown("Activation", { "Hotkey", "Always", "Screen held" }, CONFIG.trgActive,
 	function(v) CONFIG.trgActive = v end)
 trgCard:Dropdown("Trigger key", KEYS, CONFIG.trgKey, function(v) CONFIG.trgKey = v end)
 trgCard:Toggle("Head only", CONFIG.trgHeadOnly, function(v) CONFIG.trgHeadOnly = v end)
@@ -3434,49 +3751,24 @@ modCard2:Toggle("Max Stability", CONFIG.stability,
 modCard2:Toggle("Fast Reload", CONFIG.fastReload,
 	function(v) CONFIG.fastReload = v syncMods() end,
 	"the reload time IS the animation length, so this shortens that")
-modCard2:Slider("Reload time left", 0.05, 1, CONFIG.reloadFactor,
-	function(v) CONFIG.reloadFactor = v syncMods() end,
-	"0.3 means it takes 30 percent as long; 0.05 is as close to instant as it goes")
+modCard2:Slider("Reload time taken away (%)", 0, 95, CONFIG.reloadCut,
+	function(v) CONFIG.reloadCut = v syncMods() end,
+	"70 means a reload takes 30 percent as long; 95 is as close to instant as it goes")
 
 local modInfo = modPage:Card("REQUIREMENTS", 2)
 modOut = modInfo:Readout(5)
 modInfo:Label("This game runs its client in an Actor VM, where nothing can be "
 	.. "hooked from outside. One Roblox debug flag moves that code onto the main "
-	.. "thread, and then all of the above works - including Silent Aim. The "
-	.. "script sets the flag by itself when it starts, and a flag only takes "
-	.. "effect on a fresh join, so your NEXT join is hookable either way. The "
-	.. "button is only for having it now: it puts you back into the SAME server.")
-modInfo:Button("Rejoin this server now", function()
-	local ok, why = setFlag()
-	if not ok then note(why) return end
-	note("rejoining")
-	-- The panel is brought back BY HAND here, because the hub no longer follows
-	-- this game across a join (`noqueue` in index.json) - a server hop used to
-	-- start the script again on its own, which is the "it keeps running by
-	-- itself, I do not want to use the script" report. That means this one
-	-- deliberate rejoin has to carry the panel itself, gated on the place so it
-	-- cannot land anywhere else, and armed once so a double press does not build
-	-- two panels.
-	if not ENV.__SELPF_REQUEUED then
-		ENV.__SELPF_REQUEUED = true
-		local q = globalFn("queue_on_teleport")
-		if q then
-			pcall(q, 'if game.PlaceId ~= 292439477 then return end '
-				.. '_G.__SEL_TP = "phantomforces" '
-				.. 'pcall(function() getgenv().__SEL_TP = "phantomforces" end) '
-				.. 'pcall(function() writefile("selux-queue.txt", "phantomforces") end) '
-				.. 'loadstring(game:HttpGet("https://raw.githubusercontent.com/'
-				.. 'seltonmt012/sel01-rbx/main/loader.lua"))()')
-		end
-	end
-	task.spawn(function()
-		task.wait(0.6)
-		pcall(function()
-			game:GetService("TeleportService")
-				:TeleportToPlaceInstance(game.PlaceId, game.JobId, plr)
-		end)
-	end)
-end, UI.theme.warn)
+	.. "thread, and then all of the above works - including Silent Aim. A flag "
+	.. "only takes effect on a fresh join, so with Auto rejoin on the script sets "
+	.. "it and rejoins you once by itself, after a 5 second countdown.")
+rejoinToggles[1] = modInfo:Toggle("Auto rejoin when needed", CONFIG.autoRejoin,
+	function(v)
+		CONFIG.autoRejoin = v
+		if rejoinToggles[2] then rejoinToggles[2]:set(v) end
+	end, "only when a switch here or Silent Aim is on and cannot work yet",
+	UI.theme.warn)
+modInfo:Button("Rejoin now", function() rejoinNow("button") end, UI.theme.warn)
 
 end
 
@@ -3528,34 +3820,17 @@ silOut = silPage:Card("WHAT THE SERVER SEES", 2):Readout(7)
 local silReq = silPage:Card("NEEDS ONE REJOIN", 2)
 silReq:Label("This game keeps its client in an Actor VM and nothing there can "
 	.. "be touched from outside. The script sets the Roblox debug flag that "
-	.. "moves that code onto the main thread when it starts, but a flag only "
-	.. "takes effect on a FRESH JOIN - so silent aim is dead in the session you "
-	.. "first run it in and alive in every one after. The line above says which "
-	.. "of the two you are in right now.")
-silReq:Button("Rejoin this server now", function()
-	local ok, why = setFlag()
-	if not ok then note(why) return end
-	note("rejoining")
-	if not ENV.__SELPF_REQUEUED then
-		ENV.__SELPF_REQUEUED = true
-		local q = globalFn("queue_on_teleport")
-		if q then
-			pcall(q, 'if game.PlaceId ~= 292439477 then return end '
-				.. '_G.__SEL_TP = "phantomforces" '
-				.. 'pcall(function() getgenv().__SEL_TP = "phantomforces" end) '
-				.. 'pcall(function() writefile("selux-queue.txt", "phantomforces") end) '
-				.. 'loadstring(game:HttpGet("https://raw.githubusercontent.com/'
-				.. 'seltonmt012/sel01-rbx/main/loader.lua"))()')
-		end
-	end
-	task.spawn(function()
-		task.wait(0.6)
-		pcall(function()
-			game:GetService("TeleportService")
-				:TeleportToPlaceInstance(game.PlaceId, game.JobId, plr)
-		end)
-	end)
-end, UI.theme.warn)
+	.. "moves that code onto the main thread, but a flag only takes effect on a "
+	.. "FRESH JOIN - so after every Roblox start silent aim needs one rejoin. "
+	.. "With Auto rejoin on, the script does that by itself after a 5 second "
+	.. "countdown. The line above says where you are right now.")
+rejoinToggles[2] = silReq:Toggle("Auto rejoin when needed", CONFIG.autoRejoin,
+	function(v)
+		CONFIG.autoRejoin = v
+		if rejoinToggles[1] then rejoinToggles[1]:set(v) end
+	end, "only when Silent Aim or a gun mod is on and cannot work yet",
+	UI.theme.warn)
+silReq:Button("Rejoin now", function() rejoinNow("button") end, UI.theme.warn)
 
 silPage:Card("HOW THIS ONE WORKS", 2):Label(
 	"It bends the BULLET, it does not claim a hit. The first version replaced the "
@@ -3713,6 +3988,49 @@ win:OnMaster(function(on) CONFIG.esp = on end)
 win:Refresh()
 
 --------------------------------------------------------------------------------
+-- the automatic rejoin
+--------------------------------------------------------------------------------
+--
+-- See "the rejoin that makes the flag bite". Started after the panel so the
+-- countdown has somewhere to show, and announced through Roblox's own
+-- notification as well, because the panel is closed most of the time and a
+-- teleport out of nowhere reads as a crash.
+task.spawn(function()
+	task.wait(3)
+	while ENV.__SELPF == GEN do
+		local st, says = rejoinState()
+		if st == "tried" then
+			note(says)
+			break
+		end
+		if st == "due" then
+			local left = 5
+			while left > 0 and ENV.__SELPF == GEN and rejoinState() == "due" do
+				local msg = UI.tf("Gun mods and Silent Aim need one rejoin - rejoining in %ss", left)
+				note(msg)
+				if left == 5 then
+					pcall(function()
+						game:GetService("StarterGui"):SetCore("SendNotification", {
+							Title = "Selux",
+							Text = msg .. "\n" .. UI.t("Turn Auto rejoin off to stop it"),
+							Duration = 6,
+						})
+					end)
+				end
+				task.wait(1)
+				left = left - 1
+			end
+			if ENV.__SELPF == GEN and rejoinState() == "due" then
+				rejoinNow("automatic")
+				break
+			end
+			note("")
+		end
+		task.wait(2)
+	end
+end)
+
+--------------------------------------------------------------------------------
 -- panel refresh
 --------------------------------------------------------------------------------
 
@@ -3754,7 +4072,8 @@ task.spawn(function()
 				"flag      " .. (fflagOn() == nil and "no setfflag here"
 					or (fflagOn() and "set" or "not set")) .. "   " .. tostring(FLAG_NOTE),
 				"client    " .. (parallelOnMainThread()
-					and "main thread - hooks possible" or "Actor VM - hooks impossible"),
+					and "main thread - hooks possible"
+					or ("Actor VM - " .. (select(2, rejoinState()) or "hooks impossible"))),
 				"hooks     " .. HOOKS.note .. " (" .. hookList() .. ")",
 				"stats     " .. nOvr .. " overridden right now",
 				"hits      " .. STATE.snapHits .. " confirmed by the server",
@@ -3769,7 +4088,9 @@ task.spawn(function()
 				why = "no - the Trigger switch above is off"
 			elseif CONFIG.hum and CONFIG.humPanelOff and STATE.panelOpen then
 				why = "no - this panel is open (Humaniser setting)"
-			elseif CONFIG.trgActive ~= "Always" and not hotkeyHeld(CONFIG.trgKey) then
+			elseif CONFIG.trgActive == "Screen held" and not screenHeld() then
+				why = "no - hold the screen"
+			elseif CONFIG.trgActive == "Hotkey" and not hotkeyHeld(CONFIG.trgKey) then
 				why = "no - hold " .. tostring(CONFIG.trgKey)
 			else
 				why = "yes"
@@ -3800,7 +4121,8 @@ task.spawn(function()
 			elseif not globalFn("hookfunction") then
 				state = "this executor has no hookfunction"
 			elseif not parallelOnMainThread() then
-				state = fflagOn() and "flag is set - REJOIN and it works"
+				state = select(2, rejoinState())
+					or (fflagOn() and "flag is set - REJOIN and it works")
 					or ("flag not set (" .. tostring(FLAG_NOTE) .. ")")
 			else
 				state = HOOKS.note
@@ -3859,7 +4181,8 @@ task.spawn(function()
 
 			local lines = {
 				"  place    Phantom Forces (" .. tostring(game.PlaceId) .. ")",
-				"  drawing  " .. (HAS_DRAWING and "available" or "MISSING - no ESP"),
+				"  drawing  " .. (HAS_DRAWING and "available" or "MISSING - no ESP")
+					.. (STATE.drawErr and ("   last error: " .. STATE.drawErr) or ""),
 				"  mouse    " .. (moveMouse and "mousemoverel available"
 					or "MISSING - camera path only"),
 				"  click    " .. STATE.clickWay,
@@ -3907,6 +4230,8 @@ ENV.__SELPF_DBG = {
 	pullTrigger = pullTrigger, probeClick = probeClick, hudRead = hudRead,
 	syncMods = syncMods, armHooks = armHooks, hookList = hookList,
 	setFlag = setFlag, MODS = MODS, HOOKS = HOOKS,
+	rejoinNow = rejoinNow, rejoinState = rejoinState, gameCamera = gameCamera,
+	screenHeld = screenHeld, firing = firing,
 	heldWeapon = heldWeapon, predictPoint = predictPoint,
 	boardOf = function() return boardOf end, folderTeam = function() return folderTeam end,
 	drawn = drawn,
