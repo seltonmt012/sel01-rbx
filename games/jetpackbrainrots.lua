@@ -201,13 +201,17 @@ local function num(value)
 	return tonumber(value) or 0
 end
 
+-- Late-game balances run far past Qa: a report showed $3.2e144 printed as a
+-- 130-digit "Qa" figure across the whole status strip. The ladder goes to Dc
+-- now and anything beyond it is written as an exponent.
 local function short(n)
 	n = tonumber(n) or 0
-	local units = { { 1e15, "Qa" }, { 1e12, "T" }, { 1e9, "B" }, { 1e6, "M" }, { 1e3, "K" } }
-	for _, u in ipairs(units) do
-		if math.abs(n) >= u[1] then return string.format("%.2f%s", n / u[1], u[2]) end
-	end
-	return string.format("%.0f", n)
+	local units = { "K", "M", "B", "T", "Qa", "Qi", "Sx", "Sp", "Oc", "No", "Dc" }
+	local a = math.abs(n)
+	if a < 1e3 then return string.format("%.0f", n) end
+	local i = math.floor(math.log10(a) / 3)
+	if i > #units then return string.format("%.2e", n) end
+	return string.format("%.2f%s", n / 10 ^ (i * 3), units[i])
 end
 
 local function note(text) STATE.note = text end
@@ -1122,19 +1126,26 @@ local function rebirthIfWorth()
 	local fired = false   -- wurde der Knopf wirklich gedrueckt?
 	local gui = plr:FindFirstChild("PlayerGui")
 	local main = gui and gui:FindFirstChild("MainGui")
+	-- THE WINDOW ONLY EXISTS ONCE IT HAS BEEN OPENED. MainGui.Rebirth is created
+	-- by the menu button, so looking for it first found nothing on a fresh join,
+	-- the whole branch was skipped and nothing was ever sent - "auto rebirth is
+	-- on but I don't have rebirth" (reported 2026-10-07). Open, then look.
+	local opener = main and main:FindFirstChild("HUDLeftSide")
+	opener = opener and opener:FindFirstChild("Menu")
+	opener = opener and opener:FindFirstChild("Menu")
+	opener = opener and opener:FindFirstChild("Rebirth")
+	opener = opener and opener:FindFirstChildWhichIsA("ImageButton")
 	local window = main and main:FindFirstChild("Rebirth")
-	if main and window then
-		local menuEntry = main:FindFirstChild("Rebirth", true)
-		local opener = main:FindFirstChild("HUDLeftSide")
-		opener = opener and opener:FindFirstChild("Menu")
-		opener = opener and opener:FindFirstChild("Menu")
-		opener = opener and opener:FindFirstChild("Rebirth")
-		opener = opener and opener:FindFirstChildWhichIsA("ImageButton")
-		if opener and not window.Visible then
-			local ok, conns = pcall(getconnections, opener.Activated)
-			if ok then for _, c in ipairs(conns) do pcall(function() c:Fire() end) end end
-			task.wait(1)
+	if opener and not (window and window.Visible) then
+		local ok, conns = pcall(getconnections, opener.Activated)
+		if ok then for _, c in ipairs(conns) do pcall(function() c:Fire() end) end end
+		for _ = 1, 15 do
+			task.wait(0.2)
+			window = main:FindFirstChild("Rebirth")
+			if window and window.Visible then break end
 		end
+	end
+	if main and window then
 		local button
 		for _, node in ipairs(window:GetDescendants()) do
 			if node.Name == "ButtonRebirth" then button = node end
