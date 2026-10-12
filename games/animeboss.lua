@@ -242,6 +242,7 @@ end
 
 -- ------------------------------------------------------------------- config
 local CONFIG = {
+    running         = true,   -- the master switch, saved so OFF survives a rejoin
     -- boss loop
     autoRoll        = true,   -- roll a new boss the moment the old one dies
     autoClick       = true,   -- AttackBoss at the server's pace, never faster
@@ -274,6 +275,8 @@ local CONFIG = {
     autoRaid        = true,   -- join a boss raid when one opens - the ONLY artifact source
     raidJoinWindow  = 10,     -- only walk to the portal inside this many seconds of the start
     autoArtifacts   = true,   -- keep the three best artifacts in the plot slots
+    antiAfk         = true,   -- the farm stands still for hours; Roblox kicks after 20 min idle
+    autoPrestige    = false,  -- resets stats + money (units are kept) for x2..x12 luck & money forever
 
     -- stuck bosses
     autoReroll      = true,   -- reroll a boss that would take all night
@@ -905,14 +908,21 @@ local function rollBoss()
             local roller = tier and tier:FindFirstChild("BossRoller")
             if roller then
                 withUI("roll", function() fireRollPrompt(roller) end)
-                task.wait(0.4)
-                for _, c in ipairs(sp:GetChildren()) do
-                    if c:GetAttribute("MaxHealth") then
-                        rolled = true
-                        STATE.rolled = STATE.rolled + 1
-                        STATE.bossName = c.Name
-                        note("rolled " .. c.Name)
+                -- the boss arrives a moment after the prompt; 0.4s missed it
+                -- every time, so the roll counter stayed at 0 while bosses died
+                local got = false
+                for _ = 1, 12 do
+                    task.wait(0.25)
+                    for _, c in ipairs(sp:GetChildren()) do
+                        if c:GetAttribute("MaxHealth") and not got then
+                            got = true
+                            rolled = true
+                            STATE.rolled = STATE.rolled + 1
+                            STATE.bossName = c.Name
+                            note("rolled " .. c.Name)
+                        end
                     end
+                    if got then break end
                 end
             end
         end
@@ -1421,12 +1431,24 @@ end
 -- of the lag. Two seconds of staleness costs nothing here - the answer only
 -- gates whether a ROLL may happen.
 local _pending = { t = -1, v = false }
+-- ONLY WORK THE SCRIPT WILL ACTUALLY DO COUNTS. This used to call any unit in
+-- the chest pending, but drainChest leaves the unwanted ones in there while the
+-- chest has room - so after the first kill there was always one, rolling never
+-- happened again, and on an account without the AutoRoll upgrade the farm sat
+-- on "waiting" for good ("auto attack doesn't work", 2026-10-05: no boss, so
+-- nothing to attack). Same for a free slot with nothing to put in it, and for
+-- chest/place/swap switches the player has turned off.
 local function unitWorkPendingRaw()
-    if freeSlot() then return true end
-    if (select(1, chestCount()) or 0) > 0 then return true end
-    local best  = backpackTools()[1]
+    local tools = backpackTools()
+    if CONFIG.autoPlace and freeSlot() and tools[1] then return true end
+    if CONFIG.autoChest then
+        local used, cap = chestCount()
+        used, cap = used or 0, cap or 25
+        if used > 0 and (cap - used) < (tonumber(CONFIG.chestKeepFree) or 6) then return true end
+    end
+    local best  = tools[1]
     local worst = weakestPlaced()
-    if best and worst and best.charId
+    if CONFIG.autoSwap and best and worst and best.charId
        and refScoreOf(best) > worst.refScore * (tonumber(CONFIG.swapMargin) or 1.1) then
         return true
     end
@@ -1475,12 +1497,23 @@ local function statCards()
     local sf = uf and uf:FindFirstChild("Main") and uf.Main:FindFirstChild("ScrollingFrame")
     local out = {}
     if not sf then return out end
+    -- The Oct 2026 update split the card's button in three: BuyButton1 (one
+    -- level), BuyButtonMax (as many as the balance covers, "x21" for "12T$")
+    -- and RobuxBuyButton. Looking for the old "BuyButton" found nothing, so no
+    -- price was ever read and nothing was ever bought ("auto upgrade is on but
+    -- it does nothing"). Only cards named "<Stat>Card" are stats: the new
+    -- PrestigeFrame also carries a "BuyButton" and is a reset, not an upgrade.
+    -- The Robux button is never looked up at all.
     for _, card in ipairs(sf:GetChildren()) do
-        if card:IsA("Frame") and card:FindFirstChild("StatName") then
+        if card:IsA("Frame") and card:FindFirstChild("StatName") and card.Name:match("Card$") then
             local key = card.Name:gsub("Card$", "")
-            local buy = card:FindFirstChild("BuyButton")
+            local buy = card:FindFirstChild("BuyButton1") or card:FindFirstChild("BuyButton")
             local pl  = buy and buy:FindFirstChild("PriceLabel")
             local price = pl and parseAmount(pl.Text) or nil
+            local mx = card:FindFirstChild("BuyButtonMax")
+            local mpl = mx and mx.Visible and mx:FindFirstChild("PriceLabel")
+            local mnum = mx and mx:FindFirstChild("BuyNumber")
+            local mcount = mnum and tonumber(tostring(mnum.Text):match("(%d+)")) or nil
             out[#out + 1] = {
                 key = key,
                 card = card,
@@ -1488,6 +1521,10 @@ local function statCards()
                 display = card.StatName.Text,
                 priceText = pl and pl.Text or "?",
                 price = price,
+                maxButton = (mpl and mcount and mcount > 1) and mx or nil,
+                maxPrice = mpl and parseAmount(mpl.Text) or nil,
+                maxPriceText = mpl and mpl.Text or nil,
+                maxCount = mcount,
                 maxed = pl and tostring(pl.Text):upper():find("MAX") ~= nil,
                 level = tonumber(tostring(card.Value.Text):match("Lv%.(%d+)")) or 0,
             }
@@ -1496,7 +1533,7 @@ local function statCards()
     return out
 end
 
-local function buyStats()
+local function buyOneStat()
     local bal = money()
     local reserve = tonumber(CONFIG.moneyReserve) or 0
     local spendable = math.max(0, bal - reserve)
@@ -1509,7 +1546,7 @@ local function buyStats()
     if CONFIG.statOrder == "Cheapest first" then
         for _, c in ipairs(statCards()) do
             if not c.maxed and c.price and c.price <= cap then
-                if not best or c.price < best.card.price then best = { card = c } end
+                if not best or c.price < best.card.price then best = { card = c, limit = cap, cap = math.huge } end
             end
         end
     else
@@ -1522,7 +1559,7 @@ local function buyStats()
             local limit = step.share and (spendable * step.share) or cap
             if c and not c.maxed and c.price and c.price <= limit
                and (c.level or 0) < step.cap then
-                best = { card = c }
+                best = { card = c, limit = limit, cap = step.cap }
                 break
             end
         end
@@ -1532,6 +1569,15 @@ local function buyStats()
     local c = best.card
     local levelBefore = c.level
 
+    -- Many levels in one click when the Max button's price fits the same budget
+    -- a single level is held to (and never more than maxStatSpend of the
+    -- balance, so unit levels are not starved) and it does not run past the
+    -- plan's cap. With trillions on hand a level every 12s was a crawl.
+    local useMax = c.maxButton and c.maxPrice and c.maxCount
+        and c.maxPrice <= math.min(best.limit or cap, cap)
+        and (c.level or 0) + c.maxCount <= (best.cap or math.huge)
+    local button = useMax and c.maxButton or c.button
+
     -- The UI path, for EVERY stat, because BuyUpgrade does not cover them all.
     -- Summoner in particular ignores both BuyUpgrade:FireServer("Summoner") and
     -- UpgradeSummoner:FireServer() - measured, level did not move either way -
@@ -1539,9 +1585,9 @@ local function buyStats()
     -- that has to be answered. Firing the card's own BuyButton and then the
     -- dialog's Yes covers the plain stats and the gated ones with one path.
     local fired = false
-    if c.button then
+    if button then
         local conns = {}
-        pcall(function() conns = getconnections(c.button.MouseButton1Click) end)
+        pcall(function() conns = getconnections(button.MouseButton1Click) end)
         for _, conn in ipairs(conns) do
             pcall(function() conn:Fire() end)
             fired = true
@@ -1578,10 +1624,122 @@ local function buyStats()
         if c2.key == c.key then after = c2.level end
     end
     if after and after > levelBefore then
-        STATE.statBuys = STATE.statBuys + 1
-        note(("bought %s Lv.%d for %s"):format(c.display, after, c.priceText))
+        STATE.statBuys = STATE.statBuys + (after - levelBefore)
+        note(("bought %s Lv.%d -> %d for %s"):format(c.display, levelBefore, after,
+            useMax and c.maxPriceText or c.priceText))
         return true
     end
+    return false
+end
+
+-- One level per 12s pass was a crawl: after a prestige Luck was bought at
+-- 33K-134K a level against an 8Qa balance, one every 12 seconds. The Max button
+-- rarely fits the per-buy share because it prices nearly the whole balance, so
+-- a pass now buys single levels back to back - every one re-priced, re-checked
+-- against the plan's caps and verified on the level - until nothing fits.
+local function buyStats()
+    local n = 0
+    for _ = 1, 20 do
+        if not (STATE.running and CONFIG.autoStats) then break end
+        if not buyOneStat() then break end
+        n = n + 1
+    end
+    return n > 0
+end
+
+-- PRESTIGE (Oct 2026 update). PrestigeConfig.Levels: 10 steps, each needs N
+-- bosses beaten since the last prestige, a unit of a given rarity, a Summoner
+-- level and a money price (1: 200 bosses, Celestial, Summoner 7, 850B). The
+-- game's own confirmation says it: "Your stats and money will reset, but you
+-- keep all your units! Units on your 2nd floor go back to your inventory."
+-- Reward x2 .. x12 luck and money forever. The button does exactly this:
+-- PrestigeRequest:InvokeServer("Check", "Money") -> {Ok, Reason}, then
+-- ("Prestige"). The other payment path on that card is Robux and is never used.
+-- Off by default because it resets the stats; the stat plan buys Slots first
+-- afterwards and the script rolls by itself until AutoRoll is bought back.
+local function prestigeLevel()
+    local gui = plr:FindFirstChild("PlayerGui")
+    local main = gui and gui:FindFirstChild("Main")
+    local uf = main and main:FindFirstChild("UpgradesFrame")
+    local sf = uf and uf:FindFirstChild("Main") and uf.Main:FindFirstChild("ScrollingFrame")
+    local pf = sf and sf:FindFirstChild("PrestigeFrame")
+    local v = pf and pf:FindFirstChild("Value")
+    return v and tonumber(tostring(v.Text):match("(%d+)")) or nil
+end
+
+-- The server's "Check" answered Ok=true on an account showing Summoner 5/7, so
+-- it checks the money and little else. The game's own button checks the three
+-- requirement rows first, and so does this: every "a/b" must read a >= b.
+local function prestigeRequirementsMet()
+    local gui = plr:FindFirstChild("PlayerGui")
+    local main = gui and gui:FindFirstChild("Main")
+    local uf = main and main:FindFirstChild("UpgradesFrame")
+    local sf = uf and uf:FindFirstChild("Main") and uf.Main:FindFirstChild("ScrollingFrame")
+    local rf = sf and sf:FindFirstChild("PrestigeFrame") and sf.PrestigeFrame:FindFirstChild("RequirementsFrame")
+    if not rf then return false, "no card" end
+    local rows = 0
+    for _, row in ipairs(rf:GetChildren()) do
+        local v = row:IsA("Frame") and row:FindFirstChild("Value")
+        if v then
+            local have, need = tostring(v.Text):match("([%d%.]+)%s*/%s*([%d%.]+)")
+            if not (have and need) then return false, "unreadable" end
+            if tonumber(have) < tonumber(need) then
+                local d = row:FindFirstChild("Description")
+                return false, (d and d.Text or row.Name) .. " " .. v.Text
+            end
+            rows = rows + 1
+        end
+    end
+    if rows == 0 then return false, "max prestige" end
+    return true
+end
+
+local function prestigeInvoke(...)
+    local rf = Remotes:FindFirstChild("PrestigeRequest")
+    if not rf then return nil end
+    local args = table.pack(...)
+    local done, res = false, nil
+    task.spawn(function()
+        local ok, r = pcall(function() return rf:InvokeServer(table.unpack(args, 1, args.n)) end)
+        res = ok and r or nil
+        done = true
+    end)
+    local t = 0
+    while not done and t < 8 do task.wait(0.1); t = t + 0.1 end
+    return res
+end
+
+local function prestigePass()
+    if raidActive() then return false end
+    local before = prestigeLevel()
+    if not before then return false end
+    local met, why = prestigeRequirementsMet()
+    if not met then STATE.prestigeWhy = why; return false end
+    local check = prestigeInvoke("Check", "Money")
+    if type(check) ~= "table" or not check.Ok then
+        STATE.prestigeWhy = type(check) == "table" and tostring(check.Reason or "?") or "no answer"
+        return false
+    end
+    -- The game's button puts a confirmation dialog between "Check" and
+    -- "Prestige". Firing the second straight after the first was refused
+    -- (measured: level stayed 0); the same call a few seconds later answered
+    -- {Ok = true, Reason = "Success"} and the level went 0 -> 1 with every unit
+    -- kept. So: the pause a human takes to read the dialog, and one retry.
+    local res
+    for _ = 1, 2 do
+        task.wait(2)
+        res = prestigeInvoke("Prestige")
+        if type(res) == "table" and res.Ok then break end
+    end
+    task.wait(3)
+    local after = prestigeLevel()
+    if after and after > before then
+        STATE.prestiges = (STATE.prestiges or 0) + 1
+        STATE.prestigeWhy = "-"
+        note(("prestige %d -> %d"):format(before, after))
+        return true
+    end
+    STATE.prestigeWhy = type(res) == "table" and tostring(res.Reason or "refused") or "no answer"
     return false
 end
 
@@ -1915,7 +2073,16 @@ local function farmCycle()
             rollBoss()
         end
     end
-    if not boss() then STATE.mode = "waiting"; return end
+    if not boss() then
+        STATE.mode = "waiting"
+        -- A full chest stops the game spawning bosses at all; say so rather
+        -- than sit on "waiting" with nothing on screen to explain it.
+        local used, cap = chestCount()
+        if used and cap and used >= cap and not CONFIG.autoChest then
+            note("chest full - no new boss until it is emptied (turn on Take from chest)")
+        end
+        return
+    end
 
     STATE.mode = "fighting"
     -- One click a second, because that is all the server will take.
@@ -1962,9 +2129,19 @@ local function loop(period, key, fn)
     end)
 end
 
+-- THE SAVED SETTINGS ARE MERGED BEFORE THE FIRST LOOP RUNS. They used to be
+-- merged when the panel was built, ~80 lines further down, and every loop had
+-- already made its first pass on the DEFAULTS by then - autoSell = true among
+-- them. A player who had switched selling off still lost units on every join
+-- ("every time I log in it's instantly active and sells it", 2026-09-27).
+local UI = (_G.__SEL and _G.__SEL.ui) or loadstring(readfile("ui-template.lua"))()
+UI.config("animeboss", CONFIG)
+STATE.running = CONFIG.running ~= false
+
 loop(0.5,  nil,           farmCycle)
 loop(4,    "autoChest",   manageUnits)
 loop(12,   "autoStats",   buyStats)
+loop(30,   "autoPrestige", prestigePass)
 loop(5,    "autoLevel",   levelUnits)
 loop(90,   "autoClaims",  claimRewards)
 loop(30,   "autoCodes",   redeemCodes)
@@ -1975,6 +2152,22 @@ loop(45,   "autoFilter",  syncSummonerSettings)
 -- the character is not moved unless a raid is actually about to start.
 loop(3,    "autoRaid",    joinRaid)
 loop(60,   "autoArtifacts", placeArtifacts)
+
+-- Anti-AFK. The farm never moves the character for long, so Roblox's 20-minute
+-- idle kick ended unattended sessions ("you get disconnected for standing
+-- still", reported 2026-10-05). Same answer as the other scripts: a virtual
+-- right click on Idled, which is not a game action at all.
+pcall(function()
+    if _G.__ANIMEBOSS_IDLE then _G.__ANIMEBOSS_IDLE:Disconnect() end
+    local VirtualUser = game:GetService("VirtualUser")
+    _G.__ANIMEBOSS_IDLE = plr.Idled:Connect(function()
+        if not CONFIG.antiAfk then return end
+        pcall(function()
+            VirtualUser:CaptureController()
+            VirtualUser:ClickButton2(Vector2.new())
+        end)
+    end)
+end)
 
 -- Kill counter, read off the oracle rather than counted by us: a boss whose
 -- health was above zero and is now gone was beaten.
@@ -2006,6 +2199,8 @@ _G.__ANIMEBOSS_DBG = {
     takeFromChest = takeFromChest, dropFromChest = dropFromChest,
     rollBoss = rollBoss, clickBoss = clickBoss, collectMoney = collectMoney,
     statCards = statCards, buyStats = buyStats, levelUnits = levelUnits,
+    prestigePass = prestigePass, prestigeLevel = prestigeLevel, prestigeInvoke = prestigeInvoke,
+    prestigeRequirementsMet = prestigeRequirementsMet,
     claimRewards = claimRewards, redeemCodes = redeemCodes,
     castleStep = castleStep, castleUnits = castleUnits, castleRoom = castleRoom,
     useBoosts = useBoosts, bossEta = bossEta, rerollBoss = rerollBoss, DATA = DATA,
@@ -2019,12 +2214,8 @@ _G.__ANIMEBOSS_DBG = {
 }
 
 -- ------------------------------------------------------------------- panel
-local UI = (_G.__SEL and _G.__SEL.ui) or loadstring(readfile("ui-template.lua"))()
-
 if _G.__ANIMEBOSS_WIN then pcall(function() _G.__ANIMEBOSS_WIN:Destroy() end) end
 if UI.sweep then UI.sweep("ANIMEBOSS_PANEL") end
-
-UI.config("animeboss", CONFIG)
 
 local win = UI.Window({
     title = "ANIME", accentTitle = "BOSS", subtitle = "seltonmt",
@@ -2055,6 +2246,8 @@ cSpend:Toggle("Buy stat upgrades", CONFIG.autoStats, function(v) CONFIG.autoStat
     "Damage first, then luck and summoner")
 cSpend:Toggle("Level up units", CONFIG.autoLevel, function(v) CONFIG.autoLevel = v end,
     "Levels the unit that returns the most per dollar")
+cSpend:Toggle("Auto prestige", CONFIG.autoPrestige, function(v) CONFIG.autoPrestige = v end,
+    "Prestiges as soon as the game allows it, paid with money. Resets stats and money, keeps every unit - for x2 up to x12 luck and money forever.", UI.theme.warn)
 cSpend:Dropdown("Stat order", { "Value order", "Cheapest first" }, CONFIG.statOrder,
     function(v) CONFIG.statOrder = v end)
 cSpend:Label("Value order buys Summoner first: one level moves the roll centre a whole rarity tier, while the entire Luck ladder is worth less than one Summoner level.")
@@ -2114,10 +2307,12 @@ cExtra:Toggle("Claim rewards", CONFIG.autoClaims, function(v) CONFIG.autoClaims 
     "Offline, daily, time and quest rewards")
 cExtra:Toggle("Redeem codes once", CONFIG.autoCodes, function(v) CONFIG.autoCodes = v end,
     "17 known codes, three of them money", UI.theme.warn)
+cExtra:Toggle("Anti-AFK", CONFIG.antiAfk, function(v) CONFIG.antiAfk = v end,
+    "Stops the 20-minute idle kick while the farm runs unattended")
 
 local info = win:Page("INFO", UI.icon.info)
 local cInfo = info:Card("STATUS", 0)
-local out = cInfo:Readout(11)
+local out = cInfo:Readout(12)
 
 local cWarn = info:Card("READ THIS", 0)
 cWarn:Label("Attacking is capped by the server at about one hit a second. Clicking faster does nothing at all.")
@@ -2144,6 +2339,8 @@ task.spawn(function()
                     STATE.rolled, STATE.kills, STATE.taken, STATE.placed, STATE.swapped),
                 ("  bought %d stats   %d unit levels   sold %d spares"):format(
                     STATE.statBuys, STATE.lvlBuys, STATE.sold),
+                ("  prestige %s%s"):format(tostring(prestigeLevel() or "?"),
+                    CONFIG.autoPrestige and ("   waiting: " .. tostring(STATE.prestigeWhy or "-")) or "   (auto off)"),
                 "BOSS",
                 ("  %s at %.1f%%"):format(STATE.bossName, STATE.bossPct),
                 "PLOT",
@@ -2164,7 +2361,7 @@ end)
 
 pcall(function()
     win:SetMaster(STATE.running, "Auto Farm running")
-    win:OnMaster(function(on) STATE.running = on end)
+    win:OnMaster(function(on) STATE.running = on; CONFIG.running = on end)
 end)
 
 pcall(function() win:Home() end)
