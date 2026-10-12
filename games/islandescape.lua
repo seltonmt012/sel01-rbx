@@ -1749,6 +1749,28 @@ local RECIPE_FIELDS = {
 -- still made the game unusable to look at.
 local constructNeeds = {}
 
+-- WHICH MATERIAL A ROW IS comes from its icon, never from its position. Every
+-- row is a frame with LayoutOrder 0 under a UIListLayout, so GetChildren order
+-- is arbitrary - measured 2026-10-12 on the boat: "0 / 10" (ingots) came FIRST,
+-- was read as wood, and the script hoarded wood for a boat whose wood was full
+-- while 96 Iron Ore lay on the ground unwanted. No ore, no ingots, no boat -
+-- "can't build iron ingot and can't build boat" (reported 2026-10-09). Each
+-- row's `item` ImageLabel carries exactly Config.item.byId[<id>].image.
+local SPEC_BY_ITEM = {}
+for _, spec in ipairs(RECIPE_FIELDS) do
+	SPEC_BY_ITEM[(spec.field:gsub("^require_", ""))] = spec
+end
+local IMAGE_TO_ITEM
+local function itemByImage(img)
+	if not IMAGE_TO_ITEM then
+		IMAGE_TO_ITEM = {}
+		for id, row in pairs((Config and Config.item and Config.item.byId) or {}) do
+			if type(row) == "table" and row.image then IMAGE_TO_ITEM[row.image] = id end
+		end
+	end
+	return IMAGE_TO_ITEM[img]
+end
+
 function neededStock()
 	local G = round()
 	local b = G and G:FindFirstChild("Buildings")
@@ -1782,21 +1804,33 @@ function neededStock()
 		local recipe = recipeFor(base)
 		local reqFrame = m:FindFirstChild("requires", true)
 		if type(recipe) == "table" and reqFrame then
-			local rows = {}
+			-- one entry per row, the material taken from the row's own icon
+			local rows, positional = {}, {}
 			for _, f in ipairs(reqFrame:GetChildren()) do
 				local c = f:FindFirstChild("count", true)
-				if c then rows[#rows + 1] = c.Text end
+				if c then
+					positional[#positional + 1] = c.Text
+					local icon = f:FindFirstChild("item", true)
+					local id = icon and icon:IsA("ImageLabel") and itemByImage(icon.Image)
+					local spec = id and SPEC_BY_ITEM[id]
+					if spec then rows[#rows + 1] = { spec = spec, text = c.Text } end
+				end
 			end
-			local i = 0
-			for _, spec in ipairs(RECIPE_FIELDS) do
-				if (recipe[spec.field] or 0) > 0 then
-					i = i + 1
-					local txt = rows[i]
-					local have, want = tostring(txt):match("(%d+)%s*/%s*(%d+)")
-					-- `i` must keep counting for EVERY non-zero field even when
-					-- the demand is skipped: it is the row index into the site's
-					-- BuildUI, and letting it slip would silently read the wrong
-					-- material's numbers for everything after it.
+			-- Fallback for a site whose icons do not resolve: the old reading in
+			-- recipe order, which is right whenever the frames happen to be.
+			if #rows == 0 then
+				local i = 0
+				for _, spec in ipairs(RECIPE_FIELDS) do
+					if (recipe[spec.field] or 0) > 0 then
+						i = i + 1
+						rows[#rows + 1] = { spec = spec, text = positional[i] }
+					end
+				end
+			end
+			for _, row in ipairs(rows) do
+				local spec = row.spec
+				do
+					local have, want = tostring(row.text):match("(%d+)%s*/%s*(%d+)")
 					local usable = (spec.field ~= "require_ironIngot") or hasFurnace
 					if have and want and tonumber(have) < tonumber(want) and usable then
 						-- HOW MANY are missing, not just that something is. A
