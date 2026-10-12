@@ -62,6 +62,20 @@
 --   * Fuse   3 spare units -> 1 whose chance is ~0.667x their SUM, i.e. about
 --            twice as rare as their mean. Balanced trios only (see doFuse).
 --
+-- Update of 2026-10-11, re-read from the server modules (they ship to the client):
+--   * RollDice returns nothing while FusingService.Fusing is set - ONE 3s flag for
+--            the whole server, set by every Fuse call before it checks the units,
+--            so a failing fuse attempt still blocks everybody's rolls.
+--   * The game's AutoSell is a 1-in-N chance: a rolled unit whose chance is below
+--            it is sold on the spot. It was being sent a rarity index (1-11).
+--   * InteractSlot with an EMPTY hand picks the slot's unit up into the hand, and
+--            a unit in the hand is no longer protected from SellInventory.
+--   * Units can be locked (attributes.locked); Sell and Fuse both skip them.
+--   * Codes moved to Codes.CodesConfig + CodesService.RE.RedeemCode (0.5s debounce).
+--   * New: rebirth points (RebirthService.AddStat, x(1 + 0.1 per point) on one
+--            buff), daily/weekly quests paying Tickets (QuestService.Claim), and a
+--            Ticket shop that sells gamepasses for Tickets only (QuestService.Buy).
+--
 -- Deliberately left out, do not add without new evidence:
 --   Forging  ___X is a mirror; purchases are checked against the server copy.
 
@@ -99,8 +113,10 @@ local CONFIG = {
 	gradeMin    = 3,      -- keep grades worth >= this income x (A and better)
 	autoTrait   = true,   -- spend Trait Rerolls on the placed units' traits
 	traitMin    = 1.5,    -- keep traits worth >= this income x (Money II and better)
-	autoBoost   = true,   -- activate owned Luck/Income boosts
-	autoFuse    = true,   -- fuse spare units three at a time into rarer ones
+	autoBoost   = true,   -- activate owned Luck/Income/Roll Speed boosts
+	-- Off by default and under a new key, so saved panels start off too: fusing
+	-- eats units ("my units got stolen") and every attempt locks rolling for 3s.
+	autoFusion  = false,  -- fuse spare units three at a time into rarer ones
 	fuseShare   = 0.35,   -- share of money one fusion may cost...
 	fuseSeconds = 30,     -- ...and never more than this many seconds of income
 	autoTower   = true,   -- farm a tower for boosts, gems and trait rerolls
@@ -114,8 +130,13 @@ local CONFIG = {
 	autoSell    = true,   -- keep the backpack under its cap by selling junk
 	sellRarity  = 3,      -- rarity sortOrder floor (3 = always sell below Rare)
 	keepBest    = 20,     -- when the bag fills, keep this many best spares, sell rest
+	keepLuckX   = 10,     -- never sell a pull whose 1-in-N is >= this x your roll luck
 	autoCodes   = true,   -- redeem every code once
 	autoClaim   = true,   -- claim offline / daily / group rewards
+	autoQuests  = true,   -- claim finished daily/weekly quests (they pay Tickets)
+	autoPasses  = true,   -- buy the Ticket-shop gamepasses with Tickets (no Robux)
+	autoStats   = true,   -- spend rebirth points
+	statPick    = "Money",-- x1.5 money for 5 points beats x1.5 luck (~x1.34 income)
 }
 
 -- Which world-pad upgrade lines auto-buy. Damage/Health join them while the tower
@@ -125,8 +146,12 @@ local INV_CAP_BASE = 100   -- Unit Storage buff default; each owned tier adds +5
 
 local RARITY_ORDER = {
 	"Common", "Uncommon", "Rare", "Epic", "Legendary", "Mythical",
-	"Divine", "Exotic", "Celestial", "Secret I / II", "Heavenly",
+	"Divine", "Exotic", "Celestial", "Secret I / II", "Heavenly", "Galactic", "Exclusive",
 }
+
+-- Ticket-shop gamepasses, best first: More Cash x2 money, Luck x1.5, Roll Speed
+-- -0.6s per roll, Ultra Luck x3; grade/trait rolls only help the rerolls.
+local PASS_ORDER = { "More Cash", "Luck", "Roll Speed", "Ultra Luck", "More Grades", "More Traits" }
 
 local STATE = {
 	money = 0, rolls = 0, rebirth = 0, dice = "-", nextDice = "-",
@@ -138,7 +163,7 @@ local STATE = {
 	towerRuns = 0, towerFloors = 0, towerBest = 0, towerFloor = 0, towerDrops = 0,
 	fused = 0, fuseLast = "-", fuseBestChance = 0,
 	towerPick = "-", towerPredict = 0, towerRate = 0,
-	codesDone = 0, claims = 0,
+	codesDone = 0, claims = 0, questsClaimed = 0, passesBought = 0, statsAdded = 0,
 	phase = "idle", note = "-", uiOwner = "-",
 }
 
@@ -167,7 +192,11 @@ local R = {
 	BuyUpgrade      = svc("RE.BuyUpgrade"),
 	SellInventory   = svc("SellService.RF.SellInventory"),
 	UpdateAutoSell  = svc("SellService.RE.UpdateAutoSell"),
-	RedeemCode      = svc("MonetizationService.RE.RedeemCode"),
+	RedeemCode      = svc("CodesService.RE.RedeemCode") or svc("MonetizationService.RE.RedeemCode"),
+	QuestClaim      = svc("QuestService.RE.Claim"),
+	QuestBuy        = svc("QuestService.RE.Buy"),
+	AddStat         = svc("RebirthService.RE.AddStat"),
+	UnequipUnit     = svc("UnitService.RF.Unequip"),
 	ClaimOffline    = svc("OfflineEarningsService.RE.Claim"),
 	ClaimDaily      = svc("DailyRewardService.RE.Claim"),
 	ClaimGroup      = svc("GroupRewardService.RE.Claim"),
@@ -212,6 +241,14 @@ end
 local BoostConfig
 pcall(function() BoostConfig = require(Framework.Features.Inventory.Kinds.Boost.BoostConfig) end)
 local BOOSTS = (BoostConfig and (BoostConfig.entries or BoostConfig)) or {}
+
+-- Added by the 2026-10-11 update; every one optional so an older build still loads.
+local CODES, QuestConfig, RebirthStats, UnitCtl
+pcall(function() CODES = require(Framework.Features.Codes.CodesConfig) end)
+CODES = CODES or MonetConfig.Codes or {}
+pcall(function() QuestConfig = require(Framework.Features.Quests.QuestConfig) end)
+pcall(function() RebirthStats = require(Framework.Features.Rebirth.RebirthStatsConfig) end)
+pcall(function() UnitCtl = require(Framework.Features.Inventory.Kinds.Unit.UnitController) end)
 
 -- rarity name -> sortOrder (Common 1, Uncommon 2, Rare 3, ...), for the sell floor.
 local RARITY_SORT = {}
@@ -292,6 +329,16 @@ local function ownedLuck()
 		if d.OwnedDice[die.key] and die.luck > best then best, name = die.luck, die.key end
 	end
 	return best, name
+end
+
+-- Effective roll luck = buff luck x equipped die (the 2nd return of RollDice).
+-- The roll only draws units whose 1-in-N chance is >= this.
+local function rollLuck()
+	local d = data()
+	local buffLuck = tonumber(select(2, pcall(BuffController.GetBuff, "Luck"))) or 1
+	local dieLuck = 1
+	for _, die in ipairs(DICE) do if die.key == d.Dice then dieLuck = die.luck end end
+	return buffLuck * dieLuck
 end
 
 -- The single strongest die we can pay for right now and do not already own.
@@ -386,8 +433,12 @@ local function bestUpgrade(reserve)
 	return pick
 end
 
--- Current backpack capacity: base 100 plus every owned Unit Storage tier's +5.
+-- Current backpack capacity. The server refuses a roll once the UNIT count
+-- reaches the Unit Storage buff (+ Rolls - 1); items do not count. Fallback:
+-- base 100 plus every owned Unit Storage tier's +5.
 local function invCap()
+	local buff = tonumber(select(2, pcall(BuffController.GetBuff, "Unit Storage")))
+	if buff and buff > 0 then return buff end
 	local cap = INV_CAP_BASE
 	local owned = data().Upgrades
 	for _, up in ipairs(UPGRADE_LINES["Unit Storage"] or {}) do
@@ -416,6 +467,51 @@ local function nextRebirthCost()
 	pcall(function() info = Rebirths.Get(d.Rebirth + 1) end)
 	if not info then pcall(function() info = Rebirths.GetNext(d.Rebirth) end) end
 	return info and tonumber(info.cost), info and tonumber(info.moneyMultiplier)
+end
+
+--------------------------------------------------------------- unit safety -----
+
+local function goodGrade(g)
+	local def = g and Grades[g]
+	return def and (tonumber(def.incomeMultiplier) or 0) >= CONFIG.gradeMin
+end
+
+local function goodTrait(t)
+	local def = t and Traits[t]
+	return def and (tonumber(def.incomeMultiplier) or 0) >= CONFIG.traitMin
+end
+
+-- The unit in the character's hand. The server does NOT protect it from
+-- SellInventory, and InteractSlot with an empty hand puts a slot's unit there.
+local function heldUnit()
+	if not (UnitCtl and UnitCtl.EquippedUnit) then return nil end
+	local ok, id = pcall(UnitCtl.EquippedUnit)
+	return ok and id or nil
+end
+
+-- Units the automation never sells or fuses: locked in the game (the server
+-- skips them too), limited (no roll chance, real trade value), carrying a grade
+-- or trait that cost Gems / Trait Rerolls, or held in the hand. Three reports
+-- ("my units got stolen") were spares like these going into Sell and Fuse.
+local function isProtected(id, u)
+	local a = u.attributes or {}
+	if a.locked then return true end
+	local e = UnitConfig.entries[u.name]
+	if not e or e.limited then return true end
+	if goodGrade(a.grade) or goodTrait(a.trait) then return true end
+	return id == heldUnit()
+end
+
+-- Sell, fuse and placeBest each move units around and used to run in parallel:
+-- a unit picked for a slot could be sold mid-swap. One owner at a time.
+local unitOwner, unitSince = nil, 0
+local function claimUnits(who)
+	if unitOwner and unitOwner ~= who and os.clock() - unitSince < 20 then return false end
+	unitOwner, unitSince = who, os.clock()
+	return true
+end
+local function releaseUnits(who)
+	if unitOwner == who then unitOwner = nil end
 end
 
 ------------------------------------------------------------------- actions -----
@@ -467,6 +563,7 @@ end
 -- that was there goes back to the inventory with its level intact.
 local function placeBest()
 	if not (R.EquipUnit and R.InteractSlot) then return false end
+	if not claimUnits("place") then return false end
 	local d = data()
 	local n = unlockedSlots()
 
@@ -488,7 +585,7 @@ local function placeBest()
 	for i = 1, math.min(n, #ranked) do
 		if not placed[ranked[i].id] then bench[#bench + 1] = ranked[i] end
 	end
-	if #bench == 0 then return false end
+	if #bench == 0 then releaseUnits("place"); return false end
 
 	-- Weakest slots first; an empty slot counts as 0.
 	local slots = {}
@@ -504,8 +601,12 @@ local function placeBest()
 		local slot = slots[k]
 		-- 10% margin so two near-equal units never swap back and forth.
 		if slot and (slot.id == nil or not want[slot.id]) and cand.v > slot.v * 1.1 then
-			local ok = pcall(function() return R.EquipUnit:InvokeServer(cand.id) end)
-			if ok then
+			-- Equip answers false on its 0.5s debounce or a vanished unit. With the
+			-- hand empty, InteractSlot would pick the slot's unit UP instead - the
+			-- plot empties and the unit sits unprotected in the hand. So only a
+			-- confirmed equip may touch the slot.
+			local ok, equipped = pcall(function() return R.EquipUnit:InvokeServer(cand.id) end)
+			if ok and equipped == true then
 				task.wait(0.55)                          -- PlotSlotInteraction 0.5s
 				R.InteractSlot:FireServer(slot.i)
 				task.wait(0.6)
@@ -514,10 +615,14 @@ local function placeBest()
 					swapped = swapped + 1
 					local u = d.Inventory[cand.id]
 					STATE.note = "placed " .. tostring(u and u.name)
+				elseif R.UnequipUnit and heldUnit() then
+					pcall(function() R.UnequipUnit:InvokeServer() end)
 				end
 			end
+			task.wait(0.55)                              -- UnitAction debounce
 		end
 	end
+	releaseUnits("place")
 	STATE.swaps = (STATE.swaps or 0) + swapped
 	return swapped > 0
 end
@@ -527,20 +632,22 @@ end
 -- - the explicit CollectBalance per slot is what keeps the money flowing.
 local function doCollectPlace()
 	local d = data()
-	local before = d.Money
+	-- Count what the slots hold as they are banked. A Money delta read 0 here:
+	-- levels and upgrades spend in the same seconds, and the panel then said
+	-- "collected 0" while every slot was being emptied every 5s.
+	local banked = 0
 	if R.CollectBalance then
-		for key in pairs(d.Slots) do
+		for key, slot in pairs(d.Slots) do
+			banked = banked + (tonumber(slot.balance) or 0)
 			pcall(function() R.CollectBalance:FireServer(tonumber(key)) end)
 		end
 	end
+	STATE.collected = STATE.collected + banked
 	if CONFIG.smartPlace then
 		pcall(placeBest)
 	elseif R.EquipBest then
 		R.EquipBest:FireServer()
 	end
-	task.wait(0.25)
-	local gained = data().Money - before
-	if gained > 0 then STATE.collected = STATE.collected + gained end
 end
 
 local function doDice(reserve)
@@ -583,22 +690,27 @@ end
 -- pressured, also sell the weakest surplus, keeping the best keepBest spares and
 -- never a placed unit. Rolling higher rarities means junk is no longer only
 -- Common/Uncommon, so surplus has to be ranked by income, not rarity alone.
+-- A pull far above your luck (keepLuckX) is never surplus: it is the rare one.
 local function sellJunk(force)
 	if not R.SellInventory then return end
+	if not claimUnits("sell") then return end
 	local d = data()
 	local cap = invCap()
-	local n = count(d.Inventory)
-	local pressured = force or n >= cap - 3
 
 	local placed = {}
 	for _, slot in pairs(d.Slots) do if slot.unitId then placed[slot.unitId] = true end end
 	for _, id in pairs(d.TowerTeam or {}) do placed[id] = true end
+	local luckLine = CONFIG.keepLuckX > 0 and rollLuck() * CONFIG.keepLuckX or nil
 
 	-- Every unplaced unit with its level-free income, weakest first.
-	local units = {}
+	local units, owned = {}, 0
 	for id, u in pairs(d.Inventory) do
 		local e = UnitConfig.entries[u.name]
-		if e and not placed[id] then
+		if e then owned = owned + 1 end
+		local chance = e and not e.limited
+			and tonumber(select(2, pcall(e.chance, { mutation = u.attributes and u.attributes.mutation })))
+		local lucky = luckLine and (chance or math.huge) >= luckLine
+		if e and not placed[id] and not isProtected(id, u) and not lucky then
 			units[#units + 1] = {
 				id = id, inc = baseIncome(u), order = RARITY_SORT[e.rarity] or 0,
 				mutated = u.attributes and u.attributes.mutation ~= nil,
@@ -606,6 +718,7 @@ local function sellJunk(force)
 		end
 	end
 	table.sort(units, function(a, b) return a.inc < b.inc end)
+	local pressured = force or owned >= cap - 3
 
 	local sellable = math.max(0, #units - CONFIG.keepBest)   -- protect the best spares
 	local list = {}
@@ -620,8 +733,14 @@ local function sellJunk(force)
 			if #list >= 300 then break end        -- keep the payload bounded
 		end
 	end
-	if #list == 0 then return end
+	if #list == 0 then
+		releaseUnits("sell")
+		-- Rolling stops on a full bag; say why instead of looking broken.
+		if owned >= cap then STATE.note = "bag full of kept units - rolls blocked" end
+		return
+	end
 	local ok, value, sold = pcall(function() return R.SellInventory:InvokeServer(list) end)
+	releaseUnits("sell")
 	if ok then
 		STATE.sold = STATE.sold + (tonumber(sold) or #list)
 		STATE.soldValue = STATE.soldValue + (tonumber(value) or 0)
@@ -653,7 +772,7 @@ end
 -- Protection is per grade/trait NAME and the server skips a protected one on a
 -- reroll, so protecting every good tier turns "spam reroll" into "reroll until
 -- it lands on something good, then stop". Only fires when a flag must change.
-local function syncProtection()
+local function syncProtectionFlags()
 	local d = data()
 	for name, g in pairs(Grades) do
 		if type(g) == "table" then
@@ -673,20 +792,10 @@ local function syncProtection()
 	end
 end
 
-local function goodGrade(g)
-	local def = g and Grades[g]
-	return def and (tonumber(def.incomeMultiplier) or 0) >= CONFIG.gradeMin
-end
-
-local function goodTrait(t)
-	local def = t and Traits[t]
-	return def and (tonumber(def.incomeMultiplier) or 0) >= CONFIG.traitMin
-end
-
 -- Reroll grade and trait on the placed units until each lands on a kept tier.
 -- Gems pay for grades (神 x50 at the top), Trait Rerolls for traits (Eternal x27).
 local function doRerolls()
-	syncProtection()
+	syncProtectionFlags()
 	local rolls = 0
 	for _, p in ipairs(placedUnits()) do
 		if rolls >= 8 then break end
@@ -719,7 +828,8 @@ local function useBoosts()
 		local def = type(key) == "string" and BOOSTS[key]
 		if def and type(def) == "table" and def.buffs and (tonumber(item.amount) or 0) >= 1 then
 			local b = def.buffs
-			if b.Luck or b["Money Multiplier"] then
+			-- Roll Duration potions shorten the roll cooldown: more rolls, more pulls.
+			if b.Luck or b["Money Multiplier"] or b["Roll Duration"] then
 				local cat = def.category or key
 				if (boostUntil[cat] or 0) < os.clock() then
 					R.BoostUse:FireServer(key)
@@ -832,9 +942,12 @@ end
 
 -- The tower with the best expected value per second for the current team.
 local function pickTower()
-	if CONFIG.tower ~= "Auto (best)" then return CONFIG.tower end
-	local team = towerTeam()
 	local all = select(2, pcall(TowersConfig.GetAll))
+	-- A saved tower the game no longer has falls back to the simulation.
+	if CONFIG.tower ~= "Auto (best)" and type(all) == "table" and all[CONFIG.tower] then
+		return CONFIG.tower
+	end
+	local team = towerTeam()
 	local best, bestRate, bestFloors = nil, -1, 0
 	if type(all) == "table" then
 		for name, tw in pairs(all) do
@@ -965,8 +1078,13 @@ end
 -- account is retried every pass and blocks every trio below it.
 local badTrio = {}
 
-local function doFuse()
-	if not R.Fuse then return false end   -- the savings gate sits in the loop
+-- Every Fuse call - a failing one included - sets FusingService.Fusing for 3s,
+-- and RollDice returns nothing while it is set, for every player on the server.
+-- Fusing every 4s therefore ate ~3/4 of the auto rolls ("auto roll didn't work").
+local FUSE_GAP = 15
+local fuseNext = 0
+
+local function fuseOnce()
 	local d = data()
 	local busy = {}
 	for _, slot in pairs(d.Slots) do if slot.unitId then busy[slot.unitId] = true end end
@@ -985,7 +1103,7 @@ local function doFuse()
 
 	local pile = {}
 	for id, u in pairs(d.Inventory) do
-		if not busy[id] and UnitConfig.entries[u.name] then
+		if not busy[id] and UnitConfig.entries[u.name] and not isProtected(id, u) then
 			local ch = select(2, pcall(FusingUtil.GetChance, u))
 			if type(ch) == "number" then pile[#pile + 1] = { id = id, ch = ch } end
 		end
@@ -1003,10 +1121,15 @@ local function doFuse()
 		-- Only a balanced trio pays: the expected result must beat its best input,
 		-- otherwise one strong unit gets diluted by two weak ones.
 		local key = a.id .. b.id .. c.id
+		-- The server's own "No balanced fusion" check, run here first: a refused
+		-- attempt would still lock everybody's rolls for 3s.
+		local okP, pools = pcall(FusingUtil.BuildPools, sum)
+		if okP and not pools then badTrio[key] = true end
 		if not badTrio[key] and sum * FusingConfig.AverageMultiplier >= a.ch then
 			local cost = FusingConfig.GetCost(sum)
-			if cost <= budget then
+			if cost <= budget and cost <= d.Money then
 				fuseResult = nil
+				fuseNext = os.clock() + FUSE_GAP
 				R.Fuse:FireServer(a.id, b.id, c.id)
 				for _ = 1, 25 do
 					if fuseResult then break end
@@ -1037,6 +1160,14 @@ local function doFuse()
 		end
 	end
 	return false
+end
+
+local function doFuse()
+	if not R.Fuse or os.clock() < fuseNext then return false end
+	if not claimUnits("fuse") then return false end
+	local ok, did = pcall(fuseOnce)
+	releaseUnits("fuse")
+	return ok and did or false
 end
 
 local function doRebirth()
@@ -1139,17 +1270,77 @@ local function levelSlots()
 	end
 end
 
+-- Codes live in Codes.CodesConfig since the 2026-10-11 update (the old
+-- MonetizationConfig.Codes is gone) and RedeemCode has a 0.5s debounce.
 local function doCodes()
+	if not R.RedeemCode then return end
 	local d = data()
 	local did = 0
-	for code in pairs(MonetConfig.Codes) do
-		if not d.RedeemedCodes[code] then
+	for code in pairs(CODES) do
+		if type(code) == "string" and not d.RedeemedCodes[code] then
 			R.RedeemCode:FireServer(code)
 			did = did + 1
-			task.wait(0.35)
+			task.wait(0.6)
 		end
 	end
 	if did > 0 then STATE.codesDone = STATE.codesDone + did end
+end
+
+-- Daily/weekly quests (Playtime, Rolls, Towers, UnitsSold) pay Tickets. The
+-- server wants the period, the quest id and the period's expiresAt.
+local function doQuests()
+	if not (QuestConfig and QuestConfig.Periods and R.QuestClaim) then return end
+	local d = data()
+	for period, def in pairs(QuestConfig.Periods) do
+		local q = d.Quests and d.Quests[period]
+		if type(q) == "table" and type(q.progress) == "table" then
+			for _, quest in ipairs(def.quests or {}) do
+				local claimed = q.claimed and q.claimed[quest.id]
+				if not claimed and (tonumber(q.progress[quest.id]) or 0) >= (tonumber(quest.target) or math.huge) then
+					R.QuestClaim:FireServer(period, quest.id, q.expiresAt)
+					STATE.questsClaimed = STATE.questsClaimed + 1
+					STATE.note = "quest " .. period .. " " .. tostring(quest.id)
+					task.wait(0.3)
+				end
+			end
+		end
+	end
+end
+
+-- The Ticket shop sells real gamepasses for Tickets alone (the server removes
+-- Tickets and sets OwnedGamepasses - no Robux prompt anywhere on that path).
+local function doPasses()
+	if not (QuestConfig and QuestConfig.Shop and R.QuestBuy) then return end
+	local d = data()
+	local tickets = itemAmount("Tickets")
+	local price = {}
+	for _, item in ipairs(QuestConfig.Shop) do
+		if item.gamepass then price[item.name] = tonumber(item.tickets) end
+	end
+	for _, name in ipairs(PASS_ORDER) do
+		if price[name] and not (d.OwnedGamepasses and d.OwnedGamepasses[name]) then
+			-- Best first: save up for it rather than buying something weaker.
+			if tickets >= price[name] then
+				R.QuestBuy:FireServer(name)
+				STATE.passesBought = STATE.passesBought + 1
+				STATE.note = "gamepass " .. name .. " for " .. price[name] .. " tickets"
+			end
+			return
+		end
+	end
+end
+
+-- One rebirth point per rebirth; each is x(1 + 0.1 x points) on one buff.
+local function doStats()
+	if not (RebirthStats and RebirthStats.Get and R.AddStat) then return end
+	if not RebirthStats.Get(CONFIG.statPick) then return end
+	local d = data()
+	local left = tonumber(select(2, pcall(RebirthStats.GetRemaining, d.Rebirth, d.RebirthStats))) or 0
+	for _ = 1, math.min(left, 30) do
+		R.AddStat:FireServer(CONFIG.statPick)
+		STATE.statsAdded = STATE.statsAdded + 1
+		task.wait(0.15)                         -- AddRebirthStat debounce 0.1s
+	end
 end
 
 local function doClaims()
@@ -1159,9 +1350,24 @@ local function doClaims()
 	STATE.claims = STATE.claims + 1
 end
 
+-- The game's AutoSell is a 1-in-N chance, not a rarity: RollService sells a
+-- freshly rolled unit whose chance is below it. "Sell below Rare" therefore
+-- becomes the rarest-is-least chance of any Rare unit (~1.1k), so a mutated
+-- Common worth more than that (Gold, Diamond...) is still kept, as in sellJunk.
+local function autoSellThreshold()
+	local floor
+	for _, e in pairs(UnitConfig.entries) do
+		if type(e) == "table" and not e.limited and RARITY_SORT[e.rarity] == CONFIG.sellRarity then
+			local ch = tonumber(select(2, pcall(e.chance, {})))
+			if ch and (not floor or ch < floor) then floor = ch end
+		end
+	end
+	return floor and math.floor(floor) or 0
+end
+
 local function applyAutoSell()
 	if not R.UpdateAutoSell then return end
-	R.UpdateAutoSell:FireServer(CONFIG.autoSell and CONFIG.sellRarity or 0)
+	R.UpdateAutoSell:FireServer(CONFIG.autoSell and autoSellThreshold() or 0)
 end
 
 -- Debug/console handle: drive any single action or read state without clicking.
@@ -1177,6 +1383,9 @@ _G.__ANIMEDICE_DBG = {
 	doRebirth = doRebirth, doLevel = doLevel, doCodes = doCodes,
 	doClaims = doClaims, DICE = DICE, UPGRADE_LINES = UPGRADE_LINES,
 	invCap = invCap, bestUpgrade = bestUpgrade,
+	doQuests = doQuests, doPasses = doPasses, doStats = doStats,
+	isProtected = isProtected, heldUnit = heldUnit, rollLuck = rollLuck,
+	autoSellThreshold = autoSellThreshold, applyAutoSell = applyAutoSell,
 }
 
 --------------------------------------------------------------------- panel -----
@@ -1239,7 +1448,7 @@ diceCard:Button("Buy best dice now", function() doDice() end)
 
 local rbCard = upPage:Card("REBIRTH", 1)
 toggle(rbCard, "Auto Rebirth", "autoRebirth",
-	"wipes money only; keeps units/dice/slots, +permanent x mult", UI.theme.warn)
+	"sets money to 0 for a permanent x money and luck; keeps units, dice, slots", UI.theme.warn)
 rbCard:Stepper("Bank x cost",
 	function() return tostring(CONFIG.rebirthMult) .. "x" end,
 	function(delta) CONFIG.rebirthMult = math.clamp(CONFIG.rebirthMult + delta, 1, 20) end,
@@ -1248,6 +1457,10 @@ rbCard:Button("Rebirth now", function()
 	local prev = CONFIG.rebirthMult; CONFIG.rebirthMult = 1
 	doRebirth(); CONFIG.rebirthMult = prev
 end)
+toggle(rbCard, "Auto Rebirth Points", "autoStats",
+	"one point per rebirth, each x1.1 on the stat below")
+rbCard:Dropdown("Points into", { "Money", "Luck", "Damage", "Health", "Trait Luck", "Grade Luck" },
+	CONFIG.statPick, function(choice) CONFIG.statPick = choice end)
 
 local upCard = upPage:Card("PAD UPGRADES", 2):Accent()
 toggle(upCard, "Auto Upgrade", "autoUpgrade",
@@ -1270,6 +1483,11 @@ sellCard:Stepper("Keep best spares",
 	function() return tostring(CONFIG.keepBest) end,
 	function(delta) CONFIG.keepBest = math.clamp(CONFIG.keepBest + delta, 0, 100) end,
 	"when full, keep this many best spares and sell the rest")
+sellCard:Stepper("Keep rare pulls",
+	function() return CONFIG.keepLuckX > 0 and UI.tf("from %sx luck", CONFIG.keepLuckX) or UI.t("off") end,
+	function(delta) CONFIG.keepLuckX = math.clamp(CONFIG.keepLuckX + delta * 5, 0, 1000) end,
+	"a unit far rarer than your luck is never sold")
+sellCard:Label("units locked in the game are never sold or fused")
 local bagLabel = sellCard:Label("bag -")
 sellCard:Button("Sell junk now", function() task.spawn(function() sellJunk(true) end) end)
 
@@ -1305,8 +1523,16 @@ rrCard:Button("Reroll now", function() task.spawn(doRerolls) end)
 local towerCard = boostPage:Card("TOWER", 2):Accent()
 toggle(towerCard, "Auto Tower", "autoTower",
 	"skips the fight animation; drops boosts, gems, trait rerolls")
-towerCard:Dropdown("Tower", { "Auto (best)", "Dragon Tower", "Cursed Tower", "Pirate Tower",
-	"Hidden Leaf Tower", "Slayer Tower", "Infinity Tower" }, CONFIG.tower,
+-- Read from the game: a hardcoded list missed Shadow Tower when it shipped.
+local TOWER_CHOICES = { "Auto (best)" }
+do
+	local names = {}
+	local ok, all = pcall(TowersConfig.GetAll)
+	if ok and type(all) == "table" then for name in pairs(all) do names[#names + 1] = name end end
+	table.sort(names)
+	for _, name in ipairs(names) do TOWER_CHOICES[#TOWER_CHOICES + 1] = name end
+end
+towerCard:Dropdown("Tower", TOWER_CHOICES, CONFIG.tower,
 	function(choice) CONFIG.tower = choice end)
 toggle(towerCard, "Damage boosts on start", "towerBoosts",
 	"fires owned Damage boosts right before each run")
@@ -1315,8 +1541,9 @@ local towerLabel = towerCard:Label("tower -")
 towerCard:Button("Run tower now", function() task.spawn(towerRun) end)
 
 local fuseCard = boostPage:Card("FUSE MACHINE", 1)
-toggle(fuseCard, "Auto Fuse", "autoFuse",
-	"3 spare units -> 1 about twice as rare; climbs toward Legendary")
+toggle(fuseCard, "Auto Fuse", "autoFusion",
+	"uses up 3 spares per fusion, and each one stops all rolls on the server for 3s",
+	UI.theme.warn)
 fuseCard:Slider("Fuse budget %", 5, 90, math.floor(CONFIG.fuseShare * 100),
 	function(v) CONFIG.fuseShare = v / 100 end,
 	"share of money one fusion may cost (and at most 30s of income)")
@@ -1325,7 +1552,7 @@ fuseCard:Button("Fuse now", function() task.spawn(doFuse) end)
 
 local boostCard = boostPage:Card("BOOSTS", 2)
 toggle(boostCard, "Auto Use Boosts", "autoBoost",
-	"luck and income boosts; different kinds multiply together")
+	"luck, income and roll speed boosts; different kinds multiply")
 local luckLabel = boostCard:Label("luck -")
 
 -- REWARDS ---------------------------------------------------------------------
@@ -1338,6 +1565,13 @@ codeCard:Button("Redeem all now", function() task.spawn(doCodes) end)
 local claimCard = rewPage:Card("CLAIMS", 1)
 toggle(claimCard, "Auto Claim Rewards", "autoClaim", "offline / daily / group")
 claimCard:Button("Claim now", function() doClaims() end)
+
+local questCard = rewPage:Card("QUESTS", 2):Accent()
+toggle(questCard, "Auto Claim Quests", "autoQuests", "daily and weekly quests pay Tickets")
+toggle(questCard, "Gamepasses for Tickets", "autoPasses",
+	"More Cash, Luck, Roll Speed... bought with Tickets, never Robux")
+local questLabel = questCard:Label("tickets -")
+questCard:Button("Claim quests now", function() task.spawn(function() doQuests(); doPasses() end) end)
 
 -- STATUS ----------------------------------------------------------------------
 local statPage = win:Page("STATUS", UI.icon.chart)
@@ -1391,7 +1625,7 @@ end)
 -- Fuse machine: one balanced trio per pass, off while saving for a luck step.
 task.spawn(function()
 	while _G.__ANIMEDICE == generation do
-		if CONFIG.auto and CONFIG.autoFuse and not savingForLuck() then pcall(doFuse) end
+		if CONFIG.auto and CONFIG.autoFusion and not savingForLuck() then pcall(doFuse) end
 		task.wait(4)
 	end
 end)
@@ -1462,12 +1696,15 @@ task.spawn(function()
 	end
 end)
 
--- Codes once, then claims on a slow beat.
+-- Codes once, then claims, quests, ticket gamepasses and rebirth points.
 task.spawn(function()
 	while _G.__ANIMEDICE == generation do
 		if CONFIG.auto and CONFIG.autoCodes then pcall(doCodes) end
 		if CONFIG.auto and CONFIG.autoClaim then pcall(doClaims) end
-		task.wait(60)
+		if CONFIG.auto and CONFIG.autoQuests then pcall(doQuests) end
+		if CONFIG.auto and CONFIG.autoPasses then pcall(doPasses) end
+		if CONFIG.auto and CONFIG.autoStats then pcall(doStats) end
+		task.wait(30)
 	end
 end)
 
@@ -1480,21 +1717,21 @@ task.spawn(function()
 		STATE.rolls = d.Rolls
 		STATE.rebirth = d.Rebirth
 		STATE.dice = d.Dice or "-"
-		STATE.slotsUsed = count(d.Slots)
+		-- Filled slots and owned UNITS - the old counts took empty slot entries and
+		-- every item (Gems, boosts, spins) and read as a full plot / full bag.
+		local filled, units = 0, 0
+		for _, slot in pairs(d.Slots) do if slot.unitId then filled = filled + 1 end end
+		for _, u in pairs(d.Inventory) do if UnitConfig.entries[u.name] then units = units + 1 end end
+		STATE.slotsUsed = filled
 		STATE.slotsMax = unlockedSlots()
 		local _, bestName = ownedLuck()
 		local pick = bestAffordableDice()
 		STATE.nextDice = pick and pick.key or ("best: " .. bestName)
-		STATE.invCount = count(d.Inventory)
+		STATE.invCount = units
 		STATE.invCap = invCap()
 		local up = bestUpgrade()
 		STATE.nextUpgrade = up and (up.name .. " " .. fmt(up.price)) or "-"
-		-- Effective roll luck = buff luck x equipped die. The roll only draws units
-		-- whose 1-in-N chance is >= this, so it is the number that decides rarity.
-		local buffLuck = tonumber(select(2, pcall(BuffController.GetBuff, "Luck"))) or 1
-		local dieLuck = 1
-		for _, die in ipairs(DICE) do if die.key == d.Dice then dieLuck = die.luck end end
-		STATE.luck = buffLuck * dieLuck
+		STATE.luck = rollLuck()
 
 		local sum = 0
 		for _, slot in pairs(d.Slots) do sum = sum + (slot.balance or 0) end
@@ -1531,6 +1768,8 @@ task.spawn(function()
 		luckLabel:set(string.format("roll luck %s   boosts used %d", fmt(STATE.luck), STATE.boostsUsed))
 		fuseLabel:set(string.format("fused %d   best 1 in %s   last %s",
 			STATE.fused, fmt(STATE.fuseBestChance), STATE.fuseLast))
+		questLabel:set(string.format("tickets %d   quests %d   passes %d   points %d",
+			itemAmount("Tickets"), STATE.questsClaimed, STATE.passesBought, STATE.statsAdded))
 
 		local cost, mult = nextRebirthCost()
 		ladderOut:set({

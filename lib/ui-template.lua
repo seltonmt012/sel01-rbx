@@ -98,7 +98,10 @@ local UI = {}
 -- 3.15: the report card's category, confirmation popup and validation strings.
 -- 3.16: phones scale by width (~0.8) and shorten the window instead of shrinking
 --       everything to 0.54 - body text went from ~6pt to ~10pt.
-UI.VERSION = "3.16"
+-- 3.17: Anime Dice's quests / rebirth points / unit-safety strings, plus the
+--       Cold War and Loot To Forge strings that shipped under 3.16 and so never
+--       reached a cached client.
+UI.VERSION = "3.17"
 UI.BRAND = "SELUX"
 UI.DISCORD = "discord.gg/ARdpzFuKMm"
 UI.REPO = "seltonmt012/sel01-rbx"
