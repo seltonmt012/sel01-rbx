@@ -50,9 +50,10 @@
     unlocked entry ("Weapon-K_23", "Hat-LHat_14", "Ore-Ore_41"), then
     TryClaimLevelRewardRF() per rank. Measured: 22 entries, rank 6 -> 12.
 
-  * THE FROZEN TOWER (rebirth 2+) RUNS ALL 30 ROUNDS ON ONE TICKET. Its enemies
-    die through the same EnemyHitBE; CompleteRoundRF credits each round directly
-    (no pickup). Measured: 129s, 23-26 enchant stones, plus coins and ore.
+  * THE FROZEN TOWER (rebirth 2+) RUNS ALL ROUNDS ON ONE TICKET - 50 since the
+    Oct 2026 update, which also raised the late HP past 1e31, so every hit is
+    sized to the enemy's own HPValue. Its enemies die through the same
+    EnemyHitBE; CompleteRoundRF credits each round directly (no pickup).
 
   * ENCHANT STONES ARE COMBAT EFFECTS (burn, freeze, chain, poison): EnchantRE
     (gear, stone, slot), 5,000 coins each. They help fights played by hand; the
@@ -106,6 +107,10 @@ local CONFIG = {
 	tower = true,        -- spend tower tickets: all 30 rounds per ticket
 	towerKeep = 0,       -- tickets never spent
 	dailyTicket = true,  -- the free daily tower ticket
+	online = true,       -- the 12 online-time gifts: 4 tower tickets, coins, buffs, a race roll
+	enhance = true,      -- the Enhance stand (rebirth 6+): raise the worn gear's level
+	enhanceMax = 5,      -- up to +5 a failure never costs a level; from +6 it lowers it
+	enhanceQuests = true, -- the Enhance event quests pay enhance stones
 	enchant = true,      -- fill empty enchant slots on the worn gear
 	element = "Fire",    -- preferred stone element; the tier always comes first
 	race = true,         -- unlock free race slots, spend race rolls, wear the best race
@@ -124,6 +129,8 @@ local STATE = {
 	tickets = 0, towerRuns = 0, towerRound = 0, stones = 0, enchants = 0, lastTower = "-",
 	forgeFlip = false,
 	race = "-", raceLevel = 0, raceRolls = 0, rolled = 0, lastRoll = "-",
+	enhances = 0, enhanceFails = 0, lastEnhance = "-", stones1 = 0, stones2 = 0,
+	enhanceLv = { Weapon = 0, Hat = 0, Armor = 0 },
 	busy = false,
 }
 
@@ -158,10 +165,28 @@ local Remote = wfc(ReplicatedStorage, "Remote")
 local Config = wfc(ReplicatedStorage, "Config")
 local LocalData = wfc(ReplicatedStorage, "LocalData")
 
+-- The game's own CommunicationUtils.Get appends "_Server" to the folder for
+-- RemoteEvents and RemoteFunctions; only the Bindables stay in Remote.<Folder>.
+-- An update (Oct 2026) moved them there, and the old Remote.Profile.GetTotalDataRF
+-- path then waited 10s per remote at load and came back nil - no server data, so
+-- no rebirth, forge, tower or index. Looked up the game's way first, old layout
+-- second, never by waiting on a folder that may not hold it.
+local function remote(folder, name)
+	for _ = 1, 20 do
+		for _, f in ipairs({ folder .. "_Server", folder }) do
+			local dir = Remote and Remote:FindFirstChild(f)
+			local r = dir and dir:FindFirstChild(name)
+			if r then return r end
+		end
+		task.wait(0.5)
+	end
+	return nil
+end
+
 local R = {
-	total = wfc(wfc(Remote, "Profile"), "GetTotalDataRF"),
-	forge = wfc(wfc(Remote, "Forge"), "ForgeRF"),
-	rebirth = wfc(wfc(Remote, "Rebirth"), "TryRebirthRE"),
+	total = remote("Profile", "GetTotalDataRF"),
+	forge = remote("Forge", "ForgeRF"),
+	rebirth = remote("Rebirth", "TryRebirthRE"),
 }
 
 local Comm = safeRequire(wfc(wfc(ReplicatedStorage, "Utils"), "CommunicationUtils"))
@@ -175,11 +200,20 @@ local ArmorHelper = safeRequire(wfc(wfc(Config, "Armor"), "Helper"))
 local DungeonData = safeRequire(wfc(LocalData, "DungeonData"))
 local ClassData = safeRequire(wfc(LocalData, "ClassData"))
 local ClassHelper = safeRequire(wfc(wfc(Config, "Class"), "Helper"))
+local Utils = ReplicatedStorage:FindFirstChild("Utils")
+local BalanceUtils = safeRequire(Utils and Utils:FindFirstChild("BalanceUtils"))
+local EnhantCfg = Config and Config:FindFirstChild("Enhant")
+local EnhantHelper = safeRequire(EnhantCfg and EnhantCfg:FindFirstChild("Helper"))
+local EnhantEventHelper = safeRequire(EnhantCfg and EnhantCfg:FindFirstChild("EventHelper"))
+local EnhantEventData = safeRequire(LocalData and LocalData:FindFirstChild("EnhantEventData"))
+local OnlineData = safeRequire(LocalData and LocalData:FindFirstChild("OnlineData"))
+local OnlineCfg = Config and Config:FindFirstChild("Online")
+local OnlineHelper = safeRequire(OnlineCfg and OnlineCfg:FindFirstChild("Helper"))
+local OnlineReward = safeRequire(OnlineCfg and OnlineCfg:FindFirstChild("Reward"))
 
-local R_index = wfc(Remote, "Index")
-R.indexExp = wfc(R_index, "TryClaimIndexExpRF")
-R.indexLevel = wfc(R_index, "TryClaimLevelRewardRF")
-local R_dungeonInto = wfc(wfc(Remote, "Dungeon"), "TryIntoDungeonRF")
+R.indexExp = remote("Index", "TryClaimIndexExpRF")
+R.indexLevel = remote("Index", "TryClaimLevelRewardRF")
+local R_dungeonInto = remote("Dungeon", "TryIntoDungeonRF")
 
 local hitBE, exitBE
 pcall(function()
@@ -283,17 +317,38 @@ local function bestNormal(have, slot)
 	return best
 end
 
+-- The Enhance level (item.Level) multiplies the value by 1 + Boost(level):
+-- +5 = x1.25, +10 = x2. Ignoring it would trade a worn +5 weapon for a plain one
+-- with a slightly higher base, and then sell the +5.
+local function enhanceBoost(it)
+	local ok, b = pcall(function() return EnhantHelper.GetBoost(tonumber(it.Level) or 0) end)
+	return (ok and tonumber(b)) or 0
+end
+
 local function gearValue(have, it)
 	local slot = it.Type
 	if not SLOT_STAT[slot] then return 0 end
-	local v = baseValue(slot, it.ID)
-	if isPercent(slot, it.ID) then
-		local cap
-		pcall(function()
-			cap = slot == "Weapon" and WeaponHelper.GetMaxTrain(it.ID) or ArmorHelper.GetMaxAttrNum(it.ID)
+	-- the game's own numbers first (BalanceUtils.GetWeaponTrainValue /
+	-- GetArmorValue), so an update to the formula cannot leave this behind
+	local v
+	if BalanceUtils then
+		local ok, r = pcall(function()
+			if slot == "Weapon" then return BalanceUtils.GetWeaponTrainValue(plr, it, { have = have }) end
+			return BalanceUtils.GetArmorValue(plr, it, { have = have })
 		end)
-		v = v * bestNormal(have, slot)
-		if tonumber(cap) then v = math.min(v, tonumber(cap)) end
+		v = ok and tonumber(r) or nil
+	end
+	if not v then
+		v = baseValue(slot, it.ID)
+		if isPercent(slot, it.ID) then
+			local cap
+			pcall(function()
+				cap = slot == "Weapon" and WeaponHelper.GetMaxTrain(it.ID) or ArmorHelper.GetMaxAttrNum(it.ID)
+			end)
+			v = v * bestNormal(have, slot)
+			if tonumber(cap) then v = math.min(v, tonumber(cap)) end
+		end
+		v = v * (1 + enhanceBoost(it))
 	end
 	-- bonus affixes, keyed by stat name
 	if slot ~= "Weapon" and type(it.Affix) == "table" then
@@ -432,9 +487,27 @@ end
 -- stage run: enter, kill through the game's hit event, collect, RETURN
 --------------------------------------------------------------------------------
 
+-- "Deepest" is the deepest stage the map HAS, not the deepest one passed: any
+-- stage can be entered and the server counts it (measured on a fresh account,
+-- StagePass 2 -> 27 in one run, Ore_40-46). Reading it as the passed one pinned
+-- every account that was not already at 27 to its old stage forever.
+local function deepestStage()
+	local wm = Workspace:FindFirstChild("WorldModel")
+	local sm = wm and wm:FindFirstChild("StageMap")
+	local ep = sm and sm:FindFirstChild("EnemyPoint")
+	local mx = 0
+	if ep then
+		for _, c in ipairs(ep:GetChildren()) do
+			local k = tonumber(c.Name:match("^Stage_(%d+)$"))
+			if k and k > mx then mx = k end
+		end
+	end
+	return mx > 0 and mx or 27
+end
+
 local function targetStage()
 	if CONFIG.stage and CONFIG.stage > 0 then return math.floor(CONFIG.stage) end
-	return math.max(1, math.min(STATE.stagePass, 27))
+	return deepestStage()
 end
 
 local function stagePos(n)
@@ -460,6 +533,17 @@ local function enemiesNear(z)
 		end
 	end
 	return list
+end
+
+-- One hit per enemy, sized to the HP it has left. HPValue is the game's own HP
+-- (CTRL.HPCTRL.DamageOnce subtracts the damage from it). The Oct 2026 tower goes
+-- to round 50 with MobHP 1.25e31 and BossHP 7.75e31, so the old flat 1e30 took
+-- up to 78 hits a boss - "the tower is not one hit any more". Measured: a Boss_2
+-- at 3.85e31 died to one hit of twice its HP.
+local function kill(m)
+	local hv = m:FindFirstChild("HPValue")
+	local dmg = math.max(1e30, ((hv and tonumber(hv.Value)) or 0) * 2)
+	pcall(function() hitBE:Fire(m.Name, dmg, { Damage = dmg }) end)
 end
 
 local function oreModels()
@@ -492,7 +576,7 @@ local function stageRun()
 	local killed = 0
 	for _ = 1, 3 do
 		for _, m in ipairs(enemiesNear(pos.Z)) do
-			pcall(function() hitBE:Fire(m.Name, 1e30, { Damage = 1e30 }) end)
+			kill(m)
 			killed = killed + 1
 		end
 		task.wait(0.6)
@@ -620,17 +704,20 @@ end
 -- EnchanceNum is the number of enchant SLOTS and EnchanceList holds one table per
 -- slot, empty until something is put in it. Reading either as "enchanted" kept
 -- every forged weapon (they all come with slots) - only a filled slot counts.
+-- An Enhance level (item.Level) is the same kind of investment and is kept the
+-- same way.
 local function enchanted(it)
 	if type(it.EnchanceList) == "table" then
 		for _, slot in pairs(it.EnchanceList) do
 			if type(slot) ~= "table" or next(slot) ~= nil then return true end
 		end
 	end
+	if (tonumber(it.Level) or 0) > 0 then return true end
 	return it.Lock == true or it.Locked == true
 end
 
--- Gear this script enchanted itself may be sold once outclassed; anything the
--- player enchanted by hand is always kept.
+-- Gear this script enchanted or enhanced itself may be sold once outclassed;
+-- anything the player enchanted or enhanced by hand is always kept.
 _G.__LTF_ENCHANTED = _G.__LTF_ENCHANTED or {}
 local SCRIPT_ENCH = _G.__LTF_ENCHANTED
 
@@ -789,27 +876,59 @@ local function dailyTicketPass()
 	end
 end
 
+-- The online gifts (the clock button on the HUD): twelve rewards unlocked by
+-- minutes online - 60s .. 2h. Three of them are tower tickets (4 in total).
+-- OnlineData.TryClaim(name) is the game's own button handler; the server marks
+-- Online.Reward[name] and refuses an early one. The panel's timetable (Helper)
+-- and the reward table (Reward.Time) disagree for some steps, so the later of
+-- the two is waited for.
+local function onlinePass()
+	if not (OnlineData and OnlineHelper) then return end
+	local d = OnlineData.GetData()
+	local times = OnlineHelper.GetOnlineTimeConfig()
+	if type(d) ~= "table" or type(times) ~= "table" then return end
+	local now = tonumber(OnlineData.GetOnlineTimes()) or 0
+	local claimed = type(d.Reward) == "table" and d.Reward or {}
+	local n = 0
+	for name, need in pairs(times) do
+		local r = type(OnlineReward) == "table" and OnlineReward[name]
+		need = math.max(tonumber(need) or 0, (r and tonumber(r.Time)) or 0)
+		if not claimed[name] and now >= need then
+			pcall(function() OnlineData.TryClaim(name) end)
+			n = n + 1
+			task.wait(0.4)
+		end
+	end
+	if n > 0 then note(string.format("online gifts: claimed %d", n)) end
+end
+
+-- The Oct 2026 update dropped the "Dungeoning" attribute: the server now sets
+-- IntoFight = "Dungeon" plus CurrentRound / RoundFinished. Waiting on the old
+-- flag read every entry as refused while the player stood in round 1.
+local function inTower()
+	return plr:GetAttribute("IntoFight") == "Dungeon" or plr:GetAttribute("Dungeoning") == true
+end
+
 local function towerRun()
 	refresh(true)
 	if STATE.rebirth < 2 or STATE.tickets <= CONFIG.towerKeep or dead() then return end
 	unpin()
 	local stones0 = STATE.stones
 	STATE.phase = "tower"
-	local ok = invoke(R_dungeonInto, 1)
+	local ok = inTower() or invoke(R_dungeonInto, 1)
 	local t = 0
-	while not plr:GetAttribute("Dungeoning") and t < 6 do task.wait(0.2); t = t + 0.2 end
-	if not plr:GetAttribute("Dungeoning") then
+	while not inTower() and t < 6 do task.wait(0.2); t = t + 0.2 end
+	if not inTower() then
 		note("tower refused (" .. tostring(ok) .. ")")
 		return
 	end
 	local t0 = os.clock()
-	while plr:GetAttribute("Dungeoning") and os.clock() - t0 < 200 and GEN == _G.__LOOTTOFORGE do
+	-- 50 rounds since the Oct 2026 update (was 30), ~3.5s each with one-hit kills
+	while inTower() and os.clock() - t0 < 360 and GEN == _G.__LOOTTOFORGE do
 		local ef = Workspace:FindFirstChild("EnemyFolder")
 		if ef then
 			for _, m in ipairs(ef:GetChildren()) do
-				if not m:GetAttribute("Dead") then
-					pcall(function() hitBE:Fire(m.Name, 1e30, { Damage = 1e30 }) end)
-				end
+				if not m:GetAttribute("Dead") then kill(m) end
 			end
 		end
 		task.wait(0.5)
@@ -891,7 +1010,99 @@ end
 -- LuckOnceRE(slot) with 0 rolls left is where the game opens a Robux prompt, so
 -- the roll count is checked before every roll.
 
-local RACE_WEIGHT = { Train = 100, Luck = 40, Damage = 6, Crit = 5, SkillDamage = 3,
+--------------------------------------------------------------------------------
+-- enhance (the Enhance stand, rebirth 6+): raise the worn gear's level
+--------------------------------------------------------------------------------
+-- BackpackData.TryEnhantEquipment(uuid, {UseProtect}) = EnhantEquipmentRF. Each
+-- level costs coins + EnhantStone_1 (+ EnhantStone_2 from +12) and multiplies the
+-- piece by 1 + Boost: +5 = x1.25, +10 = x2, +20 = x4.2. Success falls from 100%
+-- (+1, +2) to 65% (+5), 40% (+6), 20% (+10). From +6 a failure LOWERS the level
+-- (Helper.GetFailLevel() = 6), so the default cap is +5, where a failure only
+-- costs the stones. Protection scrolls are Robux and never used.
+-- Measured: K_25 +0 -> +1, Train 400M -> 420M (BalanceUtils), quest Enhant 0 -> 1.
+
+local function materialCount(have, id)
+	local n = 0
+	for _, it in pairs(have) do
+		if it.ID == id then n = n + (tonumber(it.Number) or 1) end
+	end
+	return n
+end
+
+local function enhancePass()
+	if not (EnhantHelper and BackpackData) or STATE.rebirth < 6 then return end
+	local cap = math.floor(tonumber(CONFIG.enhanceMax) or 0)
+	for _ = 1, 12 do
+		local d = data()
+		if not d then return end
+		local have = d.Backpack.have or {}
+		local eq = d.Backpack.equiped or {}
+		STATE.stones1, STATE.stones2 = materialCount(have, "EnhantStone_1"), materialCount(have, "EnhantStone_2")
+		-- the lowest-levelled worn piece; the weapon wins a tie
+		local target, lv, slotName
+		for _, slot in ipairs({ "Weapon", "Hat", "Armor" }) do
+			local uid = eq[slot]
+			local it = uid and have[uid]
+			if it then
+				local l = tonumber(it.Level) or 0
+				STATE.enhanceLv[slot] = l
+				local maxed = false
+				pcall(function() maxed = EnhantHelper.IsMax(l) end)
+				if l < cap and not maxed and (not target or l < lv) then target, lv, slotName = uid, l, slot end
+			end
+		end
+		if not target then return end
+
+		local nxt = lv + 1
+		local coin = tonumber(EnhantHelper.GetNeedCoin(nxt)) or math.huge
+		local s1 = tonumber(EnhantHelper.GetNeedEnhantStone_1(nxt)) or 0
+		local s2 = tonumber(EnhantHelper.GetNeedEnhantStone_2(nxt)) or 0
+		refresh(false)
+		if STATE.coin - coin < CONFIG.coinKeep or STATE.stones1 < s1 or STATE.stones2 < s2 then return end
+
+		STATE.phase = "enhance"
+		pcall(function() BackpackData.TryEnhantEquipment(target, {}) end)
+		task.wait(1)
+		local d2 = data()
+		local it2 = d2 and d2.Backpack.have[target]
+		if not it2 then return end
+		local lv2 = tonumber(it2.Level) or 0
+		local spent = STATE.stones1 - materialCount(d2.Backpack.have, "EnhantStone_1")
+		if lv2 > lv then
+			SCRIPT_ENCH[target] = true
+			STATE.enhances = STATE.enhances + 1
+			STATE.lastEnhance = string.format("%s %s +%d", slotName, tostring(it2.ID), lv2)
+		elseif spent > 0 then
+			STATE.enhanceFails = STATE.enhanceFails + 1
+			STATE.lastEnhance = string.format("%s %s +%d failed (%d%%)", slotName, tostring(it2.ID), nxt,
+				math.floor((tonumber(EnhantHelper.GetPercent(nxt)) or 0) * 100 + 0.5))
+		else
+			note("enhance refused on " .. tostring(it2.ID))
+			return
+		end
+		note("enhance " .. STATE.lastEnhance)
+	end
+end
+
+-- The Enhance event board: 5..100 enhances, 10..100 forged weapons and armor,
+-- paid in enhance stones. EnhantEventData.TryClaimQuest(index) is its button.
+local function enhanceQuestPass()
+	if not (EnhantEventData and EnhantEventHelper) then return end
+	local quests = EnhantEventHelper.GetQuestConfig()
+	if type(quests) ~= "table" or type(EnhantEventData.GetData()) ~= "table" then return end
+	local n = 0
+	for idx, q in pairs(quests) do
+		local done = EnhantEventData.CheckIsClaimed(idx)
+		if not done and EnhantEventData.GetRecordNum(q.NeedType) >= (tonumber(q.NeedNumber) or math.huge) then
+			pcall(function() EnhantEventData.TryClaimQuest(idx) end)
+			n = n + 1
+			task.wait(0.4)
+		end
+	end
+	if n > 0 then note(string.format("enhance quests: claimed %d", n)) end
+end
+
+local RACE_WEIGHT ={ Train = 100, Luck = 40, Damage = 6, Crit = 5, SkillDamage = 3,
 	Defence = 2, SkillCD = 1, WalkSpeed = 1 }
 
 local function raceScore(classId, level)
@@ -1032,6 +1243,8 @@ _G.__LOOTTOFORGE_DBG = {
 	equipPass = equipPass, sellPass = sellPass, upgradePass = upgradePass,
 	rebirthPass = rebirthPass, unstuck = unstuck, pin = pin, unpin = unpin,
 	indexPass = indexPass, towerRun = towerRun, dailyTicketPass = dailyTicketPass,
+	onlinePass = onlinePass, deepestStage = deepestStage,
+	enhancePass = enhancePass, enhanceQuestPass = enhanceQuestPass,
 	enchantPass = enchantPass, gearValue = gearValue, bestNormal = bestNormal,
 	racePass = racePass, raceScore = raceScore, closeRaceUI = closeRaceUI,
 }
@@ -1064,11 +1277,14 @@ task.spawn(function()
 			if CONFIG.index then pcall(indexPass) end
 			if CONFIG.equip then pcall(equipPass) end
 			if CONFIG.enchant then pcall(enchantPass) end
+			if CONFIG.enhance then pcall(enhancePass) end
+			if CONFIG.enhanceQuests then pcall(enhanceQuestPass) end
 			if CONFIG.sell then pcall(sellPass) end
 			if CONFIG.upgrade then pcall(upgradePass) end
 			if CONFIG.rebirth then pcall(rebirthPass) end
 			if CONFIG.race then pcall(racePass) end
 			if CONFIG.dailyTicket then pcall(dailyTicketPass) end
+			if CONFIG.online then pcall(onlinePass) end
 			if CONFIG.tower then
 				local ok, err = pcall(towerRun)
 				if not ok then note("tower failed: " .. tostring(err)) end
@@ -1162,16 +1378,18 @@ manual:Button("Forge now", function() task.spawn(function() pcall(forgePass); pc
 manual:Button("Unstuck", function() unstuck() end, UI.theme.bad)
 manual:Toggle("Anti-AFK", CONFIG.antiAfk, function(v) CONFIG.antiAfk = v end)
 
-local out = farm:Card("STATUS", 0):Readout(20)
+local out = farm:Card("STATUS", 0):Readout(23)
 
 local towerPage = win:Page("TOWER", UI.icon.flame)
 
 local towerCard = towerPage:Card("TOWER", 1):Accent()
 towerCard:Toggle("Run the tower", CONFIG.tower, function(v) CONFIG.tower = v end,
-	"One ticket runs all 30 rounds of the Frozen Tower (open from rebirth 2). Measured: 129 seconds, 26 enchant stones, plus coins and ore.")
+	"One ticket runs all 50 rounds of the Frozen Tower (open from rebirth 2), every enemy in one hit. Plus enchant stones, coins and ore up to Ore_48.")
 towerCard:Slider("Tickets to keep", 0, 50, CONFIG.towerKeep, function(v) CONFIG.towerKeep = v end)
 towerCard:Toggle("Daily ticket", CONFIG.dailyTicket, function(v) CONFIG.dailyTicket = v end,
 	"Claims the free tower ticket once a day.")
+towerCard:Toggle("Online gifts", CONFIG.online, function(v) CONFIG.online = v end,
+	"Claims the 12 gifts for time spent online - 4 tower tickets, coins, power, Luck and Train buffs and a race roll.")
 towerCard:Button("Run tower now", function() task.spawn(function() pcall(towerRun) end) end)
 
 local indexCard = towerPage:Card("INDEX", 2):Accent()
@@ -1185,6 +1403,15 @@ enchCard:Toggle("Enchant worn gear", CONFIG.enchant, function(v) CONFIG.enchant 
 enchCard:Dropdown("Preferred element", { "Fire", "Ice", "Thunder", "Poison" }, CONFIG.element,
 	function(v) CONFIG.element = v end)
 enchCard:Button("Enchant now", function() task.spawn(function() pcall(enchantPass) end) end)
+
+local enhCard2 = towerPage:Card("ENHANCE", 0):Accent()
+enhCard2:Toggle("Enhance worn gear", CONFIG.enhance, function(v) CONFIG.enhance = v end,
+	"The Enhance stand (rebirth 6+): raises the worn weapon, hat and armor with coins and enhance stones. +5 = x1.25, +10 = x2. Protection scrolls are never used.")
+enhCard2:Slider("Enhance up to", 0, 20, CONFIG.enhanceMax, function(v) CONFIG.enhanceMax = v end)
+enhCard2:Label("Up to +5 a failure only costs the stones. From +6 a failure lowers the level by one.")
+enhCard2:Toggle("Enhance quests", CONFIG.enhanceQuests, function(v) CONFIG.enhanceQuests = v end,
+	"Claims the Enhance event board (enhance and forge counts) - it pays enhance stones.")
+enhCard2:Button("Enhance now", function() task.spawn(function() pcall(enhancePass); pcall(enhanceQuestPass) end) end)
 
 local raceCard = towerPage:Card("RACE", 0):Accent()
 raceCard:Toggle("Races", CONFIG.race, function(v) CONFIG.race = v end,
@@ -1208,12 +1435,16 @@ task.spawn(function()
 				string.format("  upgrades   bag L%d  train L%d  luck L%d", STATE.upg.OrePack, STATE.upg.Train, STATE.upg.Luck),
 				string.format("  index      level %d   tower best round %d", STATE.indexLevel, STATE.towerRound),
 				string.format("  tickets    %d   stones %d", STATE.tickets, STATE.stones),
+				string.format("  enhance    weapon +%d  hat +%d  armor +%d   enh stones %d / %d",
+					STATE.enhanceLv.Weapon, STATE.enhanceLv.Hat, STATE.enhanceLv.Armor, STATE.stones1, STATE.stones2),
 				string.format("  race       %s L%d   rolls %d   last %s", STATE.race, STATE.raceLevel, STATE.raceRolls, STATE.lastRoll),
 				"SESSION",
 				string.format("  runs %d  ore %d  forged %d  sold %d (+%s)  upgrades %d  rebirths %d",
 					STATE.runs, STATE.oreGot, STATE.forged, STATE.sold, short(STATE.coinsSold), STATE.upgrades, STATE.rebirths),
-				string.format("  tower %d  index +%d/%d ranks  enchants %d",
-					STATE.towerRuns, STATE.indexClaimed, STATE.indexRanks, STATE.enchants),
+				string.format("  tower %d  index +%d/%d ranks  enchants %d  enhances %d (%d failed)",
+					STATE.towerRuns, STATE.indexClaimed, STATE.indexRanks, STATE.enchants,
+					STATE.enhances, STATE.enhanceFails),
+				"  last enhance " .. STATE.lastEnhance,
 				"  last run   " .. STATE.lastRun,
 				"  last forge " .. STATE.lastForge,
 				"  last tower " .. STATE.lastTower,

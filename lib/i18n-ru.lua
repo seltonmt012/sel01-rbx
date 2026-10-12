@@ -8,7 +8,7 @@
 -- they are - they keep passing "Auto rebirth" and only this file decides what
 -- the player reads.
 --
--- 2428 entries.
+-- 2438 entries.
 
 return {
 	["$%s   %s/s   slots %d/%d   R%d   endurance %s"] = "%s$   %s/с   слоты %d/%d   R%d   выносливость %s",
@@ -402,6 +402,8 @@ return {
 	["Claim the deepest stage now"] = "Забрать самую глубокую стадию сейчас",
 	["Claim win pads"] = "Забирать плиты побед",
 	["ClaimEarnings per slot, plain remote, no walking"] = "ClaimEarnings на слот, чистый remote, без ходьбы",
+	["Claims the 12 gifts for time spent online - 4 tower tickets, coins, power, Luck and Train buffs and a race roll."] = "Забирает 12 подарков за время онлайн - 4 билета в башню, монеты, силу, бафы удачи и тренировки и бросок расы.",
+	["Claims the Enhance event board (enhance and forge counts) - it pays enhance stones."] = "Забирает награды доски улучшения (счётчики улучшений и ковки) - она даёт камни улучшения.",
 	["Claims the free tower ticket once a day."] = "Забирает бесплатный билет в башню раз в день.",
 	["Class"] = "Класс",
 	["Clean"] = "Уборка",
@@ -527,6 +529,7 @@ return {
 	["EINSTELLUNGEN"] = "НАСТРОЙКИ",
 	["ENCHANT"] = "ЗАЧАРОВАНИЕ",
 	["ENGINE"] = "ДВИЖОК",
+	["ENHANCE"] = "УЛУЧШЕНИЕ",
 	["ESP enabled"] = "ESP включён",
 	["ESP off"] = "ESP выключен",
 	["ESP on"] = "ESP включён",
@@ -561,6 +564,10 @@ return {
 	["Enemy"] = "Враг",
 	["Enemy visible"] = "Враг виден",
 	["Engines"] = "Двигатели",
+	["Enhance now"] = "Улучшить сейчас",
+	["Enhance quests"] = "Задания улучшения",
+	["Enhance up to"] = "Улучшать до",
+	["Enhance worn gear"] = "Улучшать надетое снаряжение",
 	["Enter run"] = "Войти в забег",
 	["Enters the stage, the enemies die, the ore is collected and brought home. Stage 27 dropped Ore_41-46, stage 5 only Ore_7-12."] = "Входит на этап, враги погибают, руда собирается и доставляется домой. Этап 27 дал Ore_41-46, этап 5 только Ore_7-12.",
 	["Entries per call"] = "Записей на вызов",
@@ -1000,7 +1007,8 @@ return {
 	["One call per node instead of one swing at a time"] = "Один вызов на объект вместо удара за ударом",
 	["One press turns aim, trigger, auto fire and recoil control off. "] = "Одно нажатие выключает прицел, триггер, автоогонь и контроль отдачи.",
 	["One sweep: claim deep-zone trees, take the treasure they drop, sell it, then spend the lot on the chopper, the axe ladder, every upgrade and the pets, and rebirth as far as the level carries."] = "Один проход: заявить деревья глубоких зон, забрать сокровища, продать, вложить всё в чоппер, лестницу топоров, улучшения и питомцев и переродиться настолько, насколько хватит уровня.",
-	["One ticket runs all 30 rounds of the Frozen Tower (open from rebirth 2). Measured: 129 seconds, 26 enchant stones, plus coins and ore."] = "Один билет проходит все 30 раундов Frozen Tower (открыта с перерождения 2). Замерено: 129 секунд, 26 камней зачарования, плюс монеты и руда.",
+	["One ticket runs all 50 rounds of the Frozen Tower (open from rebirth 2), every enemy in one hit. Plus enchant stones, coins and ore up to Ore_48."] = "Один билет проходит все 50 раундов Frozen Tower (открыта с перерождения 2), каждый враг с одного удара. Плюс камни зачарования, монеты и руда до Ore_48.",
+	["Online gifts"] = "Онлайн-подарки",
 	["Only above x1.3 - the pad ticks 2/s and blocks manual slashes"] = "Только выше x1.3 - плита тикает 2/с и блокирует свои удары",
 	["Only airborne"] = "Только в воздухе",
 	["Only grounded"] = "Только на земле",
@@ -1411,6 +1419,7 @@ return {
 	["That is a settings code. Share it in #configs on the Discord, not here."] = "Это код настроек. Делитесь им в #configs в Discord, не здесь.",
 	["That is mostly numbers. Describe the problem in words - no usernames or ids."] = "Здесь почти одни цифры. Опишите проблему словами - без ников и ID.",
 	["The ESP stays - a drawing has never needed panicking away."] = "ESP остаётся - рисунок ещё никогда не приходилось убирать в панике.",
+	["The Enhance stand (rebirth 6+): raises the worn weapon, hat and armor with coins and enhance stones. +5 = x1.25, +10 = x2. Protection scrolls are never used."] = "Стойка улучшения (с перерождения 6): улучшает надетое оружие, шлем и броню за монеты и камни улучшения. +5 = x1,25, +10 = x2. Свитки защиты не используются.",
 	["The FINISH sweep then rushes rebirths instead of taking a single one."] = "Тогда проход FINISH рашит перерождения вместо одного.",
 	["The chest is emptied once fewer than this many are left"] = "Сундук опустошается, когда свободных мест меньше этого числа",
 	["The damage that kills a boss comes from your placed units, so unit quality is the only real lever."] = "Урон, убивающий босса, идёт от размещённых юнитов, поэтому их качество - единственный реальный рычаг.",
@@ -1501,6 +1510,7 @@ return {
 	["Unlocks the free race slots (rebirth 4, sign-in day 7), spends race rolls on the WORST slot and wears the race with the best Train and Luck. Rolls are never bought: with none left the game would open a Robux prompt."] = "Открывает бесплатные слоты рас (перерождение 4, 7-й день входа), тратит броски на ХУДШИЙ слот и надевает расу с лучшими Train и удачей. Броски никогда не покупаются: без бросков игра открыла бы покупку за Robux.",
 	["Unstuck"] = "Отлипнуть",
 	["Unstuck movement + camera"] = "Отлипнуть: движение и камера",
+	["Up to +5 a failure only costs the stones. From +6 a failure lowers the level by one."] = "До +5 неудача стоит только камней. С +6 неудача понижает уровень на один.",
 	["Upgrade best once"] = "Улучшить лучшее один раз",
 	["Upgrade levels"] = "Покупать уровни",
 	["Upgrade reserve"] = "Резерв на улучшения",

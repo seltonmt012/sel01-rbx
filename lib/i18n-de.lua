@@ -8,7 +8,7 @@
 -- they are - they keep passing "Auto rebirth" and only this file decides what
 -- the player reads.
 --
--- 2428 entries.
+-- 2438 entries.
 
 return {
 	["$%s   %s/s   slots %d/%d   R%d   endurance %s"] = "%s$   %s/s   Plaetze %d/%d   R%d   Ausdauer %s",
@@ -358,6 +358,8 @@ return {
 	["Claim the deepest stage now"] = "Tiefste Stage jetzt kassieren",
 	["Claim win pads"] = "Win-Pads abholen",
 	["ClaimEarnings per slot, plain remote, no walking"] = "ClaimEarnings pro Slot, reines Remote, kein Laufen",
+	["Claims the 12 gifts for time spent online - 4 tower tickets, coins, power, Luck and Train buffs and a race roll."] = "Holt die 12 Geschenke für die Online-Zeit ab - 4 Tower-Tickets, Coins, Power, Luck- und Train-Buffs und einen Rassen-Wurf.",
+	["Claims the Enhance event board (enhance and forge counts) - it pays enhance stones."] = "Holt die Enhance-Eventtafel ab (Enhance- und Schmiede-Zähler) - sie zahlt Enhance-Steine.",
 	["Claims the free tower ticket once a day."] = "Holt einmal am Tag das kostenlose Tower-Ticket ab.",
 	["Class"] = "Klasse",
 	["Clean"] = "Putzen",
@@ -496,6 +498,10 @@ return {
 	["Enemies only"] = "Nur Gegner",
 	["Enemy visible"] = "Gegner sichtbar",
 	["Engines"] = "Motoren",
+	["Enhance now"] = "Jetzt enhancen",
+	["Enhance quests"] = "Enhance-Quests",
+	["Enhance up to"] = "Enhancen bis",
+	["Enhance worn gear"] = "Getragene Ausrüstung enhancen",
 	["Enter run"] = "Lauf betreten",
 	["Enters the stage, the enemies die, the ore is collected and brought home. Stage 27 dropped Ore_41-46, stage 5 only Ore_7-12."] = "Betritt die Stage, die Gegner sterben, das Erz wird eingesammelt und nach Hause gebracht. Stage 27 lieferte Ore_41-46, Stage 5 nur Ore_7-12.",
 	["Entries per call"] = "Einträge pro Call",
@@ -888,7 +894,8 @@ return {
 	["One call per node instead of one swing at a time"] = "Ein Aufruf pro Knoten statt Schlag für Schlag",
 	["One press turns aim, trigger, auto fire and recoil control off. "] = "Ein Druck schaltet Aim, Trigger, Autofeuer und Rückstoßkontrolle aus. ",
 	["One sweep: claim deep-zone trees, take the treasure they drop, sell it, then spend the lot on the chopper, the axe ladder, every upgrade and the pets, and rebirth as far as the level carries."] = "Ein Durchgang: Bäume aus tiefen Zonen beanspruchen, das Treasure einsammeln, verkaufen, alles in Chopper, Axt-Leiter, Upgrades und Pets stecken und so weit rebirthen, wie das Level trägt.",
-	["One ticket runs all 30 rounds of the Frozen Tower (open from rebirth 2). Measured: 129 seconds, 26 enchant stones, plus coins and ore."] = "Ein Ticket läuft alle 30 Runden des Frozen Tower (ab Rebirth 2). Gemessen: 129 Sekunden, 26 Verzauberungssteine, dazu Coins und Erz.",
+	["One ticket runs all 50 rounds of the Frozen Tower (open from rebirth 2), every enemy in one hit. Plus enchant stones, coins and ore up to Ore_48."] = "Ein Ticket läuft alle 50 Runden des Frozen Tower (ab Rebirth 2), jeder Gegner mit einem Treffer. Dazu Verzauberungssteine, Coins und Erz bis Ore_48.",
+	["Online gifts"] = "Online-Geschenke",
 	["Only above x1.3 - the pad ticks 2/s and blocks manual slashes"] = "Erst ab x1.3 - das Pad tickt 2/s und blockiert eigene Schlaege",
 	["Only airborne"] = "Nur in der Luft",
 	["Only grounded"] = "Nur am Boden",
@@ -1252,6 +1259,7 @@ return {
 	["That is a settings code. Share it in #configs on the Discord, not here."] = "Das ist ein Einstellungs-Code. Teil ihn im Discord unter #configs, nicht hier.",
 	["That is mostly numbers. Describe the problem in words - no usernames or ids."] = "Das sind fast nur Zahlen. Beschreib das Problem in Worten - keine Namen oder IDs.",
 	["The ESP stays - a drawing has never needed panicking away."] = "Das ESP bleibt - eine Zeichnung musste noch nie in Panik weg.",
+	["The Enhance stand (rebirth 6+): raises the worn weapon, hat and armor with coins and enhance stones. +5 = x1.25, +10 = x2. Protection scrolls are never used."] = "Der Enhance-Stand (ab Rebirth 6): wertet die getragene Waffe, Hut und Rüstung mit Coins und Enhance-Steinen auf. +5 = x1,25, +10 = x2. Schutzrollen werden nie benutzt.",
 	["The FINISH sweep then rushes rebirths instead of taking a single one."] = "Der FINISH-Durchgang rusht dann Rebirths, statt nur einen zu nehmen.",
 	["The chest is emptied once fewer than this many are left"] = "Die Truhe wird geleert, sobald weniger als so viele frei sind",
 	["The damage that kills a boss comes from your placed units, so unit quality is the only real lever."] = "Der Schaden, der den Boss tötet, kommt von deinen platzierten Einheiten - ihre Qualität ist der einzige echte Hebel.",
@@ -1333,6 +1341,7 @@ return {
 	["Unlocks the free race slots (rebirth 4, sign-in day 7), spends race rolls on the WORST slot and wears the race with the best Train and Luck. Rolls are never bought: with none left the game would open a Robux prompt."] = "Schaltet die kostenlosen Rassen-Slots frei (Rebirth 4, Anmeldetag 7), würfelt im SCHLECHTESTEN Slot und trägt die Rasse mit dem besten Train und Glück. Würfe werden nie gekauft: ohne Würfe würde das Spiel einen Robux-Kauf öffnen.",
 	["Unstuck"] = "Lösen",
 	["Unstuck movement + camera"] = "Bewegung + Kamera lösen",
+	["Up to +5 a failure only costs the stones. From +6 a failure lowers the level by one."] = "Bis +5 kostet ein Fehlschlag nur die Steine. Ab +6 senkt ein Fehlschlag die Stufe um eins.",
 	["Upgrade best once"] = "Beste einmal upgraden",
 	["Upgrade levels"] = "Level kaufen",
 	["Upgrade reserve"] = "Upgrade-Reserve",
