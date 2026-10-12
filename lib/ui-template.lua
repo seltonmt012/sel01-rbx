@@ -101,7 +101,8 @@ local UI = {}
 -- 3.17: Anime Dice's quests / rebirth points / unit-safety strings, plus the
 --       Cold War and Loot To Forge strings that shipped under 3.16 and so never
 --       reached a cached client.
-UI.VERSION = "3.17"
+-- 3.18: Redliner's "keep aiming after a shot" slider.
+UI.VERSION = "3.18"
 UI.BRAND = "SELUX"
 UI.DISCORD = "discord.gg/ARdpzFuKMm"
 UI.REPO = "seltonmt012/sel01-rbx"

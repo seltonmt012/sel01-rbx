@@ -8,7 +8,7 @@
 -- they are - they keep passing "Auto rebirth" and only this file decides what
 -- the player reads.
 --
--- 2456 entries.
+-- 2458 entries.
 
 return {
 	["$%s   %s/s   slots %d/%d   R%d   endurance %s"] = "%s$   %s/с   слоты %d/%d   R%d   выносливость %s",
@@ -800,6 +800,7 @@ return {
 	["Jump key"] = "Клавиша прыжка",
 	["Jump under s"] = "Прыжок быстрее с",
 	["KOPIERT  #%s"] = "СКОПИРОВАНО  #%s",
+	["Keep aiming after a shot (ms)"] = "Целиться после выстрела (мс)",
 	["Keep alive in stage"] = "Держать живым на этапе",
 	["Keep aura equipped"] = "Держать ауру надетой",
 	["Keep best pets"] = "Оставлять лучших питомцев",
@@ -1588,6 +1589,7 @@ return {
 	["Wheels"] = "Колёса",
 	["Which part"] = "Какая часть",
 	["While firing"] = "При стрельбе",
+	["While firing: your shot is read off your own character, so it works on phones too"] = "При стрельбе: выстрел определяется по вашему персонажу, поэтому работает и на телефоне.",
 	["While spectated"] = "Когда за тобой смотрят",
 	["Whole screen"] = "Весь экран",
 	["Win plate"] = "Плита побед",

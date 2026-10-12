@@ -164,6 +164,7 @@ local CONFIG = {
     -- AIM
     aim = false,
     aimActivation = "Hotkey",       -- Hotkey / Always / While firing / Screen held
+    aimFireWindow = 700,            -- ms the assist stays on after each of your shots
     aimKey = "MouseButton2",
     aimPart = "Head",               -- Head / Torso / Nearest
     aimPick = "Crosshair",          -- Crosshair / World / Lowest HP
@@ -414,6 +415,40 @@ local function visibleTo(part)
     return hit == nil
 end
 
+-- What an EYE sees - which is what "Visible only" on the ESP and "Only when in
+-- sight" on the aura mean - as opposed to the bullet rule above. This walks
+-- through anything you can see through (Transparency >= 0.9), solid or not and
+-- wherever it sits. Measured in a duel arena: 62 invisible SOLID parts - grate
+-- and ramp collision boxes, a crane truss, six slabs up to 372 studs - plus an
+-- "Ambient Lighting" volume stopped the bullet ray, and the ignore list only
+-- ever looked inside workspace.Map, so players in plain view read as hidden.
+local eyeCache = setmetatable({}, { __mode = "k" })
+
+local function seenBy(part)
+    if not part then return false end
+    local now = os.clock()
+    local cached = eyeCache[part]
+    if cached and now - cached.t < 0.08 then return cached.v end
+    local origin = cam.CFrame.Position
+    local skip = {}
+    for _, name in ipairs({ "Entities", "Effects", "Debris" }) do
+        local f = Workspace:FindFirstChild(name)
+        if f then skip[#skip + 1] = f end
+    end
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    local seen = false
+    for _ = 1, 8 do
+        params.FilterDescendantsInstances = skip
+        local hit = Workspace:Raycast(origin, part.Position - origin, params)
+        if not hit then seen = true break end
+        if hit.Instance.Transparency < 0.9 then break end
+        skip[#skip + 1] = hit.Instance
+    end
+    eyeCache[part] = { t = now, v = seen }
+    return seen
+end
+
 --------------------------------------------------------------------------------
 -- drawing pool
 --------------------------------------------------------------------------------
@@ -629,7 +664,7 @@ local function renderPass()
         lastHealth[model] = hp
         STATE.healthSamples = STATE.healthSamples + 1
 
-        local vis = (not CONFIG.espVisibleOnly) or visibleTo(headHurtbox(model))
+        local vis = (not CONFIG.espVisibleOnly) or seenBy(headHurtbox(model))
         local inRange = dist <= CONFIG.espMaxDist
 
         -- Chams go OUTSIDE the on-screen gate on purpose: a Highlight is 3D and
@@ -925,7 +960,11 @@ local function probeInput()
     note("input: key " .. INPUT.key .. ", mouse " .. INPUT.mouse)
 end
 
+-- While a keybind is being recorded nothing synthetic may be sent: the recorder
+-- listens to InputBegan, and with Auto bhop on it caught our own Space tap
+-- every time (Space every 60ms), with aura/trigger our own MouseButton1.
 local function pullTrigger()
+    if INPUT.recording then return false end
     if INPUT.mouse == "mouse1click" and mouse1click then
         mouse1click()
         return true
@@ -952,6 +991,7 @@ local function clickMethod()
 end
 
 local function tapKey(name)
+    if INPUT.recording then return false end
     local k = resolveKey(name)
     if not k or k.kind ~= "key" then return false end
     if INPUT.key == "keypress" and keypress and keyrelease then
@@ -972,6 +1012,7 @@ local function tapKey(name)
 end
 
 local function holdKey(name, down)
+    if INPUT.recording and down then return false end   -- a release still goes out
     local k = resolveKey(name)
     if not k or k.kind ~= "key" then return false end
     local vim = vimService()
@@ -1084,6 +1125,39 @@ local MY_SWING = {
     ["rbxassetid://71188211641772"]  = true,   -- 3P_CAttack
 }
 
+-- The tables above were copied by hand from the first sword. The catalogue has
+-- THREE melee weapons (Redliner, OriginEnd, Liberator - each with 3P_LAttack)
+-- and five guns plus Liberator's thrown knife, so the aura, the swing counter
+-- and the parry were blind to everything else. Fill them from the catalogue.
+-- SHOT_IDS also tells "While firing" that WE fired: our own 3P_Gunshot plays on
+-- our character (measured: Revolt.3P_Gunshot on a Castigate shot), which works
+-- on a phone, where there is no mouse button to hold.
+local MELEE_WEAPON, SHOT_IDS = { Redliner = true }, {}
+do
+    local assets = ReplicatedStorage:FindFirstChild("Assets")
+    local anims = assets and assets:FindFirstChild("Animations")
+    for _, folder in ipairs(anims and anims:GetChildren() or {}) do
+        if folder:FindFirstChild("3P_LAttack") then
+            MELEE_WEAPON[folder.Name] = true
+            for _, n in ipairs({ "3P_LAttack", "3P_RAttack", "3P_CAttack" }) do
+                local a = folder:FindFirstChild(n)
+                if a and a:IsA("Animation") then
+                    ATTACK_MELEE[a.AnimationId] = ATTACK_MELEE[a.AnimationId] or n:sub(4)
+                    MY_SWING[a.AnimationId] = true
+                end
+            end
+        end
+        for _, n in ipairs({ "3P_Gunshot", "3P_Bonusshot", "3P_KnifeShot" }) do
+            local a = folder:FindFirstChild(n)
+            if a and a:IsA("Animation") then
+                ATTACK_GUN[a.AnimationId] = ATTACK_GUN[a.AnimationId] or folder.Name
+                SHOT_IDS[a.AnimationId] = true
+            end
+        end
+    end
+    for id in pairs(ATTACK_GUN) do SHOT_IDS[id] = true end
+end
+
 -- BOTH the Humanoid and its Animator are connected, because each one is the only
 -- source for one side (ours vs remote players) - and some tracks fire on both,
 -- which double-counted every swing: 9 clicks read as 14 swings on the first live
@@ -1098,6 +1172,7 @@ local function onAnimation(model, id)
     lastAnim[key] = now
     if model == myChar() then
         if id == PARRY_SUCCESS then STATE.parrySuccess = STATE.parrySuccess + 1 end
+        if SHOT_IDS[id] then STATE.lastShotAt = now end
         if MY_SWING[id] then
             -- One swing plays a first-person AND a third-person track, and they
             -- are different ids, so the per-id debounce above does not merge
@@ -1179,9 +1254,12 @@ end
 -- distance at which a swing connects, so `auraRange` is a slider with a guess
 -- in it (18 studs) rather than a number this script can defend.
 
+-- Any melee weapon, not just the Redliner sword: with OriginEnd or Liberator in
+-- hand the aura used to say "no sword equipped" and stop swinging.
 local function swordOut()
     local c = myChar()
-    return c ~= nil and equippedWeapon(c) == "Redliner"
+    local w = c and equippedWeapon(c)
+    return w ~= nil and MELEE_WEAPON[w] == true
 end
 
 local function auraActive()
@@ -1215,7 +1293,7 @@ local function hittable(model)
         local dot = math.clamp(cam.CFrame.LookVector:Dot(to.Unit), -1, 1)
         if math.deg(math.acos(dot)) > CONFIG.auraAngle then return false, d end
     end
-    if CONFIG.auraVisibleOnly and not visibleTo(body) then return false, d end
+    if CONFIG.auraVisibleOnly and not seenBy(body) then return false, d end
     return true, d
 end
 
@@ -1366,6 +1444,11 @@ local function aimActive()
     if mode == "Always" then return true end
     if mode == "Screen held" then return screenHeld() end
     if mode == "While firing" then
+        -- "Fired" is read off our own character (3P_Gunshot), so it works on a
+        -- phone too - the old check returned false on touch, forever. The window
+        -- keeps the assist on between taps: a tap shot is over before the
+        -- reaction delay has passed, so press-only never got to turn the camera.
+        if os.clock() - (STATE.lastShotAt or 0) < CONFIG.aimFireWindow / 1000 then return true end
         if TOUCH then return false end
         return UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton1)
     end
@@ -1714,29 +1797,42 @@ local function keyButton(card, caption, field)
     local function label(text) pcall(function() UI.setText(btn, text) end) end
     btn = card:Button(caption .. ":  " .. keyLabel(CONFIG[field]), function()
         recording = field
+        INPUT.recording = true
         label(caption .. ":  press a key...")
+        -- nothing pressed: give the synthetic inputs (bhop, aura...) back
+        task.delay(6, function()
+            if recording ~= field then return end
+            recording = nil
+            INPUT.recording = false
+            label(caption .. ":  " .. keyLabel(CONFIG[field]))
+        end)
     end)
-    -- keyboard on InputBegan (immediate, Escape cancels); mouse on InputENDED,
-    -- because the click that armed the recorder has already fired its InputBegan
-    -- by the time this handler runs.
-    UserInputService.InputBegan:Connect(function(input, gp)
-        if not live() or recording ~= field or gp then return end
-        if input.UserInputType ~= Enum.UserInputType.Keyboard then return end
-        recording = nil
-        if input.KeyCode ~= Enum.KeyCode.Escape then
-            CONFIG[field] = input.KeyCode.Name
-            keyCache = {}
-        end
-        label(caption .. ":  " .. keyLabel(CONFIG[field]))
-    end)
-    UserInputService.InputEnded:Connect(function(input)
+    -- Everything on InputBegan. Measured on a real click: the button's Activated
+    -- fires FIRST and the same click's InputEnded right after it (59ms / 59ms),
+    -- so recording mouse buttons on InputEnded caught the arming click itself -
+    -- every rebind became MouseButton1 on the spot ("i cant change keybind").
+    -- The arming click's InputBegan is long gone by then (20ms), so InputBegan
+    -- only ever sees the NEXT input. gameProcessed is ignored while recording:
+    -- the game binds most keys itself, and those arrived with gp = true and were
+    -- dropped. Escape cancels.
+    UserInputService.InputBegan:Connect(function(input)
         if not live() or recording ~= field then return end
         local t = input.UserInputType
-        if t ~= Enum.UserInputType.MouseButton1 and t ~= Enum.UserInputType.MouseButton2
-            and t ~= Enum.UserInputType.MouseButton3 then return end
+        local value
+        if t == Enum.UserInputType.Keyboard then
+            if input.KeyCode ~= Enum.KeyCode.Escape then value = input.KeyCode.Name end
+        elseif t == Enum.UserInputType.MouseButton1 or t == Enum.UserInputType.MouseButton2
+            or t == Enum.UserInputType.MouseButton3 then
+            value = t.Name
+        else
+            return
+        end
         recording = nil
-        CONFIG[field] = t.Name
-        keyCache = {}
+        INPUT.recording = false
+        if value then
+            CONFIG[field] = value
+            keyCache = {}
+        end
         label(caption .. ":  " .. keyLabel(CONFIG[field]))
     end)
     return btn
@@ -1795,6 +1891,9 @@ do
         "moves the camera only - measured to stick at RenderPriority Camera+1")
     c:Dropdown("Activation", { "Hotkey", "Always", "While firing", "Screen held" },
         CONFIG.aimActivation, function(v) CONFIG.aimActivation = v end)
+    c:Slider("Keep aiming after a shot (ms)", 0, 2000, CONFIG.aimFireWindow,
+        function(v) CONFIG.aimFireWindow = v end,
+        "While firing: your shot is read off your own character, so it works on phones too")
     keyButton(c, "Key", "aimKey")
     c:Dropdown("Aim at", { "Head", "Torso", "Nearest" }, CONFIG.aimPart,
         function(v) CONFIG.aimPart = v end)
@@ -2087,7 +2186,8 @@ win:Refresh()
 _G.__REDLINER_DBG = {
     CONFIG = CONFIG, STATE = STATE, DEFAULTS = DEFAULTS,
     combatants = combatants, aliveOf = aliveOf, headHurtbox = headHurtbox,
-    visibleTo = visibleTo, screenRect = screenRect, centreOf = centreOf,
+    visibleTo = visibleTo, seenBy = seenBy, screenRect = screenRect, centreOf = centreOf,
+    MELEE_WEAPON = MELEE_WEAPON, SHOT_IDS = SHOT_IDS, aimActive = aimActive,
     pickTarget = pickTarget, underCrosshair = underCrosshair,
     aimTargetPart = aimTargetPart, placeKind = placeKind,
     roValue = roValue, tapKey = tapKey, pullTrigger = pullTrigger, holdKey = holdKey,

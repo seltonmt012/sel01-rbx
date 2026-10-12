@@ -8,7 +8,7 @@
 -- they are - they keep passing "Auto rebirth" and only this file decides what
 -- the player reads.
 --
--- 2456 entries.
+-- 2458 entries.
 
 return {
 	["$%s   %s/s   slots %d/%d   R%d   endurance %s"] = "%s$   %s/s   Plaetze %d/%d   R%d   Ausdauer %s",
@@ -712,6 +712,7 @@ return {
 	["Jump height"] = "Sprunghöhe",
 	["Jump key"] = "Sprungtaste",
 	["Jump under s"] = "Springen unter s",
+	["Keep aiming after a shot (ms)"] = "Nach einem Schuss weiterzielen (ms)",
 	["Keep alive in stage"] = "In der Stage am Leben halten",
 	["Keep aura equipped"] = "Aura angelegt lassen",
 	["Keep best pets"] = "Beste Pets behalten",
@@ -1411,6 +1412,7 @@ return {
 	["Wheels"] = "Räder",
 	["Which part"] = "Welches Teil",
 	["While firing"] = "Beim Schießen",
+	["While firing: your shot is read off your own character, so it works on phones too"] = "Beim Schießen: Dein Schuss wird an deiner eigenen Figur erkannt, das geht auch am Handy.",
 	["While spectated"] = "Wenn zugeschaut wird",
 	["Whole screen"] = "Ganzer Bildschirm",
 	["Win plate"] = "Win-Platte",
