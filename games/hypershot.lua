@@ -1558,7 +1558,10 @@ end
 local mouseMove = execFn("mousemoverel")
 
 local function moveView(A, curYaw, curPitch, stepYaw, stepPitch)
-	if CONFIG.aimPath == "Mouse" and mouseMove then
+	-- A phone has no mouse: mousemoverel there moves a cursor nobody sees, so the
+	-- view "follows the mouse" instead of the target (reported 2026-10-03 from a
+	-- Delta phone). Touch clients always take the game-camera path.
+	if CONFIG.aimPath == "Mouse" and mouseMove and not TOUCH then
 		local c = ctl()
 		local sens = c and tonumber(c.Shared.CurrSens) or 0
 		if sens > 0 then
