@@ -184,6 +184,21 @@
       "detect": "local plr = game:GetService('Players').LocalPlayer local ps = plr and plr:FindFirstChild('PlayerScripts') if ps and ps:FindFirstChild('LeafSim') then return true end local rem = game:GetService('ReplicatedStorage'):FindFirstChild('Remotes') if rem and rem:FindFirstChild('EmptyBackpack') then return true end return rem ~= nil and rem:FindFirstChild('UpgradeBuy') ~= nil and game.Workspace:FindFirstChild('Teams') ~= nil"
     },
     {
+      "alias": "needle",
+      "name": "Search For The Needle",
+      "file": "games/needle.lua",
+      "places": [
+        77108422251420,
+        108628039999641,
+        83445806734780,
+        82626725163709,
+        102537610748607
+      ],
+      "status": "ok",
+      "note": "lobby plus one place per map; the script works out which side it is on; full run verified on the Farmhouse 2026-10-13",
+      "detect": "local rs = game:GetService('ReplicatedStorage') if rs:FindFirstChild('NeedleHaystack') then return true end local s = rs:FindFirstChild('Shared') local c = s and s:FindFirstChild('Configs') return c ~= nil and c:FindFirstChild('PartyConfig') ~= nil and c:FindFirstChild('MapThumbnailsConfig') ~= nil and rs:FindFirstChild('HayIndexReward') ~= nil"
+    },
+    {
       "alias": "skillpoints",
       "name": "+1 Skill Point Legends",
       "file": "games/skillpoints.lua",
