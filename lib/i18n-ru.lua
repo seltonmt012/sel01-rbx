@@ -8,7 +8,7 @@
 -- they are - they keep passing "Auto rebirth" and only this file decides what
 -- the player reads.
 --
--- 2506 entries.
+-- 2509 entries.
 
 return {
 	["$%s   %s/s   slots %d/%d   R%d   endurance %s"] = "%s$   %s/с   слоты %d/%d   R%d   выносливость %s",
@@ -116,6 +116,7 @@ return {
 	["Also in duels"] = "Также в дуэлях",
 	["Also parry gunshots"] = "Парировать и выстрелы",
 	["Always"] = "Всегда",
+	["Always claims the deepest zone the game has (78 now); the server pays your own deepest. Off: the slider below."] = "Всегда заявляет самую глубокую зону игры (сейчас 78); сервер платит по твоей собственной самой глубокой. Выкл: ползунок ниже.",
 	["Always the deepest stage reached - a claim resets every wall"] = "Всегда самая глубокая стадия - сбор сбрасывает все стены",
 	["Amber x1.5 @5K ... Void x7.5, stacks with the trail"] = "Amber x1.5 @5K ... Void x7.5, складывается со следом",
 	["Ammo"] = "Патроны",
@@ -487,6 +488,7 @@ return {
 	["Das ist kein Selux-Code."] = "Это не код Selux.",
 	["Dash once"] = "Один рывок",
 	["Deadzone (px)"] = "Мёртвая зона (px)",
+	["Deepest zone"] = "Самая глубокая зона",
 	["Deine Schalter bleiben nach einem Rejoin erhalten."] = "Ваши переключатели сохраняются после перезахода.",
 	["Delay (ms)"] = "Задержка (мс)",
 	["Delay after kill (ms)"] = "Пауза после убийства (мс)",
@@ -1328,6 +1330,7 @@ return {
 	["Silent aim"] = "Сайлент аим",
 	["Silent aim enabled"] = "Сайлент-эйм включён",
 	["Silent shot"] = "Тихий выстрел",
+	["Since the worlds 5/6 update a claim pays at most your deepest zone - the deepest one your Strength can fell. The script stands on it first."] = "После обновления с мирами 5/6 заявка платит максимум по твоей самой глубокой зоне - той, деревья которой валит твоя сила. Скрипт сначала встаёт туда.",
 	["Sitzung %d min  ·  %d Seiten  ·  Selux v%s"] = "Сессия %d мин  ·  %d страниц  ·  Selux v%s",
 	["Size (studs)"] = "Размер (стадов)",
 	["Skeleton"] = "Скелет",
@@ -1550,7 +1553,7 @@ return {
 	["Unlock islands"] = "Открывать острова",
 	["Unlock one now"] = "Открыть одну сейчас",
 	["Unlock vents"] = "Открывать шахты",
-	["Unlocks Candyland at level 200. Frost wants 400 and Cyber 600, and the XP curve puts those years away - the panel says so rather than pretending."] = "Открывает Candyland на 200 уровне. Frost требует 400, Cyber — 600, и кривая опыта делает их недосягаемыми на годы: панель говорит об этом прямо.",
+	["Unlocks each world as soon as the level allows: Candyland 200, Frost 400, Cyber 600, Spooky 800, Space 1000. Then travels to the deepest one."] = "Открывает каждый мир, как только хватает уровня: Candyland 200, Frost 400, Cyber 600, Spooky 800, Space 1000. Затем переходит в самый глубокий.",
 	["Unlocks the free race slots (rebirth 4, sign-in day 7), spends race rolls on the WORST slot and wears the race with the best Train and Luck. Rolls are never bought: with none left the game would open a Robux prompt."] = "Открывает бесплатные слоты рас (перерождение 4, 7-й день входа), тратит броски на ХУДШИЙ слот и надевает расу с лучшими Train и удачей. Броски никогда не покупаются: без бросков игра открыла бы покупку за Robux.",
 	["Unstuck"] = "Отлипнуть",
 	["Unstuck movement + camera"] = "Отлипнуть: движение и камера",

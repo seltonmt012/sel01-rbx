@@ -99,7 +99,9 @@ local CONFIG = {
 
 	-- TURBO. Off, and in no preset. See the header for the measurements.
 	turbo = false,
-	turboZone = 52,      -- the zone NUMBER claimed; 1..52, unvalidated by the server
+	turboDeepest = true, -- claim the deepest zone the game has (TreeZonesData.MAX_ZONE,
+	                     -- 78 since the worlds 5/6 update); off = the slider below
+	turboZone = 52,      -- the zone NUMBER claimed when turboDeepest is off; unvalidated
 	turboPerCall = 13,   -- the server's own cap; more is silently discarded
 	turboGap = 0.1,      -- seconds between calls. 0.3 credits 100%, 0.1 credits
 	                     -- 56% but moves more per second - see petPushPass
@@ -108,8 +110,10 @@ local CONFIG = {
 	finishLoop = false,  -- keep sweeping instead of running once
 	petPush = true,      -- mint wood for the next egg up; eggs are priced in WOOD
 	petPushSecs = 90,    -- how long one minting push may run
-	petPushCeiling = 1e14, -- do not aim at an egg that would take days: the wood
-	                       -- curve clamps at zone 52, so anything past ~1e14 is out
+	petPushMax = 4e17,   -- do not aim at an egg that would take days: the wood curve
+	                     -- clamps at MAX_ZONE, which puts Egg13 (3.75e17) in reach and
+	                     -- Egg14 (6.25e19) days away. Renamed from petPushCeiling so a
+	                     -- saved 1e14 from the zone-52 days does not hold it down.
 	petBatches = 6,      -- HatchEggBatch(folder, 3) calls after the rung is known
 	rebirthRush = false, -- fire the hole until the level requirement is met, then
 	                     -- rebirth, and repeat - the leaderboard climb
@@ -155,6 +159,10 @@ local PADS = {
 	{ mat = "TrainTree9",  reward = 25,  need = 20 },
 	{ mat = "TrainTree10", reward = 30,  need = 24 },
 	{ mat = "TrainTree11", reward = 35,  need = 28 },
+	{ mat = "TrainTree12", reward = 40,  need = 32 },  -- 12..15 came with worlds 5/6
+	{ mat = "TrainTree13", reward = 45,  need = 36 },
+	{ mat = "TrainTree14", reward = 50,  need = 40 },
+	{ mat = "TrainTree15", reward = 55,  need = 44 },
 
 	{ mat = "TrainMatCommon",    reward = 1.5, need = 0 },
 	{ mat = "TrainMatUncommon",  reward = 2,   need = 1 },
@@ -225,6 +233,10 @@ local Axes      = Shared and req(Shared:FindFirstChild("AxesData"))
 local Upgrades  = Shared and req(Shared:FindFirstChild("UpgradesData"))
 local Treasure  = Shared and req(Shared:FindFirstChild("TreasureData"))
 local Levels    = Shared and req(Shared:FindFirstChild("PlayerLevels"))
+
+-- The deepest tree zone, read live: it was 52 until the worlds 5/6 update made it
+-- 78, and `woodForZone` clamps exactly there, so this is the most a claim can pay.
+local MAX_ZONE = (TreeZones and tonumber(TreeZones.MAX_ZONE)) or 78
 
 --------------------------------------------------------------------------------
 -- the oracle
@@ -647,6 +659,69 @@ local function chopPass(seconds)
 			end
 		end
 		task.wait(swing)
+	end
+end
+
+-- THE ZONE SCOUT. Since the worlds 5/6 update the server pays a tree claim at
+-- most at the player's own `deepestZone`: min(claimed, deepest). Measured
+-- 2026-10-13 on a fresh save: a zone-52 and a zone-78 claim both paid exactly the
+-- 12 wood of zone 1, and a zone-5 claim paid zone 3. `deepestZone` is the deepest
+-- Treezone the BODY has stood in, kept server side and a few seconds late -
+-- standing on Treezone3 took it 1 -> 3, zone 2 skipped, no tree felled - but only
+-- up to the zone whose tree HP the Strength covers: at 4.88M Strength, standing on
+-- 12 and 13 left it at 7 (hpForZone 7 = 1.41M, 8 = 7.81M). So before claiming, the
+-- body visits the deepest Treezone of its world that the Strength can fell.
+-- Streaming hides the far ones, so it hops: the deepest loaded one, then look again.
+local function standOn(part, secs)
+	local ch, hrp = char()
+	if not hrp then return false end
+	local params = RaycastParams.new()
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	params.FilterDescendantsInstances = { ch }
+	local top = part.Position + Vector3.new(0, part.Size.Y / 2 + 60, 0)
+	local hit = workspace:Raycast(top, Vector3.new(0, -200, 0), params)
+	local pos = hit and hit.Position or (part.Position + Vector3.new(0, part.Size.Y / 2, 0))
+	local cf = CFrame.new(pos + Vector3.new(0, 3.5, 0))
+	local con = RunService.Heartbeat:Connect(function()
+		local _, h = char()
+		if h then
+			h.CFrame = cf
+			h.AssemblyLinearVelocity = Vector3.zero
+		end
+	end)
+	task.wait(secs)
+	con:Disconnect()
+	return true
+end
+
+local lastScout = 0
+
+local function scoutPass(force)
+	if not force and os.clock() - lastScout < 45 then return end
+	lastScout = os.clock()
+	local d = data(true)
+	if not d then return end
+	local deepest = tonumber(d.deepestZone) or 0
+	STATE.deepest = deepest
+	local strength = tonumber(d.strength) or 0
+	for _ = 1, 6 do
+		if GEN ~= _G.__CHOPTREES then return end
+		local top = nil
+		for _, p in ipairs(treezoneParts()) do
+			if zoneHP(zoneIndexOf(p)) <= strength then top = p end
+		end
+		if not top or zoneIndexOf(top) <= deepest then return end
+		STATE.phase = "scouting zone " .. zoneIndexOf(top)
+		standOn(top, 5)
+		local nd = tonumber((data(true) or {}).deepestZone) or deepest
+		if nd <= deepest then
+			task.wait(3)
+			nd = tonumber((data(true) or {}).deepestZone) or deepest
+		end
+		if nd <= deepest then return end
+		deepest = nd
+		STATE.deepest = deepest
+		note("deepest zone now " .. deepest)
 	end
 end
 
@@ -1179,7 +1254,8 @@ local function turboFire()
 	if not runActive() then
 		if not enterRun() then return false end
 	end
-	local z = math.clamp(math.floor(CONFIG.turboZone), 1, 52)
+	local z = CONFIG.turboDeepest and MAX_ZONE
+		or math.clamp(math.floor(CONFIG.turboZone), 1, MAX_ZONE)
 	local n = math.clamp(math.floor(CONFIG.turboPerCall), 1, 13)
 	local arr = {}
 	for i = 1, n do arr[i] = z end
@@ -1190,6 +1266,7 @@ end
 
 local function turboPass()
 	if not CONFIG.turbo then return end
+	scoutPass()
 	if not turboFire() then note("turbo: no run") end
 end
 
@@ -1205,6 +1282,7 @@ end
 -- therefore aims at the best egg it can actually reach and says so.
 local function petPushPass()
 	if not (CONFIG.petPush and RF.HatchEgg) then return end
+	scoutPass()
 	local d = data(true)
 	if not d then return end
 	local wood = tonumber(d.wood) or 0
@@ -1212,7 +1290,7 @@ local function petPushPass()
 	local target, targetCost = nil, nil
 	for name, cost in pairs(EGG_COST) do
 		if cost > wood and (not targetCost or cost < targetCost) then
-			if cost <= CONFIG.petPushCeiling then target, targetCost = name, cost end
+			if cost <= CONFIG.petPushMax then target, targetCost = name, cost end
 		end
 	end
 	if not target then return end
@@ -1312,6 +1390,10 @@ local function finishPass()
 		local d = data(true)
 		local startCash = (d and d.cash) or 0
 
+		-- 0. the claims below pay at most the deepest zone the body has stood in
+		STATE.finishStep = "scouting"
+		pcall(scoutPass, true)
+
 		-- 1. treasure: fire, loot up to the bag, bank, sell. Repeated because the
 		--    bag is the limit per trip, not the drop rate.
 		for trip = 1, math.max(1, CONFIG.finishTrips) do
@@ -1386,17 +1468,27 @@ end
 -- worlds
 --------------------------------------------------------------------------------
 --
--- Four worlds behind a LEVEL gate, the numbers straight out of the client's own
--- `PlayerLevels`: Candyland 200, Frost 400, Cyber 600. `UnlockZone(name)` buys the
+-- Six worlds, five of them behind a LEVEL gate, the numbers straight out of the
+-- client's own `PlayerLevels` - the portal menu reads exactly these five:
+-- Candyland 200, Frost 400, Cyber 600, and since the worlds 5/6 update Spooky
+-- (`HALLOW_LEVEL`) 800 and Space (`SPACE_LEVEL`) 1000. `UnlockZone(name)` buys the
 -- unlock and `TeleportToZone(name)` travels; the profile mirrors the result in
--- `zone2Unlocked` .. `zone5Unlocked`.
+-- `zone2Unlocked` .. `zone6Unlocked`.
 --
 -- Worth knowing before hoping for the deep ones: the XP curve is what stops this,
 -- not the gate. `cumulativeXpToLevel` is 2.2e11 at level 225, 5.95e13 at 275 and
 -- **7.2e19 at 400** - so at the ~6.8e11 XP/s the hole actually produces, Candyland
 -- is immediate, Frost is years away and Cyber is not a number worth writing down.
 -- The same curve caps the rebirth ladder at about eleven.
-local WORLD_LEVEL = { Zone2 = 200, Zone3 = 400, Zone4 = 600 }
+local WORLDS = { "Zone2", "Zone3", "Zone4", "Zone5", "Zone6" }
+local function lv(key, fallback)
+	return (Levels and tonumber(Levels[key])) or fallback
+end
+local WORLD_LEVEL = {
+	Zone2 = lv("ZONE2_LEVEL", 200), Zone3 = lv("ZONE3_LEVEL", 400),
+	Zone4 = lv("ZONE4_LEVEL", 600), Zone5 = lv("HALLOW_LEVEL", 800),
+	Zone6 = lv("SPACE_LEVEL", 1000),
+}
 
 local function worldPass()
 	if not RF.UnlockZone then return end
@@ -1404,7 +1496,7 @@ local function worldPass()
 	if not d then return end
 	local level = tonumber(d.level) or 0
 
-	for _, name in ipairs({ "Zone2", "Zone3", "Zone4" }) do
+	for _, name in ipairs(WORLDS) do
 		local need = WORLD_LEVEL[name]
 		local flagName = name:gsub("Zone", "zone") .. "Unlocked"
 		if not d[flagName] then
@@ -1435,7 +1527,7 @@ local function worldTravelPass()
 	local d = data()
 	if not d then return end
 	local want = "Zone1"
-	for _, name in ipairs({ "Zone2", "Zone3", "Zone4" }) do
+	for _, name in ipairs(WORLDS) do
 		local flagName = name:gsub("Zone", "zone") .. "Unlocked"
 		if d[flagName] then want = name end
 	end
@@ -1643,7 +1735,7 @@ spendCard:Toggle("Pets", CONFIG.pets, function(v) CONFIG.pets = v end,
 spendCard:Toggle("Rebirth", CONFIG.rebirth, function(v) CONFIG.rebirth = v end,
 	"Fires as soon as the game's own requirement is met. It also wipes every axe, so it waits until the cash can re-buy them.", UI.theme.warn)
 spendCard:Toggle("Worlds", CONFIG.worlds, function(v) CONFIG.worlds = v end,
-	"Unlocks Candyland at level 200. Frost wants 400 and Cyber 600, and the XP curve puts those years away - the panel says so rather than pretending.")
+	"Unlocks each world as soon as the level allows: Candyland 200, Frost 400, Cyber 600, Spooky 800, Space 1000. Then travels to the deepest one.")
 spendCard:Toggle("Free rewards", CONFIG.freebies, function(v) CONFIG.freebies = v end,
 	"Code, daily, offline earnings, group, banked aura spins - once per run of the script.")
 
@@ -1659,12 +1751,13 @@ local tCard = turboPage:Card("CLIENT AUTHORITY", 0):Accent()
 tCard:Label("The server takes the tree list from the client and checks neither the zone nor where you stand. Measured on this place:")
 tCard:Label("1 / 5 / 13 entries  ->  1 / 5 / 13 credited")
 tCard:Label("20 / 50 / 1000 entries  ->  13 credited, every time")
-tCard:Label("zone 52 claimed from zone 1  ->  483,000,000 wood")
-tCard:Label("its drop  ->  Nexus Heart, 7.6e21 cash (zone 1 pays 11)")
+tCard:Label("Since the worlds 5/6 update a claim pays at most your deepest zone - the deepest one your Strength can fell. The script stands on it first.")
 tCard:Label("It still needs an ACTIVE RUN - outside one nothing credits at all.")
 tCard:Toggle("Turbo", CONFIG.turbo, function(v) CONFIG.turbo = v end,
 	"Replaces the honest chop pass while it is on.", UI.theme.bad)
-tCard:Slider("Zone claimed", 1, 52, CONFIG.turboZone, function(v) CONFIG.turboZone = v end)
+tCard:Toggle("Deepest zone", CONFIG.turboDeepest, function(v) CONFIG.turboDeepest = v end,
+	"Always claims the deepest zone the game has (78 now); the server pays your own deepest. Off: the slider below.")
+tCard:Slider("Zone claimed", 1, MAX_ZONE, CONFIG.turboZone, function(v) CONFIG.turboZone = v end)
 tCard:Slider("Entries per call", 1, 13, CONFIG.turboPerCall, function(v) CONFIG.turboPerCall = v end)
 
 local fCard = turboPage:Card("FINISH THE ACCOUNT", 0)
@@ -1674,7 +1767,7 @@ fCard:Toggle("Keep sweeping", CONFIG.finishLoop, function(v) CONFIG.finishLoop =
 	"Repeats the sweep instead of running once. Needs the master switch on.", UI.theme.bad)
 fCard:Slider("Market trips per sweep", 1, 10, CONFIG.finishTrips, function(v) CONFIG.finishTrips = v end)
 fCard:Toggle("Mint wood for pets", CONFIG.petPush, function(v) CONFIG.petPush = v end,
-	"Eggs are priced in WOOD. Measured: 21.4 bn/s at a 0.3s gap, 42.7 bn/s flat out. That reaches Egg9 and Egg10 in twenty to thirty minutes; Egg11 upwards is out of reach because the wood curve clamps at zone 52.", UI.theme.bad)
+	"Eggs are priced in WOOD. Measured: 21.4 bn/s at a 0.3s gap, 42.7 bn/s flat out. How far it gets depends on your deepest zone; it never aims above Egg13.", UI.theme.bad)
 fCard:Slider("Minting seconds", 15, 300, CONFIG.petPushSecs, function(v) CONFIG.petPushSecs = v end)
 
 local rCard = turboPage:Card("REBIRTH RUSH", 0)

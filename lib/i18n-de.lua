@@ -8,7 +8,7 @@
 -- they are - they keep passing "Auto rebirth" and only this file decides what
 -- the player reads.
 --
--- 2506 entries.
+-- 2509 entries.
 
 return {
 	["$%s   %s/s   slots %d/%d   R%d   endurance %s"] = "%s$   %s/s   Plaetze %d/%d   R%d   Ausdauer %s",
@@ -97,6 +97,7 @@ return {
 	["Also in duels"] = "Auch in Duellen",
 	["Also parry gunshots"] = "Auch Schüsse parieren",
 	["Always"] = "Immer",
+	["Always claims the deepest zone the game has (78 now); the server pays your own deepest. Off: the slider below."] = "Beansprucht immer die tiefste Zone des Spiels (jetzt 78); der Server zahlt deine eigene tiefste. Aus: der Regler darunter.",
 	["Always the deepest stage reached - a claim resets every wall"] = "Immer die tiefste erreichte Stage - ein Kassieren setzt alle Walls zurueck",
 	["Amber x1.5 @5K ... Void x7.5, stacks with the trail"] = "Amber x1.5 @5K ... Void x7.5, stapelt mit dem Trail",
 	["Ammo"] = "Munition",
@@ -434,6 +435,7 @@ return {
 	["DamageMult is the damage engine, so it gets the money first"] = "DamageMult ist der Schadensmotor und bekommt das Geld zuerst",
 	["Dash once"] = "Einmal dashen",
 	["Deadzone (px)"] = "Totzone (px)",
+	["Deepest zone"] = "Tiefste Zone",
 	["Delay (ms)"] = "Verzögerung (ms)",
 	["Delay after kill (ms)"] = "Pause nach Kill (ms)",
 	["Delay max (ms)"] = "Verzögerung max (ms)",
@@ -1181,6 +1183,7 @@ return {
 	["Silent aim"] = "Silent Aim",
 	["Silent aim enabled"] = "Silent Aim aktiv",
 	["Silent shot"] = "Silent Shot",
+	["Since the worlds 5/6 update a claim pays at most your deepest zone - the deepest one your Strength can fell. The script stands on it first."] = "Seit dem Update mit Welt 5/6 zahlt ein Claim höchstens deine tiefste Zone - die tiefste, deren Bäume deine Strength fällt. Das Skript stellt sich vorher dorthin.",
 	["Size (studs)"] = "Größe (Studs)",
 	["Skeleton"] = "Skelett",
 	["Skill budget %"] = "Skill-Budget %",
@@ -1377,7 +1380,7 @@ return {
 	["Unlock islands"] = "Inseln freischalten",
 	["Unlock one now"] = "Jetzt eine öffnen",
 	["Unlock vents"] = "Schächte öffnen",
-	["Unlocks Candyland at level 200. Frost wants 400 and Cyber 600, and the XP curve puts those years away - the panel says so rather than pretending."] = "Schaltet Candyland bei Level 200 frei. Frost will 400 und Cyber 600, und die XP-Kurve legt das Jahre entfernt - das Panel sagt es, statt es zu versprechen.",
+	["Unlocks each world as soon as the level allows: Candyland 200, Frost 400, Cyber 600, Spooky 800, Space 1000. Then travels to the deepest one."] = "Schaltet jede Welt frei, sobald das Level reicht: Candyland 200, Frost 400, Cyber 600, Spooky 800, Space 1000. Reist dann in die tiefste.",
 	["Unlocks the free race slots (rebirth 4, sign-in day 7), spends race rolls on the WORST slot and wears the race with the best Train and Luck. Rolls are never bought: with none left the game would open a Robux prompt."] = "Schaltet die kostenlosen Rassen-Slots frei (Rebirth 4, Anmeldetag 7), würfelt im SCHLECHTESTEN Slot und trägt die Rasse mit dem besten Train und Glück. Würfe werden nie gekauft: ohne Würfe würde das Spiel einen Robux-Kauf öffnen.",
 	["Unstuck"] = "Lösen",
 	["Unstuck movement + camera"] = "Bewegung + Kamera lösen",
