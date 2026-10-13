@@ -16,7 +16,15 @@ local RS         = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 local CS         = game:GetService("CollectionService")
 
+-- The teleport queue starts this before the place has loaded, and then
+-- LocalPlayer is still nil: measured after a replay, the map loop died on its
+-- first attribute read. Wait for both.
+if not game:IsLoaded() then game.Loaded:Wait() end
 local plr = Players.LocalPlayer
+while not plr do
+	task.wait(0.1)
+	plr = Players.LocalPlayer
+end
 
 local LOBBY_PLACE = 77108422251420
 local MAP_PLACES = {
