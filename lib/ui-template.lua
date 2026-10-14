@@ -104,7 +104,8 @@ local UI = {}
 -- 3.18: Redliner's "keep aiming after a shot" slider.
 -- 3.19: phones scale text UP (1.2) and get a compact layout instead of a
 --       shrunken panel; Phantom Forces' auto-rejoin strings.
-UI.VERSION = "3.19"
+-- 3.20: Ball VS Ball's panel strings.
+UI.VERSION = "3.20"
 UI.BRAND = "SELUX"
 UI.DISCORD = "discord.gg/ARdpzFuKMm"
 UI.REPO = "seltonmt012/sel01-rbx"

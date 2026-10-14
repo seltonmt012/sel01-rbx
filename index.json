@@ -34,6 +34,17 @@
       "detect": "local rs = game:GetService('ReplicatedStorage') local n = rs:FindFirstChild('Network') local roll = n and n:FindFirstChild('RollService') return roll ~= nil and n:FindFirstChild('DiceShopService') ~= nil and rs:FindFirstChild('Framework') ~= nil"
     },
     {
+      "alias": "ballvsball",
+      "name": "Ball VS Ball",
+      "file": "games/ballvsball.lua",
+      "places": [
+        96510596525082
+      ],
+      "status": "ok",
+      "note": "Auto-battle PvP at duel tables (3 HP Mode). The fight is ReplicatedStorage.BattleDemo.BattleSimulation, deterministic and identical on the client: every replay re-simulates to the server's winner. The seed of round r is round 1's + (r-1)*1009, so from round 2 on only the opponent's arrow is unknown (a passive player repeats last round's, the aim client remembers it per table). Smart aim plays every candidate direction against the likely opponent arrows and locks the best through the game's own DuelLaunchAimClient session. Ball pick from RF BallBattleStats/GetAll win rates, the free once-per-match collection pick when it beats the offer, upgrade cards simulated. Quick play into seats, online rewards, daily quests, mail, codes, Coins Ball Gacha. State from PlayerData.client.___X",
+      "detect": "local rs = game:GetService('ReplicatedStorage') local d = rs:FindFirstChild('BattleDemo') return d ~= nil and d:FindFirstChild('BattleSimulation') ~= nil and d:FindFirstChild('DuelTableClient') ~= nil"
+    },
+    {
       "alias": "buildzombies",
       "name": "Build and Kill Zombies",
       "file": "games/buildzombies.lua",
