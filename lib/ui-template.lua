@@ -106,7 +106,8 @@ local UI = {}
 --       shrunken panel; Phantom Forces' auto-rejoin strings.
 -- 3.20: Ball VS Ball's panel strings.
 -- 3.21: Karate Evolution's and Stone Skipping's panel strings.
-UI.VERSION = "3.21"
+-- 3.22: Melt the Ice's panel strings (forge, enchants, index hunt).
+UI.VERSION = "3.22"
 UI.BRAND = "SELUX"
 UI.DISCORD = "discord.gg/ARdpzFuKMm"
 UI.REPO = "seltonmt012/sel01-rbx"

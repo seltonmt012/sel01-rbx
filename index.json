@@ -70,6 +70,17 @@
       "detect": "local rs = game:GetService('ReplicatedStorage') local n = rs:FindFirstChild('SkippingNetwork') return n ~= nil and n:FindFirstChild('Request') ~= nil and n:FindFirstChild('Event') ~= nil and rs:FindFirstChild('SkippingBossFight') ~= nil and game.Workspace:FindFirstChild('SkippingWorlds') ~= nil"
     },
     {
+      "alias": "meltice",
+      "name": "+1 Melt the Ice Adventure",
+      "file": "games/meltice.lua",
+      "places": [
+        124569379724368
+      ],
+      "status": "ok",
+      "note": "FREE. The ice is simulated entirely in the client: LootRequest(seg) hands out a segment's loot and LootPickup(seg, cell) checks only that the body is within 25 studs of the cell - not whether the block was melted or could be. 27 power picked up a 1.31M item in world 1 segment 10, and the WorldUnlock part at the end of each field raises maxWorld on touch with the same lack of a check, so a fresh account opens all five worlds in a minute. A run is hop to the deepest segments, pick the best items, ReturnToBase (server teleport + bank), SellAll. Power is SwingCollect(n): 6 swings/s banked up to 2 s, and the server multiplies the whole batch by the training ice the body stands on AT THE CALL, so each run ends with a hop onto the best unlocked ice (rebirth/gamepass gated for real). A rebirth resets only power and doubles the multiplier. Auto world mode: best loot world while a melter or eggs still need cash, then the world of the best ice. Melters, upgrades (capacity first), talents, potions, eggs (hatch from anywhere, ~2 s server cooldown), fuse, EquipBest, auras into empty slots, daily/index/offline claims. FORGE: ForgeTrack(rune) makes SellAll keep the recipe items, ForgeCraft(rune) only next to a ForgeStand (worlds 1-4, 'far' elsewhere); one star of power5 took the forge power mult 1 -> 4.6, all power runes -> 14.8 (the cap). ENCHANTS: EnchantRoll(petUid) only at the world-5 EnchantStand ('stall' elsewhere), each roll replaces; rolled until Strong V or Inferno. INDEX: pet keys are id#tier (+10% power per 5), items +15% cash per 10; the hunt scans all ten segments and hatches every egg",
+      "detect": "local rs = game:GetService('ReplicatedStorage') local s = rs:FindFirstChild('Shared') local l = s and s:FindFirstChild('List') local m = s and s:FindFirstChild('Modules') return l ~= nil and m ~= nil and l:FindFirstChild('Melters') ~= nil and l:FindFirstChild('TrainingCubes') ~= nil and m:FindFirstChild('IceMath') ~= nil"
+    },
+    {
       "alias": "buildzombies",
       "name": "Build and Kill Zombies",
       "file": "games/buildzombies.lua",

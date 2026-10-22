@@ -8,7 +8,7 @@
 -- they are - they keep passing "Auto rebirth" and only this file decides what
 -- the player reads.
 --
--- 2657 entries.
+-- 2659 entries.
 
 return {
 	["$%s   %s/s   slots %d/%d   R%d   endurance %s"] = "%s$   %s/с   слоты %d/%d   R%d   выносливость %s",
@@ -28,6 +28,7 @@ return {
 	["+ kevlar, ! kevlar and helmet, K defuse kit"] = "+ кевлар, ! кевлар со шлемом, K набор сапёра",
 	["+50% money, +1 slot, a case unlock - keeps the guns"] = "+50% денег, +1 слот, открытие кейса - оружие сохраняется",
 	["0 = highest stage of the current world"] = "0 = высший этап текущего мира",
+	["0 = rebirth the moment the level allows it"] = "0 = перерождение, как только позволяет уровень",
 	["0 = the exact aim ray only; above that a ring of six more"] = "0 = только точный луч прицеливания; выше - кольцо ещё из шести",
 	["0 = the exact centre ray only; above that a ring of six more rays"] = "0 = только центральный луч; выше - кольцо из шести лучей",
 	["0 = the highest paying plate in this world"] = "0 = самая прибыльная плита в этом мире",
@@ -826,6 +827,7 @@ return {
 	["Hold"] = "Удержание",
 	["Hold a walled zone (s)"] = "Пауза для непроходимой зоны (с)",
 	["Hold at"] = "Держать на",
+	["Hold for a Master up to (s)"] = "Ждать мастера не дольше (с)",
 	["Hold mode only - for full auto weapons"] = "только в режиме удержания - для автоматического оружия",
 	["Hold mode only - for the full autos"] = "только в режиме удержания - для автоматов",
 	["Hold out for"] = "Копить на",
@@ -833,7 +835,7 @@ return {
 	["Hold still at night"] = "Не двигаться ночью",
 	["Hold time (ms)"] = "Время удержания (мс)",
 	["Hold up to"] = "Держать до",
-	["Holds the rebirth while the next Master is within reach"] = "Откладывает перерождение, пока следующий мастер в пределах досягаемости",
+	["Holds the rebirth only while the next Master falls within the seconds below"] = "Откладывает перерождение, только если следующий мастер падёт в пределах секунд ниже",
 	["Home"] = "Главная",
 	["Hotkey"] = "Горячая клавиша",
 	["House"] = "Дом",

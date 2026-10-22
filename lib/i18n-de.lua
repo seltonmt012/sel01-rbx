@@ -8,7 +8,7 @@
 -- they are - they keep passing "Auto rebirth" and only this file decides what
 -- the player reads.
 --
--- 2657 entries.
+-- 2659 entries.
 
 return {
 	["$%s   %s/s   slots %d/%d   R%d   endurance %s"] = "%s$   %s/s   Plaetze %d/%d   R%d   Ausdauer %s",
@@ -19,6 +19,7 @@ return {
 	["+ kevlar, ! kevlar and helmet, K defuse kit"] = "+ Kevlar, ! Kevlar mit Helm, K Entschärfungsset",
 	["+50% money, +1 slot, a case unlock - keeps the guns"] = "+50% Geld, +1 Slot, eine Kiste freigeschaltet - behaelt die Waffen",
 	["0 = highest stage of the current world"] = "0 = höchste Stage der aktuellen Welt",
+	["0 = rebirth the moment the level allows it"] = "0 = Rebirth, sobald das Level es erlaubt",
 	["0 = the exact aim ray only; above that a ring of six more"] = "0 = nur der exakte Zielstrahl; darüber ein Ring aus sechs weiteren",
 	["0 = the exact centre ray only; above that a ring of six more rays"] = "0 = nur der exakte Mittelstrahl; darüber ein Ring aus sechs weiteren",
 	["0 = the highest paying plate in this world"] = "0 = die bestbezahlte Platte in dieser Welt",
@@ -743,6 +744,7 @@ return {
 	["Hold"] = "Halten",
 	["Hold a walled zone (s)"] = "Gesperrte Zone pausieren (s)",
 	["Hold at"] = "Halten bei",
+	["Hold for a Master up to (s)"] = "Für einen Master höchstens warten (s)",
 	["Hold mode only - for full auto weapons"] = "nur bei Feuerart Halten - für Vollautomatik",
 	["Hold mode only - for the full autos"] = "nur im Halten-Modus - für die Vollautomaten",
 	["Hold out for"] = "Zurückhalten für",
@@ -750,7 +752,7 @@ return {
 	["Hold still at night"] = "Nachts stillhalten",
 	["Hold time (ms)"] = "Haltedauer (ms)",
 	["Hold up to"] = "Halten bis",
-	["Holds the rebirth while the next Master is within reach"] = "Hält den Rebirth zurück, solange der nächste Master in Reichweite ist",
+	["Holds the rebirth only while the next Master falls within the seconds below"] = "Hält den Rebirth nur zurück, wenn der nächste Master innerhalb der Sekunden unten fällt",
 	["Home"] = "Start",
 	["House"] = "Haus",
 	["How far a challenger must beat the weakest placed unit"] = "Wie deutlich ein Herausforderer die schwächste platzierte Einheit schlagen muss",
