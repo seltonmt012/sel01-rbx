@@ -45,6 +45,31 @@
       "detect": "local rs = game:GetService('ReplicatedStorage') local d = rs:FindFirstChild('BattleDemo') return d ~= nil and d:FindFirstChild('BattleSimulation') ~= nil and d:FindFirstChild('DuelTableClient') ~= nil"
     },
     {
+      "alias": "karateevo",
+      "name": "[W4] +1 Karate Evolution",
+      "file": "games/karateevo.lua",
+      "places": [
+        137626413669175,
+        138352221662770,
+        116479409623658,
+        75301713034794
+      ],
+      "status": "ok",
+      "note": "FREE. Strike for Spirit, Spirit wins a tug-of-war duel against the next of 15 Masters, the stage's win pad pays Wins, Wins buy Gis (x2 each), belts and eggs, a rebirth resets ONLY Spirit and Level (Wins, Gis, belt, pets and HighestStageCleared all stay). Vanilla Roblox, every remote named, the whole economy and the game's own maths (Economy, StrikeState, DuelCore, TrainingZone) require-able. StrikeBatch(n) is the engine: max 20 per batch and a ~22/s server bucket whatever the send rate. THE FREE WIN PAD PAYS EVERY TOUCH (12/12) and the pad of the NEXT stage already pays; only the barrier blocks deeper, the server snaps a body back behind it. The pad has a server travel-time window that fits distance / (3.5 x Economy.walkSpeed(rebirths)) - 0.6, the speed trail does not move it, and a touch inside the window pays 0 AND leaves the body on the pad where no new Touched fires - so the farm waits on the dojo (passive Spirit keeps running) with a per-stage learned correction: 50 claims, 2 misses. The dragon fight's hit detection is client side (ArenaHit is the client's own report); Net is an unfrozen module table, so the script swaps Net.fireServer instead of hooking a metamethod. Codes are in GameConfig.Codes. ClaimTimed never answers - every InvokeServer runs behind a wall-clock cap. Never the Paid win pads, PassKey dojos (the VIP one prompts on step), BuyTrailRobux, Purchase, ArenaSkip or the Dev remotes",
+      "detect": "local rs = game:GetService('ReplicatedStorage') local s = rs:FindFirstChild('Shared') local r = rs:FindFirstChild('Remotes') if not s or not r then return false end return s:FindFirstChild('GameConfig') ~= nil and s:FindFirstChild('StrikeState') ~= nil and s:FindFirstChild('DuelCore') ~= nil and r:FindFirstChild('StrikeBatch') ~= nil and r:FindFirstChild('SparChallenge') ~= nil"
+    },
+    {
+      "alias": "stoneskipping",
+      "name": "+1 Stone Skipping",
+      "file": "games/stoneskipping.lua",
+      "places": [
+        111543903102439
+      ],
+      "status": "ok",
+      "note": "FREE. Train on a stand (the server practises by itself; a stand is only entered FRESH - stand to stand starts nothing), throw from the LaunchZone through the controller's own BeginThrow (Request('Throw', id) by hand gets cancelled by the client), wins come from the zone the stone lands in. THE DISTANCE FOLLOWS THE WORLD'S THROW LEVEL, not the level on screen: TotalSkill through World.Throw.Progression (W1 quadratic, W2 1M per level), interpolated over DistanceMilestones - screen level 150 was throw level 1655 and 4,640 studs. Smart mode times throw-now against train-to-the-next-milestone for the next purchase, all in skill, capped at the rebirth (the screen level is capped AT NextRebirthLevel while skill keeps climbing). Rebirth keeps wins and stones. Spend order: a trail under 1 min of throwing, stone (skill multiplier), a trail under 10 min, then the best wins egg (position gated, 'Move closer to the egg') until every worn pet beats its top pet fused to Void. Pet power is PetCatalog.Power (the pass's Trick Bat is best x (1+bonus%), not 1.3). Fusion is free (3 -> Golden x1.5 -> Diamond x2 -> Void x3). Inventory eggs and fusion claims queue a click-to-close reveal that blocks every throw - EggShopController's reveal object is Reset until the queue is empty. Halloween: ClaimHalloweenPass(nil) claims every free tier (candy is not spent; 11 tiers = +250 wins, 65K skill, a pet), FindGhost{World,Index} only next to the ghost (300 candy each). Auras only inside the chamber: AuraOpen(token) moves the body there, then AuraQuest (3 daily quests, a roll each), AuraRoll(slot) (replaces that slot; repeats add stars; everything refused for the 2-4 s reveal) and AuraEquip(slot), AuraClose(token) puts the body back - rolled into empty slots, then over the weakest, never the best. The portal opens with one throw that reaches the last milestone; TravelWorld moves there (W1 -> W2 done by the farm itself). Code HALLOWEEN; the six codes other scripts list are expired. No hooks: bridge spy was never used here.",
+      "detect": "local rs = game:GetService('ReplicatedStorage') local n = rs:FindFirstChild('SkippingNetwork') return n ~= nil and n:FindFirstChild('Request') ~= nil and n:FindFirstChild('Event') ~= nil and rs:FindFirstChild('SkippingBossFight') ~= nil and game.Workspace:FindFirstChild('SkippingWorlds') ~= nil"
+    },
+    {
       "alias": "buildzombies",
       "name": "Build and Kill Zombies",
       "file": "games/buildzombies.lua",
