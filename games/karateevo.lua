@@ -49,6 +49,9 @@
     * Gi (BuyGi, wins, auto-equips), belt (Grade, wins) and the eggs are the
       multipliers.  Rebirth (Rebirth, needs LevelCapped) resets ONLY Spirit,
       Level and XP - Wins, Gis, belt, pets and HighestStageCleared all stay.
+      It is held back only while the next Master is at most holdSeconds away
+      at the measured Spirit rate; the first "within 3x" rule kept a rebirth
+      12 account capped at 70/70 for minutes on end.
     * Eggs: HatchEgg(id, "Single"|"Multi") within 16 studs of the egg ("far"
       otherwise).  PetsEquipBest() equips.  Pet mult = 1 + sum(Power) / 100.
     * Codes sit in GameConfig.Codes.  All five redeemed on the first try.
@@ -117,7 +120,7 @@ local CONFIG = {
     antiAfk      = true,
     strikeGap    = 0.2,    -- seconds between batches
     duelMargin   = 1.3,    -- my push rate must beat the Master's by this
-    holdFactor   = 3,      -- hold the rebirth while spirit >= need / this
+    holdSeconds  = 45,     -- hold the rebirth only for a Master this close
     eggShare     = 0.25,   -- share of wins an egg batch may use
     padWait      = 0.8,    -- how long a touch is given to pay
 }
@@ -131,6 +134,7 @@ local STATE = {
     arenaFights = 0, hitsBlocked = 0, dodges = 0,
     lastPay = 0, home = Vector3.new(0, 4, 0), padAdj = {}, duelPenalty = {},
     saving = 0, startClock = os.clock(), startWins = nil,
+    spiritRate = 0, rebirthNote = "",
     phase = "starting", note = "starting", running = true,
 }
 
@@ -320,22 +324,40 @@ end)
 
 local STRIKE_RATE = 22   -- sustained credited strikes/s, measured 21.7 - 27
 
-local function duelOdds(stage)
+local function duelOdds(stage, mySpirit)
     local spec = GameConfig.Stages[stage]
     if not spec then return 0 end
-    local me, him = spirit(), spec.Spirit or math.huge
+    local me, him = mySpirit or spirit(), spec.Spirit or math.huge
     local mine = STRIKE_RATE * DuelCore.pushPerStrike(me, him)
     local theirs = (GameConfig.Duel.MasterStrikesPerSecond or 8) * DuelCore.pushPerStrike(him, me)
     if theirs <= 0 then return math.huge end
     return mine / theirs
 end
 
+local function duelNeed(stage)
+    return CONFIG.duelMargin + (STATE.duelPenalty[stage] or 0)
+end
+
 local function duelReady()
     local stage = hsc() + 1
     if stage > #GameConfig.Stages then return nil end
-    local need = CONFIG.duelMargin + (STATE.duelPenalty[stage] or 0)
-    if duelOdds(stage) >= need then return stage end
+    if duelOdds(stage) >= duelNeed(stage) then return stage end
     return nil
+end
+
+-- The Spirit at which the next Master falls.  The odds only ever rise with my
+-- Spirit, so a bisection over [0, 4 x his Spirit] finds it in ~40 steps.
+local function spiritToBeat(stage)
+    local spec = GameConfig.Stages[stage]
+    if not spec then return nil end
+    local need = duelNeed(stage)
+    local lo, hi = 0, (spec.Spirit or 0) * 4
+    if duelOdds(stage, hi) < need then return nil end
+    for _ = 1, 40 do
+        local mid = (lo + hi) / 2
+        if duelOdds(stage, mid) >= need then hi = mid else lo = mid end
+    end
+    return hi
 end
 
 local function duel(stage)
@@ -703,19 +725,34 @@ end
 -- rebirth / worlds
 ----------------------------------------------------------------------------
 
-local function shouldHoldRebirth()
-    if not CONFIG.holdRebirth then return false end
+-- Hold the rebirth only while the next Master is SECONDS away, never minutes.
+-- The first rule held whenever my Spirit was a third of what the Master needs,
+-- and measured on rebirth 12 in world 2 that kept the level capped at 70/70 for
+-- two whole minutes in one sample: 90s waiting for master 14, then straight
+-- into another ~3 minutes for master 15 - while a rebirth there only costs
+-- ~20-40s to cap again.  So the wait is now the measured Spirit rate against
+-- the Spirit the duel maths needs, capped by holdSeconds.
+local function holdReason()
+    if not CONFIG.holdRebirth then return nil end
     local stage = hsc() + 1
-    local spec = GameConfig.Stages[stage]
-    if not spec then return false end
-    -- the Master is within reach: finishing it is faster than earning the
-    -- whole spirit back after a reset
-    return spirit() * CONFIG.holdFactor >= (spec.Spirit or math.huge) * 0.7
+    local need = spiritToBeat(stage)
+    if not need then return nil end
+    local have = spirit()
+    if have >= need then return string.format("master %d is beatable now", stage) end
+    local rate = STATE.spiritRate or 0
+    if rate <= 0 then return nil end
+    local eta = (need - have) / rate
+    if eta <= CONFIG.holdSeconds then
+        return string.format("master %d in ~%.0fs", stage, eta)
+    end
+    return nil
 end
 
 local function doRebirth()
-    if attr("LevelCapped", false) ~= true then return false end
-    if shouldHoldRebirth() then return false end
+    if attr("LevelCapped", false) ~= true then STATE.rebirthNote = "" return false end
+    local held = holdReason()
+    if held then STATE.rebirthNote = "held: " .. held return false end
+    STATE.rebirthNote = ""
     local before = rebirths()
     local ok, err = invoke("Rebirth")
     if ok and rebirths() > before then
@@ -934,8 +971,24 @@ task.spawn(function()
     end
 end)
 
+-- Spirit per second over the last ~10s.  A rebirth drops Spirit to 0, so the
+-- window restarts on any fall instead of averaging across the reset.
+local rateSamples = {}
+local function sampleSpiritRate()
+    local now, have = os.clock(), spirit()
+    local last = rateSamples[#rateSamples]
+    if last and have < last[2] then rateSamples = {} end
+    rateSamples[#rateSamples + 1] = { now, have }
+    while #rateSamples > 2 and now - rateSamples[1][1] > 10 do table.remove(rateSamples, 1) end
+    local first = rateSamples[1]
+    if #rateSamples >= 2 and now - first[1] >= 2 then
+        STATE.spiritRate = (have - first[2]) / (now - first[1])
+    end
+end
+
 task.spawn(function()
     while alive() do
+        pcall(sampleSpiritRate)
         pcall(function()
             STATE.spirit, STATE.wins, STATE.rebirths = spirit(), wins(), rebirths()
             STATE.startWins = STATE.startWins or STATE.wins
@@ -1009,7 +1062,10 @@ spend:Toggle("Equip best pets", CONFIG.autoPets, function(v) CONFIG.autoPets = v
 spend:Toggle("Rebirth", CONFIG.autoRebirth, function(v) CONFIG.autoRebirth = v end,
     "Resets only spirit and level. Wins, Gis, belts and stages stay", UI.theme.warn)
 spend:Toggle("Finish a close Master first", CONFIG.holdRebirth, function(v) CONFIG.holdRebirth = v end,
-    "Holds the rebirth while the next Master is within reach")
+    "Holds the rebirth only while the next Master falls within the seconds below")
+spend:Slider("Hold for a Master up to (s)", 0, 300, CONFIG.holdSeconds, function(v)
+    CONFIG.holdSeconds = v
+end, "0 = rebirth the moment the level allows it")
 spend:Slider("Egg budget %", 5, 80, CONFIG.eggShare * 100, function(v)
     CONFIG.eggShare = v / 100
 end)
@@ -1058,12 +1114,13 @@ task.spawn(function()
                 string.format("  stage %d/%d cleared   next master %s   odds x%.2f",
                     STATE.hsc, STATE.stages, nxt and abbreviate(nxt.Spirit) or "-",
                     nxt and duelOdds(STATE.hsc + 1) or 0),
-                string.format("  level %d/%d%s   rebirths %d   dojo #%d (x%d)",
+                string.format("  level %d/%d%s   rebirths %d (+%d)   dojo #%d (x%d)%s",
                     STATE.level, STATE.levelGate, STATE.capped and " capped" or "",
-                    STATE.rebirths, STATE.station, STATE.stationLabel),
-                string.format("  spirit %s   +%s/strike   dojo +%s/s   pets x%.2f",
-                    abbreviate(STATE.spirit), abbreviate(STATE.perStrike),
-                    abbreviate(STATE.passive), STATE.petMult),
+                    STATE.rebirths, STATE.rebirthsDone, STATE.station, STATE.stationLabel,
+                    STATE.rebirthNote ~= "" and ("   " .. STATE.rebirthNote) or ""),
+                string.format("  spirit %s (+%s/s)   +%s/strike   dojo +%s/s   pets x%.2f",
+                    abbreviate(STATE.spirit), abbreviate(STATE.spiritRate),
+                    abbreviate(STATE.perStrike), abbreviate(STATE.passive), STATE.petMult),
                 "WINS",
                 string.format("  pad %d   claims %d   misses %d   earned %s (%s/min)",
                     STATE.padStage, STATE.claims, STATE.misses, abbreviate(STATE.earned),
@@ -1098,6 +1155,7 @@ _G.__KARATEEVO_DBG = {
     bestStation = bestStation, goStation = goStation, freePads = freePads,
     targetPadStage = targetPadStage, padCycle = padCycle, padDelay = padDelay,
     duelOdds = duelOdds, duelReady = duelReady, duel = duel,
+    spiritToBeat = spiritToBeat, holdReason = holdReason,
     nextGi = nextGi, nextBelt = nextBelt, buyUpgrades = buyUpgrades, buyTrails = buyTrails,
     equipBestGi = equipBestGi, pickEgg = pickEgg, hatchEggs = hatchEggs,
     doRebirth = doRebirth, checkWorld = checkWorld, claimRewards = claimRewards,
